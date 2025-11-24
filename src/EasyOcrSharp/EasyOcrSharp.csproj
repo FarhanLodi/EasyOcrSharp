@@ -1,0 +1,38 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<TargetFramework>net9.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<PackageId>EasyOcrSharp</PackageId>
+		<Version>1.0.0</Version>
+		<Authors>Farhan Lodi</Authors>
+		<Description>High-accuracy OCR for .NET powered by EasyOCR (Python), with self-contained runtime using PySharp.</Description>
+		<PackageTags>OCR;EasyOCR;Python;PySharp;TextRecognition;.NET9</PackageTags>
+		<RepositoryUrl>https://github.com/easyocrsharp/EasyOcrSharp</RepositoryUrl>
+		<PackageProjectUrl>https://github.com/easyocrsharp/EasyOcrSharp</PackageProjectUrl>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<PackageIcon>icon.png</PackageIcon>
+		<NeutralLanguage>en-US</NeutralLanguage>
+		<PublishRepositoryUrl>true</PublishRepositoryUrl>
+		<GenerateDocumentationFile>true</GenerateDocumentationFile>
+		<UseWindowsForms>false</UseWindowsForms>
+		<UseWPF>false</UseWPF>
+		<SupportedOSPlatforms>Windows;Linux;macOS</SupportedOSPlatforms>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+		<PackageReference Include="Python.Runtime" Version="2.7.9" />
+		<PackageReference Include="pythonnet" Version="3.0.5" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Include="../../README.md" Pack="true" PackagePath="" />
+		<None Include="../../LICENSE" Pack="true" PackagePath="" />
+		<None Include="Assets/icon.png" Pack="true" PackagePath="icon.png" />
+	</ItemGroup>
+
+</Project>
