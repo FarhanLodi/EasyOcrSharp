@@ -14,6 +14,7 @@ internal static class RuntimeLocator
 
     /// <summary>
     /// Gets the path to the embedded Python runtime from the EasyOcrSharp.Runtime package.
+    /// Attempts to find a version-compatible runtime package first.
     /// </summary>
     /// <returns>The path to the Python runtime directory, or null if not found.</returns>
     internal static string? GetEmbeddedRuntimePath()
@@ -29,16 +30,13 @@ internal static class RuntimeLocator
         
         if (Directory.Exists(packageDir))
         {
-            // Find the version directory (e.g., "1.0.0")
-            var versionDirs = Directory.GetDirectories(packageDir);
-            foreach (var versionDir in versionDirs)
+            var currentVersion = GetCurrentEasyOcrSharpVersion();
+            var runtimePath = FindVersionCompatibleRuntime(packageDir, currentVersion);
+            
+            if (!string.IsNullOrEmpty(runtimePath))
             {
-                var toolsPath = Path.Combine(versionDir, "tools", "python_runtime");
-                if (Directory.Exists(toolsPath) && IsValidPythonRuntime(toolsPath))
-                {
-                    _cachedRuntimePath = Path.GetFullPath(toolsPath);
-                    return _cachedRuntimePath;
-                }
+                _cachedRuntimePath = runtimePath;
+                return _cachedRuntimePath;
             }
         }
 
@@ -68,6 +66,93 @@ internal static class RuntimeLocator
                     break;
                 }
                 currentDir = Directory.GetParent(currentDir)?.FullName;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Gets the current version of the EasyOcrSharp assembly.
+    /// </summary>
+    private static string GetCurrentEasyOcrSharpVersion()
+    {
+        try
+        {
+            var assembly = Assembly.GetExecutingAssembly();
+            var version = assembly.GetName().Version;
+            return version != null ? $"{version.Major}.{version.Minor}.{version.Build}" : "1.0.0";
+        }
+        catch
+        {
+            return "1.0.0"; // Fallback version
+        }
+    }
+
+    /// <summary>
+    /// Finds the best version-compatible runtime from available packages.
+    /// Priority: 1) Exact match, 2) Compatible version (same major.minor), 3) Latest available
+    /// </summary>
+    private static string? FindVersionCompatibleRuntime(string packageDir, string currentVersion)
+    {
+        if (!Directory.Exists(packageDir))
+            return null;
+
+        var versionDirs = Directory.GetDirectories(packageDir)
+            .Select(dir => new { Path = dir, Version = Path.GetFileName(dir) })
+            .Where(item => Version.TryParse(item.Version, out _))
+            .OrderByDescending(item => Version.Parse(item.Version))
+            .ToList();
+
+        if (!versionDirs.Any())
+            return null;
+
+        // Try to find exact version match first
+        var exactMatch = versionDirs.FirstOrDefault(item => 
+            string.Equals(item.Version, currentVersion, StringComparison.OrdinalIgnoreCase));
+        
+        if (exactMatch != null)
+        {
+            var exactPath = Path.Combine(exactMatch.Path, "tools", "python_runtime");
+            if (Directory.Exists(exactPath) && IsValidPythonRuntime(exactPath))
+            {
+                return Path.GetFullPath(exactPath);
+            }
+        }
+
+        // Try to find compatible version (same major.minor, higher patch)
+        if (Version.TryParse(currentVersion, out var currentVer))
+        {
+            var compatibleMatch = versionDirs.FirstOrDefault(item =>
+            {
+                if (Version.TryParse(item.Version, out var itemVer))
+                {
+                    // Same major.minor version, patch can be equal or higher
+                    return itemVer.Major == currentVer.Major && 
+                           itemVer.Minor == currentVer.Minor &&
+                           itemVer.Build >= currentVer.Build;
+                }
+                return false;
+            });
+
+            if (compatibleMatch != null)
+            {
+                var compatiblePath = Path.Combine(compatibleMatch.Path, "tools", "python_runtime");
+                if (Directory.Exists(compatiblePath) && IsValidPythonRuntime(compatiblePath))
+                {
+                    return Path.GetFullPath(compatiblePath);
+                }
+            }
+        }
+
+        // Fallback: use the latest available version
+        var latestMatch = versionDirs.FirstOrDefault();
+        if (latestMatch != null)
+        {
+            var latestPath = Path.Combine(latestMatch.Path, "tools", "python_runtime");
+            if (Directory.Exists(latestPath) && IsValidPythonRuntime(latestPath))
+            {
+                return Path.GetFullPath(latestPath);
             }
         }
 

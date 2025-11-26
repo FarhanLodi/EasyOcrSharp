@@ -1,14 +1,9 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
+﻿using EasyOcrSharp;
+using EasyOcrSharp.Services;
+using Microsoft.Extensions.Logging;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Threading.Tasks;
-using EasyOcrSharp;
-using EasyOcrSharp.Services;
-using Microsoft.Extensions.Logging;
 
 return await RunAsync(args);
 
@@ -35,42 +30,55 @@ static async Task<int> RunAsync(string[] args)
         builder.SetMinimumLevel(LogLevel.Information);
     });
 
-    while (true)
+    var runtimePath = Environment.GetEnvironmentVariable("EASYOCRSHARP_RUNTIME") ?? "D:\\Test-Runtime";
+    EasyOcrService? sharedService = null;
+
+    try
     {
-        Console.WriteLine();
-        Console.WriteLine("=== EasyOcrSharp Demo ===");
-        Console.WriteLine("1) Run OCR on an image");
-        Console.WriteLine("2) Show cache location");
-        Console.WriteLine("3) Clear console");
-        Console.WriteLine("4) Exit");
-        Console.Write("Select an option: ");
-
-        var choice = Console.ReadLine()?.Trim();
-        Console.WriteLine();
-
-        switch (choice)
+        while (true)
         {
-            case "1":
-                await HandleRunImageOcrAsync();
-                break;
-            case "2":
-                DisplayCachePath();
-                break;
-            case "3":
-            case "cls":
-            case "CLS":
-            case "clear":
-            case "CLEAR":
-                Console.Clear();
-                break;
-            case "4":
-            case "q":
-            case "Q":
-                Console.WriteLine("Exiting EasyOcrSharp demo. Goodbye!");
-                return 0;
-            default:
-                Console.WriteLine("Unknown option. Please choose 1-4.");
-                break;
+            Console.WriteLine();
+            Console.WriteLine("=== EasyOcrSharp Demo ===");
+            Console.WriteLine("1) Run OCR on an image");
+            Console.WriteLine("2) Show cache location");
+            Console.WriteLine("3) Clear console");
+            Console.WriteLine("4) Exit");
+            Console.Write("Select an option: ");
+
+            var choice = Console.ReadLine()?.Trim();
+            Console.WriteLine();
+
+            switch (choice)
+            {
+                case "1":
+                    await HandleRunImageOcrAsync();
+                    break;
+                case "2":
+                    DisplayCachePath();
+                    break;
+                case "3":
+                case "cls":
+                case "CLS":
+                case "clear":
+                case "CLEAR":
+                    Console.Clear();
+                    break;
+                case "4":
+                case "q":
+                case "Q":
+                    Console.WriteLine("Exiting EasyOcrSharp demo. Goodbye!");
+                    return 0;
+                default:
+                    Console.WriteLine("Unknown option. Please choose 1-4.");
+                    break;
+            }
+        }
+    }
+    finally
+    {
+        if (sharedService is not null)
+        {
+            await sharedService.DisposeAsync();
         }
     }
 
@@ -127,7 +135,7 @@ static async Task<int> RunAsync(string[] args)
 
         try
         {
-            await using var ocrService = new EasyOcrService("D:\\Package", logger: loggerFactory.CreateLogger<EasyOcrService>());
+            sharedService ??= new EasyOcrService(runtimePath, logger: loggerFactory.CreateLogger<EasyOcrService>());
             Console.WriteLine($"Using languages: {string.Join(", ", languages)}");
             Console.WriteLine("GPU will be automatically detected and used if available.");
             Console.WriteLine("Note: Languages like ch_sim, ch_tra, zh_sim, zh_tra, ja, ko, th will automatically include English.");
@@ -135,7 +143,7 @@ static async Task<int> RunAsync(string[] args)
             Console.WriteLine("⚠️  IMPORTANT: On first use, EasyOCR will download language models which may take several minutes.");
             Console.WriteLine("   Models are cached for future use. Please wait for the download to complete...");
             Console.WriteLine();
-            var result = await ocrService.ExtractTextFromImage(fullPath, languages);
+            var result = await sharedService.ExtractTextFromImage(fullPath, languages);
 
             Console.WriteLine();
             Console.WriteLine("=== JSON Response ===");

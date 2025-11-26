@@ -16,7 +16,7 @@ namespace EasyOcrSharp.Services;
 public sealed class EasyOcrService : IAsyncDisposable, IDisposable
 {
     private readonly ILogger<EasyOcrService>? _logger;
-    private readonly string? _modelCachePath;
+    private readonly string? _customPythonPath;
     private readonly ConcurrentDictionary<string, Lazy<Task<PyObject>>> _readerCache = new(StringComparer.OrdinalIgnoreCase);
     private bool? _gpuAvailable;
 
@@ -25,12 +25,49 @@ public sealed class EasyOcrService : IAsyncDisposable, IDisposable
     /// <summary>
     /// Initializes a new instance of the <see cref="EasyOcrService"/> class.
     /// </summary>
-    /// <param name="modelCachePath">Optional path where language models should be cached. If not provided, uses LocalAppData\EasyOcrSharp\models by default.</param>
     /// <param name="logger">Optional logger instance for diagnostic messages.</param>
-    public EasyOcrService(string? modelCachePath = null, ILogger<EasyOcrService>? logger = null)
+    public EasyOcrService(ILogger<EasyOcrService>? logger = null)
+        : this(customPythonPath: null, logger)
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="EasyOcrService"/> class with a custom Python runtime path.
+    /// </summary>
+    /// <param name="customPythonPath">Optional custom path where Python runtime should be copied and used. If not provided, uses a default writable location. The complete runtime (including EasyOCR) will be copied from the NuGet package to the specified location, then PyTorch components will be added. Language models will also be cached in this same directory structure.</param>
+    /// <param name="logger">Optional logger instance for diagnostic messages.</param>
+    public EasyOcrService(string? customPythonPath = null, ILogger<EasyOcrService>? logger = null)
     {
         _logger = logger;
-        _modelCachePath = string.IsNullOrWhiteSpace(modelCachePath) ? null : Path.GetFullPath(modelCachePath);
+        _customPythonPath = string.IsNullOrWhiteSpace(customPythonPath) ? null : Path.GetFullPath(customPythonPath);
+
+        if (!string.IsNullOrWhiteSpace(_customPythonPath))
+        {
+            _logger?.LogInformation("EasyOcrService configured with custom path: {CustomPythonPath}", _customPythonPath);
+            _logger?.LogInformation("All components will be stored in: Python runtime, PyTorch dependencies, and language models");
+        }
+        else
+        {
+            _logger?.LogInformation("EasyOcrService using default locations - LocalAppData for runtime and models");
+        }
+        
+        _logger?.LogInformation("Runtime package (with EasyOCR) will be copied to writable location, then PyTorch components added on first run.");
+        _logger?.LogInformation("PyTorch installation will be auto-optimized: GPU version if CUDA detected, CPU version otherwise.");
+    }
+
+    /// <summary>
+    /// Gets the model cache path, either from custom Python path or default location.
+    /// </summary>
+    private string? GetModelCachePath()
+    {
+        if (!string.IsNullOrWhiteSpace(_customPythonPath))
+        {
+            // Store models in the same directory structure as Python runtime
+            return Path.Combine(_customPythonPath, "models");
+        }
+        
+        // Use default LocalAppData location when no custom path is specified
+        return null; // Will use default in ModelDownloadManager
     }
 
     /// <summary>
@@ -82,9 +119,20 @@ public sealed class EasyOcrService : IAsyncDisposable, IDisposable
 
         var stopwatch = Stopwatch.StartNew();
 
-        await ModelDownloadManager.EnsureModelsAvailableAsync(resolvedLanguages, _modelCachePath, _logger, cancellationToken).ConfigureAwait(false);
+        var modelCachePath = GetModelCachePath();
+        
+        if (!string.IsNullOrWhiteSpace(modelCachePath))
+        {
+            _logger?.LogInformation("Model cache directory set to: {ModelCachePath}", modelCachePath);
+        }
+        else
+        {
+            _logger?.LogInformation("Using default model cache directory in LocalAppData");
+        }
+        
+        await ModelDownloadManager.EnsureModelsAvailableAsync(resolvedLanguages, modelCachePath, _logger, cancellationToken).ConfigureAwait(false);
 
-        await PythonInitializer.EnsureInitializedAsync(_logger, cancellationToken).ConfigureAwait(false);
+        var timingTracker = await PythonInitializer.EnsureInitializedAsync(_logger, cancellationToken, _customPythonPath).ConfigureAwait(false);
 
         var useGpu = await DetectGpuAvailabilityAsync(cancellationToken).ConfigureAwait(false);
 

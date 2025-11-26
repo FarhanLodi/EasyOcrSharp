@@ -9,6 +9,8 @@
 
 High-accuracy OCR for .NET 9 powered by the [EasyOCR](https://github.com/JaidedAI/EasyOCR) Python library. EasyOcrSharp uses a **two-package architecture** with a pre-bundled Python runtime, so you can ship a single .NET package **without requiring users to install Python or download dependencies at runtime**.
 
+> **First run tip:** The very first launch copies the optimized Python runtime, bootstraps pip, and (optionally) downloads GPU components. Please keep the app open and connected to the internet until this finishes—subsequent runs start instantly and work offline.
+
 ## Architecture
 
 EasyOcrSharp uses a **two-package architecture** for optimal performance and reliability:
