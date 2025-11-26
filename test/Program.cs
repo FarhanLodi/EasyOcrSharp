@@ -135,7 +135,7 @@ static async Task<int> RunAsync(string[] args)
 
         try
         {
-            sharedService ??= new EasyOcrService(runtimePath, logger: loggerFactory.CreateLogger<EasyOcrService>());
+            sharedService ??= new EasyOcrService(logger: loggerFactory.CreateLogger<EasyOcrService>());
             Console.WriteLine($"Using languages: {string.Join(", ", languages)}");
             Console.WriteLine("GPU will be automatically detected and used if available.");
             Console.WriteLine("Note: Languages like ch_sim, ch_tra, zh_sim, zh_tra, ja, ko, th will automatically include English.");
