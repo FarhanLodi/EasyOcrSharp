@@ -469,7 +469,7 @@ Distributed under the MIT License. See [LICENSE](LICENSE) for details.
 - 📦 **NuGet Package**: [EasyOcrSharp on NuGet](https://www.nuget.org/packages/EasyOcrSharp)
 - 🐛 **Issues**: [GitHub Issues](https://github.com/easyocrsharp/EasyOcrSharp/issues)
 - 📖 **Documentation**: See this README and inline XML documentation
-
+- 👉 **[Donate & Support Development](DONATION.md)**  
 ---
 
 <div align="center">
