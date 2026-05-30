@@ -48,6 +48,26 @@ public sealed record RecognitionOptions
     /// </summary>
     public OcrRegion? Region { get; init; }
 
+    /// <summary>
+    /// Image clean-up (deskew, orientation correction, binarize, denoise) applied before OCR.
+    /// Defaults to <see cref="PreprocessingOptions.None"/>.
+    /// </summary>
+    public PreprocessingOptions Preprocessing { get; init; } = PreprocessingOptions.None;
+
+    /// <summary>
+    /// When true, the script/language is detected automatically and the <c>languages</c> argument is
+    /// ignored. Detection samples a few regions across <see cref="AutoDetectCandidates"/> and keeps the
+    /// best-scoring packs. Note: the candidate models are downloaded on first use.
+    /// </summary>
+    public bool AutoDetectLanguage { get; init; }
+
+    /// <summary>
+    /// Candidate language codes considered during <see cref="AutoDetectLanguage"/>. Null uses a
+    /// built-in common set (Latin, Cyrillic, Chinese, Japanese, Korean). Widen it to include heavier
+    /// scripts (e.g. "ar", "hi") when you expect them.
+    /// </summary>
+    public IReadOnlyList<string>? AutoDetectCandidates { get; init; }
+
     /// <summary>The default options (line grouping, full parallelism, contrast retry on).</summary>
     public static RecognitionOptions Default { get; } = new();
 }

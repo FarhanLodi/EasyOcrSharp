@@ -85,9 +85,10 @@ internal static class ModelRegistry
 
     // Language lists mirror EasyOCR's config.py exactly, so every one of EasyOCR's 86 supported
     // languages resolves to the recognizer pack it was trained on.
+    // 'en' is intentionally first so it serves as the pack's representative (e.g. for auto-detect).
     public static readonly RecognizerDefinition Latin = Pack("latin_g2", new[]
     {
-        "af","az","bs","cs","cy","da","de","en","es","et","fr","ga","hr","hu","id","is","it",
+        "en","af","az","bs","cs","cy","da","de","es","et","fr","ga","hr","hu","id","is","it",
         "ku","la","lt","lv","mi","ms","mt","nl","no","oc","pi","pl","pt","ro","rs_latin","sk",
         "sl","sq","sv","sw","tl","tr","uz","vi"
     });

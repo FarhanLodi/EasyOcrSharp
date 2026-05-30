@@ -47,4 +47,16 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
         IEnumerable<string> languages,
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Detects the dominant script(s) of an image and returns representative language codes.</summary>
+    Task<IReadOnlyList<string>> DetectLanguagesAsync(
+        Image<Rgb24> image,
+        IEnumerable<string>? candidates = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Detects the dominant script(s) of an image file and returns representative language codes.</summary>
+    Task<IReadOnlyList<string>> DetectLanguagesAsync(
+        string imagePath,
+        IEnumerable<string>? candidates = null,
+        CancellationToken cancellationToken = default);
 }

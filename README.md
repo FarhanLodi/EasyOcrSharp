@@ -22,7 +22,8 @@ Python interpreter, no PyTorch, no native OCR binaries, and nothing leaves the m
 | 📦 **~3 MB package** | Models download on demand and are cached locally — nothing is bundled |
 | 🔒 **Verified & private** | Every model download is SHA256-checked; OCR runs fully offline |
 | ⚡ **Fast** | Concurrent multi-region recognition; optional CUDA GPU |
-| 🧩 **Flexible** | File / `Stream` / `byte[]` / `Image` input, region-of-interest, word/line/paragraph grouping |
+| 🧩 **Flexible** | File / `Stream` / `byte[]` / `Image` input, region-of-interest, word/line/paragraph grouping, auto language detection |
+| 🩺 **Scan-ready** | Optional deskew, orientation correction, adaptive binarize & denoise |
 | 🛠️ **Modern .NET** | AOT- & single-file-friendly, DI-ready, .NET 10 |
 
 ## Table of contents
@@ -34,6 +35,8 @@ Python interpreter, no PyTorch, no native OCR binaries, and nothing leaves the m
 - [Recognition options](#recognition-options)
 - [Region of interest](#region-of-interest)
 - [Multiple languages](#multiple-languages)
+- [Automatic language detection](#automatic-language-detection)
+- [Scanned-document preprocessing](#scanned-document-preprocessing)
 - [Dependency injection](#dependency-injection)
 - [GPU acceleration](#gpu-acceleration)
 - [Supported languages](#supported-languages)
@@ -156,6 +159,51 @@ var result = await ocr.ExtractTextFromImage("street_sign.png", new[] { "en", "ch
 ```
 
 Each additional script family loads its own model, so request only the scripts you expect.
+
+## Automatic language detection
+
+Don't know the language? Let the engine detect it — pass no codes and set `AutoDetectLanguage`:
+
+```csharp
+var result = await ocr.ExtractTextFromImage("unknown.png", Array.Empty<string>(),
+    new RecognitionOptions { AutoDetectLanguage = true });
+
+// Or just detect, without recognizing:
+IReadOnlyList<string> langs = await ocr.DetectLanguagesAsync("unknown.png");
+```
+
+Detection samples the largest text regions and scores candidate script packs by confidence.
+Candidates default to a common set (Latin, Cyrillic, Chinese, Japanese, Korean); widen them when you
+expect heavier scripts:
+
+```csharp
+var opts = new RecognitionOptions
+{
+    AutoDetectLanguage = true,
+    AutoDetectCandidates = new[] { "en", "ar", "hi", "ch_sim" },
+};
+```
+
+## Scanned-document preprocessing
+
+For photos and scans, enable clean-up via `RecognitionOptions.Preprocessing`:
+
+```csharp
+var opts = new RecognitionOptions
+{
+    Preprocessing = new PreprocessingOptions
+    {
+        Deskew = true,            // straighten small tilt (±15°)
+        DetectOrientation = true, // fix 90°/180°/270° rotation (≈4× cost)
+        Binarize = true,          // adaptive black/white for uneven lighting
+        Denoise = true,           // suppress scanner speckle
+    },
+};
+var result = await ocr.ExtractTextFromImage("scan.jpg", new[] { "en" }, opts);
+```
+
+When `Deskew` or `DetectOrientation` rotate the image, bounding boxes are reported in the corrected
+image's coordinate space.
 
 ## Dependency injection
 

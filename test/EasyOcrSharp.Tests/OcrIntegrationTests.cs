@@ -1,5 +1,8 @@
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Services;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;
@@ -65,5 +68,46 @@ public class OcrIntegrationTests
         Assert.DoesNotContain("Hello", bottom.FullText);
         // Coordinates are translated back to the full image, so y is in the lower half.
         Assert.All(bottom.Lines, l => Assert.True(l.BoundingBox.MinY > 50));
+    }
+
+    [Fact]
+    public async Task Auto_detect_identifies_latin_for_english_sample()
+    {
+        var sample = FindAsset("sample.png");
+        Assert.True(sample is not null, "sample.png asset not found.");
+
+        await using var ocr = new EasyOcrService();
+        var langs = await ocr.DetectLanguagesAsync(sample!);
+
+        Assert.Contains("en", langs); // latin pack's representative
+    }
+
+    [Fact]
+    public async Task Auto_detect_language_option_reads_text_without_explicit_codes()
+    {
+        var sample = FindAsset("sample.png");
+        Assert.True(sample is not null, "sample.png asset not found.");
+
+        await using var ocr = new EasyOcrService();
+        var result = await ocr.ExtractTextFromImage(sample!, Array.Empty<string>(),
+            new RecognitionOptions { AutoDetectLanguage = true });
+
+        Assert.Contains("Hello", result.FullText);
+    }
+
+    [Fact]
+    public async Task Orientation_detection_reads_upside_down_image()
+    {
+        var sample = FindAsset("sample.png");
+        Assert.True(sample is not null, "sample.png asset not found.");
+
+        using var upside = await Image.LoadAsync<Rgb24>(sample!);
+        upside.Mutate(c => c.Rotate(180));
+
+        await using var ocr = new EasyOcrService();
+        var result = await ocr.ExtractTextFromImage(upside, new[] { "en" },
+            new RecognitionOptions { Preprocessing = new PreprocessingOptions { DetectOrientation = true } });
+
+        Assert.Contains("Hello", result.FullText);
     }
 }

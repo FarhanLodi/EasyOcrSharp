@@ -126,6 +126,64 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
             : merged;
     }
 
+    /// <summary>
+    /// Detects which recognizer pack(s) best match the image by sampling the largest text regions and
+    /// scoring each candidate pack by mean recognition confidence. Returns the representative language
+    /// code of each winning pack (the dominant script, plus any co-dominant one).
+    /// </summary>
+    public async Task<IReadOnlyList<string>> DetectLanguagesAsync(
+        Image<Rgb24> image,
+        IReadOnlyList<string> candidateLanguages,
+        CancellationToken cancellationToken)
+    {
+        var detector = await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
+        var grouped = TextBoxGrouper.Group(detector.Detect(image), image.Width, image.Height);
+        if (grouped.Count == 0) return Array.Empty<string>();
+
+        // Sample the largest few regions — they're the most reliable for scoring a script.
+        var samples = grouped
+            .OrderByDescending(PolygonArea)
+            .Take(5)
+            .ToList();
+
+        // Distinct packs from the candidate language codes.
+        var packs = new Dictionary<string, RecognizerDefinition>(StringComparer.OrdinalIgnoreCase);
+        foreach (var lang in candidateLanguages)
+        {
+            var def = ModelRegistry.FindByLanguage(lang);
+            if (def is not null) packs[def.Name] = def;
+        }
+        if (packs.Count == 0) return Array.Empty<string>();
+
+        var scored = new List<(RecognizerDefinition Def, double Score)>(packs.Count);
+        foreach (var def in packs.Values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var recognizer = await GetOrLoadRecognizerAsync(def, cancellationToken).ConfigureAwait(false);
+            var lines = recognizer.Recognize(image, samples, maxDegreeOfParallelism: 1, adjustContrast: false);
+            var confs = lines.Where(l => !string.IsNullOrWhiteSpace(l.Text)).Select(l => l.Confidence).ToList();
+            double score = confs.Count > 0 ? confs.Average() : 0;
+            _logger?.LogInformation("Auto-detect: pack '{Pack}' scored {Score:F3}", def.Name, score);
+            scored.Add((def, score));
+        }
+
+        scored.Sort((a, b) => b.Score.CompareTo(a.Score));
+        double best = scored[0].Score;
+        if (best <= 0) return Array.Empty<string>();
+
+        // Keep the winner plus any co-dominant pack (helps bilingual pages).
+        return scored
+            .Where(s => s.Score >= Math.Max(0.35, 0.85 * best))
+            .Select(s => s.Def.Languages[0])
+            .ToList();
+    }
+
+    private static double PolygonArea(OcrPoint[] poly)
+    {
+        var box = OcrBoundingBox.FromPoints(poly);
+        return box.Width * box.Height;
+    }
+
     private async Task<CraftDetector> GetOrLoadDetectorAsync(CancellationToken cancellationToken)
     {
         if (_detector is not null) return _detector;

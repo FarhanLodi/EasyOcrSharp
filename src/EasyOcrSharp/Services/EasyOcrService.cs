@@ -15,6 +15,9 @@ namespace EasyOcrSharp.Services;
 /// </summary>
 public sealed class EasyOcrService : IEasyOcrService
 {
+    /// <summary>Default candidate scripts considered by auto language detection.</summary>
+    private static readonly string[] DefaultAutoDetectCandidates = { "en", "ru", "ch_sim", "ja", "ko" };
+
     private readonly ILogger<EasyOcrService>? _logger;
     private readonly OnnxEasyOcrEngine _engine;
     private readonly bool _useGpu;
@@ -61,10 +64,9 @@ public sealed class EasyOcrService : IEasyOcrService
         if (!File.Exists(fullPath))
             throw new FileNotFoundException($"The image file '{fullPath}' could not be found.", fullPath);
 
-        var resolved = ResolveLanguages(languages);
         cancellationToken.ThrowIfCancellationRequested();
         using var image = await Image.LoadAsync<Rgb24>(fullPath, cancellationToken).ConfigureAwait(false);
-        return await RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+        return await RunPipelineAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -76,10 +78,8 @@ public sealed class EasyOcrService : IEasyOcrService
     {
         EnsureNotDisposed();
         ArgumentNullException.ThrowIfNull(imageStream);
-
-        var resolved = ResolveLanguages(languages);
         using var image = await Image.LoadAsync<Rgb24>(imageStream, cancellationToken).ConfigureAwait(false);
-        return await RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+        return await RunPipelineAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -104,10 +104,9 @@ public sealed class EasyOcrService : IEasyOcrService
         if (imageBytes.IsEmpty)
             throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
 
-        var resolved = ResolveLanguages(languages);
         cancellationToken.ThrowIfCancellationRequested();
         using var image = Image.Load<Rgb24>(imageBytes.Span);
-        return await RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+        return await RunPipelineAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -119,59 +118,158 @@ public sealed class EasyOcrService : IEasyOcrService
     {
         EnsureNotDisposed();
         ArgumentNullException.ThrowIfNull(image);
-        var resolved = ResolveLanguages(languages);
-        // Caller owns the image — do not dispose it here.
-        return RecognizeAsync(image, resolved, options, cancellationToken);
+        // Caller owns the image — RunPipelineAsync never disposes the original.
+        return RunPipelineAsync(image, languages, options, cancellationToken);
     }
 
-    private async Task<OcrResult> RecognizeAsync(
+    /// <summary>
+    /// Detects the dominant script(s) of an image and returns representative language codes
+    /// (e.g. "en", "ru", "ja"). Candidate scripts default to a common set; widen with
+    /// <paramref name="candidates"/> to consider heavier scripts (e.g. "ar", "hi").
+    /// </summary>
+    public async Task<IReadOnlyList<string>> DetectLanguagesAsync(
         Image<Rgb24> image,
-        string[] resolved,
+        IEnumerable<string>? candidates = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        ArgumentNullException.ThrowIfNull(image);
+        var cand = (candidates?.ToArray() is { Length: > 0 } c) ? c : DefaultAutoDetectCandidates;
+        return await _engine.DetectLanguagesAsync(image, cand, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Detects the dominant script(s) of an image file.</summary>
+    public async Task<IReadOnlyList<string>> DetectLanguagesAsync(
+        string imagePath,
+        IEnumerable<string>? candidates = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var image = await Image.LoadAsync<Rgb24>(Path.GetFullPath(imagePath), cancellationToken).ConfigureAwait(false);
+        return await DetectLanguagesAsync(image, candidates, cancellationToken).ConfigureAwait(false);
+    }
+
+    // ---- pipeline ----
+
+    private async Task<OcrResult> RunPipelineAsync(
+        Image<Rgb24> image,
+        IEnumerable<string> languages,
         RecognitionOptions? options,
         CancellationToken cancellationToken)
     {
         options ??= RecognitionOptions.Default;
-
         var sw = Stopwatch.StartNew();
 
-        IReadOnlyList<OcrLine> lines;
-        if (options.Region is { } region)
+        (IReadOnlyList<OcrLine> Lines, string[] Languages) outcome;
+
+        if (options.Preprocessing.DetectOrientation)
         {
-            // Crop to the region of interest, OCR the crop, then translate boxes back to
-            // original-image coordinates so callers always get whole-image positions.
-            var (rx, ry, rw, rh) = region.Resolve(image.Width, image.Height);
-            if (rw < 2 || rh < 2)
-            {
-                lines = Array.Empty<OcrLine>();
-            }
-            else
-            {
-                using var roi = image.Clone(ctx => ctx.Crop(new Rectangle(rx, ry, rw, rh)));
-                var roiLines = await _engine.RecognizeAsync(roi, resolved, options, cancellationToken).ConfigureAwait(false);
-                lines = TranslateLines(roiLines, rx, ry);
-            }
+            outcome = await RecognizeBestOrientationAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
         }
         else
         {
-            lines = await _engine.RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+            outcome = await CoreAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
         }
 
-        var ordered = SortLinesByReadingOrder(lines);
+        var ordered = SortLinesByReadingOrder(outcome.Lines);
         sw.Stop();
-
         _logger?.LogInformation("OCR completed: {Count} lines in {Ms:F0} ms", ordered.Count, sw.Elapsed.TotalMilliseconds);
 
         return new OcrResult
         {
             FullText = BuildFullText(ordered),
             Lines = ordered,
-            Languages = resolved,
+            Languages = outcome.Languages,
             Duration = sw.Elapsed,
             UsedGpu = _useGpu,
         };
     }
 
-    private static string[] ResolveLanguages(IEnumerable<string> languages)
+    /// <summary>Runs OCR at 0/90/180/270° and keeps the orientation with the strongest result.</summary>
+    private async Task<(IReadOnlyList<OcrLine>, string[])> RecognizeBestOrientationAsync(
+        Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
+    {
+        var langsList = languages.ToArray();
+        var noOrient = options with { Preprocessing = options.Preprocessing with { DetectOrientation = false } };
+
+        (IReadOnlyList<OcrLine> Lines, string[] Langs)? best = null;
+        double bestScore = double.NegativeInfinity;
+
+        foreach (var degrees in new[] { 0, 90, 180, 270 })
+        {
+            ct.ThrowIfCancellationRequested();
+            Image<Rgb24>? rotated = degrees == 0 ? null : ImagePreprocessor.RotateRightAngle(image, degrees);
+            try
+            {
+                var (lines, langs) = await CoreAsync(rotated ?? image, langsList, noOrient, ct).ConfigureAwait(false);
+                double score = lines.Where(l => !string.IsNullOrWhiteSpace(l.Text)).Sum(l => l.Confidence * l.Text.Length);
+                _logger?.LogInformation("Orientation {Deg}° scored {Score:F1}", degrees, score);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    best = (lines, langs);
+                }
+            }
+            finally
+            {
+                rotated?.Dispose();
+            }
+        }
+
+        return best ?? (Array.Empty<OcrLine>(), langsList);
+    }
+
+    /// <summary>Preprocess → resolve/auto-detect languages → region crop → recognize.</summary>
+    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages)> CoreAsync(
+        Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
+    {
+        // Denoise / deskew / binarize into a working image (orientation handled by the caller).
+        bool needsPreprocess = options.Preprocessing.Denoise || options.Preprocessing.Deskew || options.Preprocessing.Binarize;
+        Image<Rgb24> working = needsPreprocess ? ImagePreprocessor.Apply(image, options.Preprocessing) : image;
+        try
+        {
+            string[] langs;
+            if (options.AutoDetectLanguage)
+            {
+                var candidates = (options.AutoDetectCandidates?.ToArray() is { Length: > 0 } c) ? c : DefaultAutoDetectCandidates;
+                var detected = await _engine.DetectLanguagesAsync(working, candidates, ct).ConfigureAwait(false);
+                langs = detected.Count > 0 ? detected.ToArray() : ResolveLanguages(languages, allowEmpty: true);
+                if (langs.Length == 0) langs = new[] { "en" };
+                _logger?.LogInformation("Auto-detected languages: {Langs}", string.Join(", ", langs));
+            }
+            else
+            {
+                langs = ResolveLanguages(languages, allowEmpty: false);
+            }
+
+            var lines = await RecognizeRegionsAsync(working, langs, options, ct).ConfigureAwait(false);
+            return (lines, langs);
+        }
+        finally
+        {
+            if (needsPreprocess) working.Dispose();
+        }
+    }
+
+    /// <summary>Applies the optional region-of-interest crop and translates boxes back to image coordinates.</summary>
+    private async Task<IReadOnlyList<OcrLine>> RecognizeRegionsAsync(
+        Image<Rgb24> image, string[] langs, RecognitionOptions options, CancellationToken ct)
+    {
+        if (options.Region is not { } region)
+        {
+            return await _engine.RecognizeAsync(image, langs, options, ct).ConfigureAwait(false);
+        }
+
+        var (rx, ry, rw, rh) = region.Resolve(image.Width, image.Height);
+        if (rw < 2 || rh < 2) return Array.Empty<OcrLine>();
+
+        using var roi = image.Clone(ctx => ctx.Crop(new Rectangle(rx, ry, rw, rh)));
+        var roiLines = await _engine.RecognizeAsync(roi, langs, options, ct).ConfigureAwait(false);
+        return TranslateLines(roiLines, rx, ry);
+    }
+
+    // ---- helpers ----
+
+    private static string[] ResolveLanguages(IEnumerable<string> languages, bool allowEmpty)
     {
         ArgumentNullException.ThrowIfNull(languages);
         var arr = languages
@@ -180,13 +278,12 @@ public sealed class EasyOcrService : IEasyOcrService
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-        if (arr.Length == 0)
+        if (arr.Length == 0 && !allowEmpty)
             throw new ArgumentException("At least one valid language must be specified.", nameof(languages));
 
         return arr;
     }
 
-    /// <summary>Offsets recognized lines from region-of-interest coordinates back to original-image coordinates.</summary>
     private static IReadOnlyList<OcrLine> TranslateLines(IReadOnlyList<OcrLine> lines, int dx, int dy)
     {
         if (dx == 0 && dy == 0) return lines;

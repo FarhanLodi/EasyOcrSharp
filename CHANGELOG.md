@@ -2,6 +2,21 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## 2.1.1
+
+### Added
+- **Scanned-document preprocessing** via `RecognitionOptions.Preprocessing`
+  (`PreprocessingOptions`):
+  - `Deskew` — auto-correct small skew angles (±15°) using a projection-profile estimate.
+  - `DetectOrientation` — detect & correct 90°/180°/270° page rotation by scoring OCR at all four
+    orientations.
+  - `Binarize` — adaptive (local) thresholding for uneven lighting / faint print.
+  - `Denoise` — light blur to suppress scanner speckle.
+- **Automatic language detection** — set `RecognitionOptions.AutoDetectLanguage = true` (no language
+  codes needed), or call `DetectLanguagesAsync(...)` directly. Samples the largest regions, scores
+  candidate script packs by confidence, and uses the winner(s). Candidates default to a common set
+  and are configurable via `AutoDetectCandidates`.
+
 ## 2.1.0
 
 Feature release. Faster, more flexible, and DI-friendly — no breaking changes to the

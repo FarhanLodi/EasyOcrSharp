@@ -7,8 +7,8 @@
 		<LangVersion>latest</LangVersion>
 		<IsAotCompatible>true</IsAotCompatible>
 		<PackageId>EasyOcrSharp</PackageId>
-		<Version>2.1.0</Version>
-		<PackageReleaseNotes>Concurrent recognition, perspective de-warp, word/line/paragraph grouping, byte[]/Image input overloads, DI (AddEasyOcrSharp), +4 languages (ta/te/kn/ch_tra). See CHANGELOG.md.</PackageReleaseNotes>
+		<Version>2.1.1</Version>
+		<PackageReleaseNotes>Scanned-doc preprocessing (deskew, orientation, binarize, denoise), automatic language detection, full 86-language coverage, region-of-interest, concurrent recognition, perspective de-warp, paragraph grouping, byte[]/Image overloads, DI. See CHANGELOG.md.</PackageReleaseNotes>
 		<Authors>Farhan Lodi</Authors>
 		<Description>High-accuracy native .NET OCR powered by EasyOCR's neural models running on ONNX Runtime. No Python required.</Description>
 		<PackageTags>OCR;EasyOCR;ONNX;TextRecognition;CRAFT;CRNN;.NET10;AOT</PackageTags>
