@@ -155,15 +155,19 @@ internal sealed class CrnnRecognizer : IDisposable
 
             if (argmax != 0)
             {
-                // EasyOCR's custom_mean uses every timestep whose argmax is non-blank.
-                logProbSum += Math.Log(prob);
-                probCount++;
-
-                // CTC collapse: emit only when the class changes from the previous step.
-                if (argmax != lastIdx)
+                int charIdx = argmax - 1;
+                // Vocab positions exported as U+0000 are EasyOCR's word-segmentation separators
+                // (ignore_idx); skip them entirely — they're neither emitted nor counted, matching
+                // EasyOCR's decoder which filters them out of the text.
+                bool isSeparator = charIdx >= 0 && charIdx < _characters.Length && _characters[charIdx] == '\0';
+                if (!isSeparator)
                 {
-                    int charIdx = argmax - 1;
-                    if (charIdx >= 0 && charIdx < _characters.Length)
+                    // EasyOCR's custom_mean uses every timestep whose argmax is a real character.
+                    logProbSum += Math.Log(prob);
+                    probCount++;
+
+                    // CTC collapse: emit only when the class changes from the previous step.
+                    if (argmax != lastIdx && charIdx >= 0 && charIdx < _characters.Length)
                         sb.Append(_characters[charIdx]);
                 }
             }
