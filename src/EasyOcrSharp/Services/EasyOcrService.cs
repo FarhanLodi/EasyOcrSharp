@@ -151,12 +151,14 @@ public sealed class EasyOcrService : IAsyncDisposable, IDisposable
         return sb.ToString();
     }
 
+    /// <summary>Releases the underlying ONNX sessions. Prefer <see cref="DisposeAsync"/>.</summary>
     public void Dispose()
     {
         DisposeAsync().AsTask().GetAwaiter().GetResult();
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>Asynchronously releases the underlying ONNX detector and recognizer sessions.</summary>
     public async ValueTask DisposeAsync()
     {
         if (_disposed) return;
