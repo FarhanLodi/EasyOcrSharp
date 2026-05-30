@@ -1,19 +1,15 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 17
-VisualStudioVersion = 17.0.31903.59
+# Visual Studio Version 18
+VisualStudioVersion = 18.6.11822.322 stable
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EasyOcrSharp", "src\EasyOcrSharp\EasyOcrSharp.csproj", "{C57BB664-245F-47BB-8316-6463EB46D815}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EasyOcrSharp.Gpu", "src\EasyOcrSharp.Gpu\EasyOcrSharp.Gpu.csproj", "{B2C3D4E5-F6A7-4B5C-9D8E-1F2A3B4C5D6E}"
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test", "test", "{0C88DD14-F956-CE84-757C-A364CCF449FC}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EasyOcrSharp.Tests", "test\EasyOcrSharp.Tests\EasyOcrSharp.Tests.csproj", "{10702F38-76A4-4AEE-B84D-D25AB274A83A}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "EasyOcrSharp.Demo", "test\EasyOcrSharp.Demo\EasyOcrSharp.Demo.csproj", "{B3F44FCD-484C-4901-BDBC-1E63898664F4}"
-EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -76,9 +72,5 @@ Global
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
-	EndGlobalSection
-	GlobalSection(NestedProjects) = preSolution
-		{10702F38-76A4-4AEE-B84D-D25AB274A83A} = {0C88DD14-F956-CE84-757C-A364CCF449FC}
-		{B3F44FCD-484C-4901-BDBC-1E63898664F4} = {0C88DD14-F956-CE84-757C-A364CCF449FC}
 	EndGlobalSection
 EndGlobal
