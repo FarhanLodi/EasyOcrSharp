@@ -269,7 +269,6 @@ dotnet run --project test/EasyOcrSharp.Demo
 | `test/EasyOcrSharp.Tests` | xUnit unit + integration tests |
 | `test/EasyOcrSharp.Demo` | interactive console demo |
 | `test/assets` | sample images |
-| `tools` | maintainer ONNX export/validation scripts ([details](tools/README.md)) |
 
 CI (GitHub Actions) builds and runs the unit tests on Linux and Windows for every push and PR.
 See [CHANGELOG.md](CHANGELOG.md) for release history.

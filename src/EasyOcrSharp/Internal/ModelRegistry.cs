@@ -36,7 +36,7 @@ internal static class ModelRegistry
     /// <summary>
     /// SHA256 checksums (upper-case hex) of every published asset, verified after download by
     /// <see cref="ModelDownloadManager"/>. Generated from the exact files uploaded to the model repo;
-    /// regenerate whenever the models are re-exported (see tools/export_onnx.py).
+    /// regenerate whenever the models are re-exported.
     /// </summary>
     private static readonly FrozenDictionary<string, string> Checksums = new Dictionary<string, string>
     {
