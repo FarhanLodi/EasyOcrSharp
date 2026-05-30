@@ -41,6 +41,13 @@ public sealed record RecognitionOptions
     /// </summary>
     public double MinConfidence { get; init; }
 
+    /// <summary>
+    /// Restrict OCR to a rectangular sub-region of the image (e.g. only the bottom banner of a sign).
+    /// When set, detection and recognition run only inside this region, which is also faster.
+    /// Recognized bounding boxes are reported in the original image's coordinates. Null = whole image.
+    /// </summary>
+    public OcrRegion? Region { get; init; }
+
     /// <summary>The default options (line grouping, full parallelism, contrast retry on).</summary>
     public static RecognitionOptions Default { get; } = new();
 }

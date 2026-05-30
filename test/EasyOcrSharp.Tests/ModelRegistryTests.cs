@@ -28,6 +28,26 @@ public class ModelRegistryTests
     }
 
     [Theory]
+    [InlineData("sw", "latin_g2")]    // Swahili
+    [InlineData("tjk", "cyrillic_g2")] // Tajik (cyrillic)
+    [InlineData("mni", "bengali_g2")]  // Meitei
+    [InlineData("gom", "devanagari_g2")] // Konkani
+    [InlineData("ug", "arabic_g2")]    // Uyghur
+    public void FindByLanguage_covers_full_easyocr_language_set(string lang, string expectedPack)
+    {
+        var def = ModelRegistry.FindByLanguage(lang);
+        Assert.NotNull(def);
+        Assert.Equal(expectedPack, def!.Name);
+    }
+
+    [Fact]
+    public void Registry_covers_at_least_80_languages()
+    {
+        var total = ModelRegistry.All.SelectMany(p => p.Languages).Distinct().Count();
+        Assert.True(total >= 80, $"expected >=80 languages, got {total}");
+    }
+
+    [Theory]
     [InlineData("EN")]
     [InlineData("Fr")]
     public void FindByLanguage_is_case_insensitive(string lang)

@@ -5,6 +5,7 @@ using EasyOcrSharp.Models;
 using Microsoft.Extensions.Logging;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 namespace EasyOcrSharp.Services;
 
@@ -132,7 +133,29 @@ public sealed class EasyOcrService : IEasyOcrService
         options ??= RecognitionOptions.Default;
 
         var sw = Stopwatch.StartNew();
-        var lines = await _engine.RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+
+        IReadOnlyList<OcrLine> lines;
+        if (options.Region is { } region)
+        {
+            // Crop to the region of interest, OCR the crop, then translate boxes back to
+            // original-image coordinates so callers always get whole-image positions.
+            var (rx, ry, rw, rh) = region.Resolve(image.Width, image.Height);
+            if (rw < 2 || rh < 2)
+            {
+                lines = Array.Empty<OcrLine>();
+            }
+            else
+            {
+                using var roi = image.Clone(ctx => ctx.Crop(new Rectangle(rx, ry, rw, rh)));
+                var roiLines = await _engine.RecognizeAsync(roi, resolved, options, cancellationToken).ConfigureAwait(false);
+                lines = TranslateLines(roiLines, rx, ry);
+            }
+        }
+        else
+        {
+            lines = await _engine.RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+        }
+
         var ordered = SortLinesByReadingOrder(lines);
         sw.Stop();
 
@@ -161,6 +184,24 @@ public sealed class EasyOcrService : IEasyOcrService
             throw new ArgumentException("At least one valid language must be specified.", nameof(languages));
 
         return arr;
+    }
+
+    /// <summary>Offsets recognized lines from region-of-interest coordinates back to original-image coordinates.</summary>
+    private static IReadOnlyList<OcrLine> TranslateLines(IReadOnlyList<OcrLine> lines, int dx, int dy)
+    {
+        if (dx == 0 && dy == 0) return lines;
+        var translated = new List<OcrLine>(lines.Count);
+        foreach (var line in lines)
+        {
+            var poly = line.BoundingPolygon.Select(p => new OcrPoint(p.X + dx, p.Y + dy)).ToArray();
+            var box = line.BoundingBox;
+            translated.Add(line with
+            {
+                BoundingPolygon = poly,
+                BoundingBox = new OcrBoundingBox(box.MinX + dx, box.MinY + dy, box.MaxX + dx, box.MaxY + dy),
+            });
+        }
+        return translated;
     }
 
     private static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines)

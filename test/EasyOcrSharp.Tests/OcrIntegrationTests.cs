@@ -48,4 +48,22 @@ public class OcrIntegrationTests
 
         Assert.True(byWord.Lines.Count >= byLine.Lines.Count);
     }
+
+    [Fact]
+    public async Task Region_of_interest_restricts_ocr_and_reports_original_coordinates()
+    {
+        var sample = FindAsset("sample.png");
+        Assert.True(sample is not null, "sample.png asset not found.");
+
+        await using var ocr = new EasyOcrService();
+
+        // sample.png has "Hello World" in the top half and "EasyOcrSharp 2024" in the bottom half.
+        var bottom = await ocr.ExtractTextFromImage(sample!, new[] { "en" },
+            new RecognitionOptions { Region = OcrRegion.Fraction(0, 0.5, 1, 0.5) });
+
+        Assert.Contains("EasyOcrSharp", bottom.FullText);
+        Assert.DoesNotContain("Hello", bottom.FullText);
+        // Coordinates are translated back to the full image, so y is in the lower half.
+        Assert.All(bottom.Lines, l => Assert.True(l.BoundingBox.MinY > 50));
+    }
 }

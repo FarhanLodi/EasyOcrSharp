@@ -83,31 +83,33 @@ internal static class ModelRegistry
         Vocab: Asset($"{name}.vocab.json"),
         Languages: languages);
 
+    // Language lists mirror EasyOCR's config.py exactly, so every one of EasyOCR's 86 supported
+    // languages resolves to the recognizer pack it was trained on.
     public static readonly RecognizerDefinition Latin = Pack("latin_g2", new[]
     {
-        "en","es","fr","de","it","pt","nl","pl","cs","sv","hu","fi","ro","no","da","hr",
-        "sk","sl","sr_latn","sq","et","lv","lt","is","ga","mt","af","id","ms","tl","vi",
-        "tr","ca","eu","gl","ku","la","cy","mi","oc","rs_latin"
+        "af","az","bs","cs","cy","da","de","en","es","et","fr","ga","hr","hu","id","is","it",
+        "ku","la","lt","lv","mi","ms","mt","nl","no","oc","pi","pl","pt","ro","rs_latin","sk",
+        "sl","sq","sv","sw","tl","tr","uz","vi"
     });
 
     public static readonly RecognizerDefinition Cyrillic = Pack("cyrillic_g2", new[]
     {
-        "ru","sr","kk","az","uz","ky","mn","be","uk","bg","mk","tg","ab"
+        "ru","rs_cyrillic","be","bg","uk","mn","abq","ady","kbd","ava","dar","inh","che","lbe","lez","tab","tjk"
     });
 
     public static readonly RecognizerDefinition Arabic = Pack("arabic_g2", new[]
     {
-        "ar","fa","ur","ug","ps"
+        "ar","fa","ug","ur"
     });
 
     public static readonly RecognizerDefinition Devanagari = Pack("devanagari_g2", new[]
     {
-        "hi","mr","ne","sa"
+        "hi","mr","ne","bh","mai","ang","bho","mah","sck","new","gom","sa","bgc"
     });
 
     public static readonly RecognizerDefinition Bengali = Pack("bengali_g2", new[]
     {
-        "bn","as"
+        "bn","as","mni"
     });
 
     public static readonly RecognizerDefinition Chinese = Pack("zh_sim_g2", new[]

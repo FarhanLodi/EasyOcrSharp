@@ -18,6 +18,8 @@ core `ExtractTextFromImage(path, languages)` call.
   - `MinConfidence` — drop low-confidence lines.
   - `AdjustContrast` — toggle the low-confidence contrast-retry pass.
   - `MaxDegreeOfParallelism`.
+  - `Region` — restrict OCR to a rectangular sub-region (`OcrRegion.Pixels(...)` or
+    `OcrRegion.Fraction(...)`); boxes are reported in original-image coordinates.
 - **Perspective de-warping.** Rotated/slanted text boxes are rectified with a homography
   (port of EasyOCR's `four_point_transform`) instead of an axis-aligned crop. Axis-aligned
   boxes keep the previous fast path, so horizontal text is unchanged.
@@ -25,6 +27,9 @@ core `ExtractTextFromImage(path, languages)` call.
 - **Dependency-injection support:** `services.AddEasyOcrSharp(...)` registers
   `IEasyOcrService` as a singleton.
 - **More languages:** Tamil (`ta`), Telugu (`te`), Kannada (`kn`), Traditional Chinese (`ch_tra`).
+- **Full language coverage:** the registry's per-pack language lists now mirror EasyOCR's exactly,
+  so all **86** EasyOCR-supported languages resolve to a recognizer (Greek and Hebrew remain
+  unavailable — upstream has no model for them).
 - **SHA256 verification** of every model download (added in 2.0.x, now covering all packs).
 - **Automated test suite** (xUnit) and **GitHub Actions CI** (build + unit tests on Linux & Windows).
 
