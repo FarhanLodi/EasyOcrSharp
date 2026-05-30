@@ -54,3 +54,18 @@ TestResult.xml
 nunit-*.xml
 /.vs
 /Project/src/.vs
+
+# Model files and downloaded assets
+onnx_models/
+
+# Local tooling
+tools/
+
+# Python virtual environment
+.venv/
+
+# Visual Studio
+.vs/
+
+# Claude Code
+.claude/

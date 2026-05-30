@@ -1,17 +1,18 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
-		<TargetFramework>net9.0</TargetFramework>
+		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
+		<IsAotCompatible>true</IsAotCompatible>
 		<PackageId>EasyOcrSharp</PackageId>
-		<Version>1.0.2</Version>
+		<Version>2.0.0</Version>
 		<Authors>Farhan Lodi</Authors>
-		<Description>High-accuracy OCR for .NET powered by EasyOCR (Python), with minimal runtime that downloads pip and PyTorch components automatically for reduced package size while keeping EasyOCR pre-bundled for fast startup.</Description>
-		<PackageTags>OCR;EasyOCR;Python;PySharp;TextRecognition;.NET9</PackageTags>
-		<RepositoryUrl>https://github.com/FarhanLodi/EasyOcrSharp</RepositoryUrl>
-		<PackageProjectUrl>https://github.com/FarhanLodi/EasyOcrSharp</PackageProjectUrl>
+		<Description>High-accuracy native .NET OCR powered by EasyOCR's neural models running on ONNX Runtime. No Python required.</Description>
+		<PackageTags>OCR;EasyOCR;ONNX;TextRecognition;CRAFT;CRNN;.NET10;AOT</PackageTags>
+		<RepositoryUrl>https://github.com/easyocrsharp/EasyOcrSharp</RepositoryUrl>
+		<PackageProjectUrl>https://github.com/easyocrsharp/EasyOcrSharp</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageIcon>icon.png</PackageIcon>
@@ -24,12 +25,9 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="EasyOcrSharp.Runtime" Version="1.0.1" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
-		<PackageReference Include="Python.Included" Version="3.11.6" />
-		<PackageReference Include="Python.Runtime" Version="2.7.9" />
-		<PackageReference Include="pythonnet" Version="3.0.5" />
-		<PackageReference Include="System.Management" Version="8.0.0" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.20.1" />
+		<PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
 	</ItemGroup>
 
 	<ItemGroup>
