@@ -22,8 +22,8 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<ProjectReference Include="../EasyOcrSharp/EasyOcrSharp.csproj" />
-		<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.20.1" />
+		<PackageReference Include="EasyOcrSharp" Version="2.0.1" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.26.0" />
 	</ItemGroup>
 
 	<ItemGroup>
