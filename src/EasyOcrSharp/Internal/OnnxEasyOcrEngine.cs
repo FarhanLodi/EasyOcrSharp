@@ -57,14 +57,19 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
     public async Task<IReadOnlyList<OcrLine>> RecognizeAsync(
         Image<Rgb24> image,
         IReadOnlyList<string> languages,
+        RecognitionOptions options,
         CancellationToken cancellationToken)
     {
         var detector = await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
         var rawPolygons = detector.Detect(image);
-        // Group raw detections into reading-order lines (EasyOCR's group_text_box) so each
-        // recognized region is a text line, matching upstream readtext() output.
-        var polygons = TextBoxGrouper.Group(rawPolygons, image.Width, image.Height);
-        _logger?.LogInformation("CRAFT detected {Raw} regions, grouped into {Count} lines", rawPolygons.Count, polygons.Count);
+
+        // Word grouping keeps the raw per-box detections; Line/Paragraph merge adjacent boxes
+        // into reading-order lines (EasyOCR's group_text_box) before recognition.
+        var polygons = options.Grouping == TextGrouping.Word
+            ? rawPolygons
+            : TextBoxGrouper.Group(rawPolygons, image.Width, image.Height);
+        _logger?.LogInformation("CRAFT detected {Raw} regions, using {Count} regions ({Mode} grouping)",
+            rawPolygons.Count, polygons.Count, options.Grouping);
 
         if (polygons.Count == 0)
         {
@@ -94,13 +99,11 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         {
             var recognizer = await GetOrLoadRecognizerAsync(def, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            var lines = recognizer.Recognize(image, polygons);
+            var lines = recognizer.Recognize(image, polygons, options.MaxDegreeOfParallelism, options.AdjustContrast);
             perPackResults.Add(lines);
         }
 
-        if (perPackResults.Count == 1) return perPackResults[0];
-
-        // Pick the highest-confidence result per polygon across packs.
+        // Pick the highest-confidence non-empty result per polygon across packs.
         var merged = new List<OcrLine>(polygons.Count);
         for (int i = 0; i < polygons.Count; i++)
         {
@@ -115,9 +118,12 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
                     best = candidate;
                 }
             }
-            if (best is not null) merged.Add(best);
+            if (best is not null && best.Confidence >= options.MinConfidence) merged.Add(best);
         }
-        return merged;
+
+        return options.Grouping == TextGrouping.Paragraph
+            ? ParagraphGrouper.Merge(merged)
+            : merged;
     }
 
     private async Task<CraftDetector> GetOrLoadDetectorAsync(CancellationToken cancellationToken)

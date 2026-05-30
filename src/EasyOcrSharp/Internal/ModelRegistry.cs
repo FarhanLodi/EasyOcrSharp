@@ -59,6 +59,14 @@ internal static class ModelRegistry
         ["japanese_g2.vocab.json"]  = "2152E694D4E6C40DB530EBC16524DCB2CD63035465C2AD3BB0259B5372518D2F",
         ["thai_g1.onnx"]            = "45A89FA4ADF6804432D86C34BF2B032C68308A3C6A3E0551B41DEF9D70238596",
         ["thai_g1.vocab.json"]      = "BEC206DF38D8FA070116C82779036A41A9AEC389A3F589210DC69996C84BA677",
+        ["tamil_g1.onnx"]           = "3788BEB63E3817BBD51C51CBA84181D573C74E11756A49D191DDFA61FF4BFEC0",
+        ["tamil_g1.vocab.json"]     = "08119B6DE36511989B1ED4008603FC9607D2F091DA695BAF2E914737BB7D1B1D",
+        ["telugu_g2.onnx"]          = "25B848EC2BAC78A00262ABF505C7788BE48C69CCA6001FBF40FC225477D9FF39",
+        ["telugu_g2.vocab.json"]    = "2C4F97A4206C740479546A9E07AB0B395EF4F89DC9EA84D77E6CA65D6AD89937",
+        ["kannada_g2.onnx"]         = "5CC821D34B7A403A7E82264F77FE93052A3451DA2E061869AA58FA08258E0DD2",
+        ["kannada_g2.vocab.json"]   = "EF031572EA8E2598966625797975E8548C3EBE1E02162AB31BC2652F119D0709",
+        ["zh_tra_g1.onnx"]          = "FEE9D297196CDDF74D8B1C4DCC1C269589133EF4A54452B4822078FD98928CCC",
+        ["zh_tra_g1.vocab.json"]    = "3D481F58A7AA5283F17E07974DCE7BBBBE904E56E088CCA8279B72B175C60275",
     }.ToFrozenDictionary();
 
     private static ModelAsset Asset(string fileName) =>
@@ -113,9 +121,18 @@ internal static class ModelRegistry
 
     public static readonly RecognizerDefinition Thai = Pack("thai_g1", new[] { "th" });
 
+    public static readonly RecognizerDefinition Tamil = Pack("tamil_g1", new[] { "ta" });
+
+    public static readonly RecognizerDefinition Telugu = Pack("telugu_g2", new[] { "te" });
+
+    public static readonly RecognizerDefinition Kannada = Pack("kannada_g2", new[] { "kn" });
+
+    public static readonly RecognizerDefinition ChineseTraditional = Pack("zh_tra_g1", new[] { "ch_tra" });
+
     public static readonly IReadOnlyList<RecognizerDefinition> All = new[]
     {
-        Latin, Cyrillic, Arabic, Devanagari, Bengali, Chinese, Korean, Japanese, Thai
+        Latin, Cyrillic, Arabic, Devanagari, Bengali, Chinese, Korean, Japanese, Thai,
+        Tamil, Telugu, Kannada, ChineseTraditional
     };
 
     private static readonly FrozenDictionary<string, RecognizerDefinition> ByLanguage = BuildLanguageIndex();

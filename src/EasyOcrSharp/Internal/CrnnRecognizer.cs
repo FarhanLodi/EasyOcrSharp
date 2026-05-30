@@ -41,21 +41,38 @@ internal sealed class CrnnRecognizer : IDisposable
         _characters = characters;
     }
 
-    public IReadOnlyList<OcrLine> Recognize(Image<Rgb24> source, IReadOnlyList<OcrPoint[]> polygons)
+    public IReadOnlyList<OcrLine> Recognize(
+        Image<Rgb24> source,
+        IReadOnlyList<OcrPoint[]> polygons,
+        int maxDegreeOfParallelism,
+        bool adjustContrast)
     {
-        var results = new List<OcrLine>(polygons.Count);
-
-        foreach (var poly in polygons)
+        // Results are aligned 1:1 with polygons (empty entry for un-croppable regions) so the
+        // engine's cross-pack merge can index by polygon. InferenceSession.Run is thread-safe,
+        // so regions are recognized concurrently up to maxDegreeOfParallelism.
+        var results = new OcrLine[polygons.Count];
+        var parallelOptions = new ParallelOptions
         {
-            using var crop = RectifyQuad(source, poly);
-            if (crop is null || crop.Width == 0 || crop.Height == 0) continue;
+            MaxDegreeOfParallelism = Math.Max(1, maxDegreeOfParallelism),
+        };
+
+        Parallel.For(0, polygons.Count, parallelOptions, i =>
+        {
+            var poly = polygons[i];
+            var box = OcrBoundingBox.FromPoints(poly);
+            using var crop = PerspectiveWarp.Rectify(source, poly);
+            if (crop is null || crop.Width == 0 || crop.Height == 0)
+            {
+                results[i] = new OcrLine { Text = string.Empty, Confidence = 0, BoundingPolygon = poly, BoundingBox = box };
+                return;
+            }
 
             // Round 1: no contrast adjustment (EasyOCR's AlignCollate_normal).
             var (text, conf) = RunOnce(crop, adjustContrast: false);
 
             // Round 2: EasyOCR re-runs low-confidence boxes with contrast stretching
-            // and keeps whichever decode scored higher.
-            if (conf < ContrastThreshold)
+            // and keeps whichever decode scored higher (skippable via options).
+            if (adjustContrast && conf < ContrastThreshold)
             {
                 var (text2, conf2) = RunOnce(crop, adjustContrast: true);
                 if (conf2 > conf)
@@ -65,14 +82,14 @@ internal sealed class CrnnRecognizer : IDisposable
                 }
             }
 
-            results.Add(new OcrLine
+            results[i] = new OcrLine
             {
                 Text = text,
                 Confidence = conf,
                 BoundingPolygon = poly,
-                BoundingBox = OcrBoundingBox.FromPoints(poly),
-            });
-        }
+                BoundingBox = box,
+            };
+        });
 
         return results;
     }
@@ -179,36 +196,6 @@ internal sealed class CrnnRecognizer : IDisposable
             ? Math.Exp(2.0 / Math.Sqrt(probCount) * logProbSum)
             : 0.0;
         return (sb.ToString(), confidence);
-    }
-
-    /// <summary>
-    /// Rectifies a (possibly rotated) quadrilateral region from the source image into an
-    /// upright rectangle. Uses an axis-aligned bbox of the quad as an approximation —
-    /// works for the slight rotations that CRAFT typically produces, and matches EasyOCR's
-    /// horizontal-box crop path. For perfectly horizontal text this is identical to a plain crop.
-    /// </summary>
-    private static Image<Rgb24>? RectifyQuad(Image<Rgb24> source, OcrPoint[] quad)
-    {
-        if (quad.Length < 3) return null;
-
-        double minX = quad.Min(p => p.X);
-        double minY = quad.Min(p => p.Y);
-        double maxX = quad.Max(p => p.X);
-        double maxY = quad.Max(p => p.Y);
-
-        int x = (int)Math.Floor(minX);
-        int y = (int)Math.Floor(minY);
-        int w = (int)Math.Ceiling(maxX - minX);
-        int h = (int)Math.Ceiling(maxY - minY);
-
-        x = Math.Max(0, x);
-        y = Math.Max(0, y);
-        if (x + w > source.Width) w = source.Width - x;
-        if (y + h > source.Height) h = source.Height - y;
-        if (w < 2 || h < 2) return null;
-
-        var rect = new Rectangle(x, y, w, h);
-        return source.Clone(ctx => ctx.Crop(rect));
     }
 
     public void Dispose() => _session.Dispose();

@@ -12,10 +12,11 @@ namespace EasyOcrSharp.Services;
 /// High-level OCR service. Native .NET implementation running EasyOCR's CRAFT detector
 /// and per-language CRNN recognizers via ONNX Runtime — no Python required.
 /// </summary>
-public sealed class EasyOcrService : IAsyncDisposable, IDisposable
+public sealed class EasyOcrService : IEasyOcrService
 {
     private readonly ILogger<EasyOcrService>? _logger;
     private readonly OnnxEasyOcrEngine _engine;
+    private readonly bool _useGpu;
     private bool _disposed;
 
     /// <summary>
@@ -33,6 +34,7 @@ public sealed class EasyOcrService : IAsyncDisposable, IDisposable
     public EasyOcrService(string? modelCachePath = null, ILogger<EasyOcrService>? logger = null, bool useGpu = false)
     {
         _logger = logger;
+        _useGpu = useGpu;
         var cachePath = string.IsNullOrWhiteSpace(modelCachePath) ? null : Path.GetFullPath(modelCachePath);
         _engine = new OnnxEasyOcrEngine(cachePath, useGpu, logger);
     }
@@ -41,19 +43,16 @@ public sealed class EasyOcrService : IAsyncDisposable, IDisposable
     /// Gets a value indicating whether GPU acceleration was requested for this service.
     /// (The CUDA provider may silently fall back to CPU if the GPU runtime is missing.)
     /// </summary>
-    public bool UseGpu { get; init; }
+    public bool UseGpu => _useGpu;
 
-    /// <summary>
-    /// Performs OCR on an image file path using the specified languages.
-    /// Languages that share a recognizer pack (e.g. all Latin scripts) run on the same model.
-    /// </summary>
+    /// <inheritdoc />
     public async Task<OcrResult> ExtractTextFromImage(
         string imagePath,
         IEnumerable<string> languages,
+        RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         EnsureNotDisposed();
-
         if (string.IsNullOrWhiteSpace(imagePath))
             throw new ArgumentException("Image path must be provided.", nameof(imagePath));
 
@@ -63,47 +62,81 @@ public sealed class EasyOcrService : IAsyncDisposable, IDisposable
 
         var resolved = ResolveLanguages(languages);
         cancellationToken.ThrowIfCancellationRequested();
-
-        var sw = Stopwatch.StartNew();
         using var image = await Image.LoadAsync<Rgb24>(fullPath, cancellationToken).ConfigureAwait(false);
-
-        var lines = await _engine.RecognizeAsync(image, resolved, cancellationToken).ConfigureAwait(false);
-        var ordered = SortLinesByReadingOrder(lines);
-        sw.Stop();
-
-        var fullText = BuildFullText(ordered);
-
-        _logger?.LogInformation("OCR completed: {Count} lines in {Ms} ms", ordered.Count, sw.Elapsed.TotalMilliseconds);
-
-        return new OcrResult
-        {
-            FullText = fullText,
-            Lines = ordered,
-            Languages = resolved,
-            Duration = sw.Elapsed,
-            UsedGpu = false, // engine reports CUDA enablement via logger; we don't track per-call here
-        };
+        return await RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Performs OCR on an image stream using the specified languages.
-    /// </summary>
+    /// <inheritdoc />
     public async Task<OcrResult> ExtractTextFromImage(
         Stream imageStream,
         IEnumerable<string> languages,
-        string? fileNameHint = null,
+        RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         EnsureNotDisposed();
         ArgumentNullException.ThrowIfNull(imageStream);
 
         var resolved = ResolveLanguages(languages);
+        using var image = await Image.LoadAsync<Rgb24>(imageStream, cancellationToken).ConfigureAwait(false);
+        return await RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public Task<OcrResult> ExtractTextFromImage(
+        byte[] imageBytes,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(imageBytes);
+        return ExtractTextFromImage(new ReadOnlyMemory<byte>(imageBytes), languages, options, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<OcrResult> ExtractTextFromImage(
+        ReadOnlyMemory<byte> imageBytes,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        if (imageBytes.IsEmpty)
+            throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
+
+        var resolved = ResolveLanguages(languages);
+        cancellationToken.ThrowIfCancellationRequested();
+        using var image = Image.Load<Rgb24>(imageBytes.Span);
+        return await RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
+    public Task<OcrResult> ExtractTextFromImage(
+        Image<Rgb24> image,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        ArgumentNullException.ThrowIfNull(image);
+        var resolved = ResolveLanguages(languages);
+        // Caller owns the image — do not dispose it here.
+        return RecognizeAsync(image, resolved, options, cancellationToken);
+    }
+
+    private async Task<OcrResult> RecognizeAsync(
+        Image<Rgb24> image,
+        string[] resolved,
+        RecognitionOptions? options,
+        CancellationToken cancellationToken)
+    {
+        options ??= RecognitionOptions.Default;
 
         var sw = Stopwatch.StartNew();
-        using var image = await Image.LoadAsync<Rgb24>(imageStream, cancellationToken).ConfigureAwait(false);
-        var lines = await _engine.RecognizeAsync(image, resolved, cancellationToken).ConfigureAwait(false);
+        var lines = await _engine.RecognizeAsync(image, resolved, options, cancellationToken).ConfigureAwait(false);
         var ordered = SortLinesByReadingOrder(lines);
         sw.Stop();
+
+        _logger?.LogInformation("OCR completed: {Count} lines in {Ms:F0} ms", ordered.Count, sw.Elapsed.TotalMilliseconds);
 
         return new OcrResult
         {
@@ -111,7 +144,7 @@ public sealed class EasyOcrService : IAsyncDisposable, IDisposable
             Lines = ordered,
             Languages = resolved,
             Duration = sw.Elapsed,
-            UsedGpu = false,
+            UsedGpu = _useGpu,
         };
     }
 

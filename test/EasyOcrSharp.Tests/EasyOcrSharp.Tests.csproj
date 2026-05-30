@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <AssemblyName>EasyOcrSharp.Tests</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/EasyOcrSharp/EasyOcrSharp.csproj" />
+  </ItemGroup>
+
+  <!-- Sample images for integration tests, copied next to the test assembly. -->
+  <ItemGroup>
+    <None Include="../assets/sample.png" Link="assets/sample.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/sample.png')" />
+    <None Include="../assets/ocr_test3.png" Link="assets/ocr_test3.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/ocr_test3.png')" />
+  </ItemGroup>
+
+</Project>

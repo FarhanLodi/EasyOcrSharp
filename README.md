@@ -9,7 +9,7 @@
 
 **Native .NET 10 OCR powered by EasyOCR's neural models on ONNX Runtime.** No Python, no PyTorch, no embedded interpreter — just a small managed library that downloads the per-language ONNX models it needs on first use. Recognition accuracy matches upstream EasyOCR, because it runs EasyOCR's exact CRAFT + CRNN networks.
 
-- 🌍 **80+ languages** across 9 script families (Latin, Cyrillic, Arabic, Devanagari, Bengali, Chinese, Korean, Japanese, Thai)
+- 🌍 **80+ languages** across 13 script families (Latin, Cyrillic, Arabic, Devanagari, Bengali, Chinese — Simplified & Traditional, Korean, Japanese, Thai, Tamil, Telugu, Kannada)
 - 📦 **~3 MB package** — models download on demand and are cached locally
 - ⚡ **AOT / single-file friendly** — pure managed code over ONNX Runtime
 - 🔒 **SHA256-verified** model downloads
@@ -86,6 +86,43 @@ public sealed class OcrLine
 
 Detected text is grouped into **reading-order lines** (top-to-bottom), matching EasyOCR's `readtext()` output.
 
+### Input sources
+
+Besides a file path, you can OCR from a `Stream`, `byte[]`, `ReadOnlyMemory<byte>`, or an
+already-decoded `Image<Rgb24>`:
+
+```csharp
+byte[] bytes = await File.ReadAllBytesAsync("photo.jpg");
+var result = await ocr.ExtractTextFromImage(bytes, new[] { "en" });
+```
+
+### Tuning a call with `RecognitionOptions`
+
+```csharp
+var options = new RecognitionOptions
+{
+    Grouping = TextGrouping.Paragraph,   // Word | Line (default) | Paragraph
+    MinConfidence = 0.3,                 // drop low-confidence lines
+    MaxDegreeOfParallelism = 8,          // regions recognized concurrently
+    AdjustContrast = true,               // low-confidence contrast retry
+};
+var result = await ocr.ExtractTextFromImage("doc.png", new[] { "en" }, options);
+```
+
+### Dependency injection
+
+```csharp
+services.AddEasyOcrSharp(o =>
+{
+    o.UseGpu = false;
+    o.ModelCachePath = "/var/cache/easyocr";
+});
+
+// then inject IEasyOcrService anywhere
+public class MyService(IEasyOcrService ocr) { /* ... */ }
+```
+The service is registered as a singleton (ONNX sessions are expensive and thread-safe to reuse).
+
 ## Multiple languages at once
 
 Pass several language codes to OCR mixed-script images. Each detected region is read by every requested script pack, and the highest-confidence result wins:
@@ -142,12 +179,16 @@ Languages are grouped by **script**. One CRNN recognizer covers an entire group,
 | `devanagari_g2` | ~210 MB | hi, mr, ne, sa |
 | `bengali_g2` | ~210 MB | bn, as |
 | `thai_g1` | ~210 MB | th |
+| `tamil_g1` | ~210 MB | ta |
+| `telugu_g2` | ~15 MB | te |
+| `kannada_g2` | ~15 MB | kn |
+| `zh_tra_g1` | ~215 MB | ch_tra (Traditional Chinese) |
 
 The ~210 MB packs (Arabic, Devanagari, Bengali, Thai) are EasyOCR's generation-1 networks — EasyOCR never released smaller versions for those scripts. They download once and are cached like any other model.
 
 If you request a language that has no pack, EasyOcrSharp logs a warning and skips it — other requested languages still work.
 
-> **Not supported:** Greek (`el`) — upstream EasyOCR has no Greek recognition model, so it can't be exported. Tamil, Telugu, Kannada and Traditional Chinese exist in EasyOCR and can be added on request.
+> **Not supported:** Greek (`el`) — upstream EasyOCR has no Greek recognition model, so it can't be exported.
 
 ## GPU acceleration
 
@@ -165,15 +206,34 @@ EasyOcrSharp reproduces EasyOCR's recognition pipeline faithfully — preprocess
 - Handwriting and low-resolution / low-contrast text are harder than clean printed text.
 - Right-to-left scripts (Arabic) are returned in the model's character order.
 
-## Building from source
+## Building & testing from source
 
 ```bash
 git clone https://github.com/easyocrsharp/EasyOcrSharp.git
 cd EasyOcrSharp
 dotnet build -c Release
+
+# Unit tests (no model downloads needed):
+dotnet test --filter "Category!=Integration"
+
+# Accuracy/integration tests (need the models — point the cache at a folder containing them):
+EASYOCRSHARP_CACHE=/path/to/onnx_models dotnet test --filter "Category=Integration"
+
+# Run the interactive console demo:
+dotnet run --project test/EasyOcrSharp.Demo
 ```
 
-The repo is a standard .NET 10 solution: `src/EasyOcrSharp` (the library), `src/EasyOcrSharp.Gpu` (the CUDA package), and `test/` (a console demo).
+Solution layout:
+
+| Path | Purpose |
+|---|---|
+| `src/EasyOcrSharp` | the library |
+| `src/EasyOcrSharp.Gpu` | the CUDA execution-provider package |
+| `test/EasyOcrSharp.Tests` | xUnit unit + integration tests |
+| `test/EasyOcrSharp.Demo` | interactive console demo |
+| `test/assets` | sample images used by the demo and tests
+
+CI (GitHub Actions) builds and runs the unit tests on Linux and Windows for every push and PR.
 
 ## License
 
