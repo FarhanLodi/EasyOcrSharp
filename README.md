@@ -5,7 +5,7 @@
   **High-accuracy, fully-offline OCR for .NET — EasyOCR's neural models running natively on ONNX Runtime. No Python.**
 
   [![NuGet](https://img.shields.io/nuget/v/EasyOcrSharp.svg)](https://www.nuget.org/packages/EasyOcrSharp)
-  [![NuGet Downloads](https://img.shields.io/nuget/dt/EasyOcrSharp.svg)](https://www.nuget.org/packages/EasyOcrSharp)
+  [![NuGet Downloads](https://img.shields.io/nuget/dt/EasyOcrSharp.svg?cacheSeconds=300)](https://www.nuget.org/packages/EasyOcrSharp)
   [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
   [![.NET](https://img.shields.io/badge/.NET-10.0-512BD4.svg)](https://dotnet.microsoft.com/)
 </div>
