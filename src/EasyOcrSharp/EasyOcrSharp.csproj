@@ -7,8 +7,8 @@
 		<LangVersion>latest</LangVersion>
 		<IsAotCompatible>true</IsAotCompatible>
 		<PackageId>EasyOcrSharp</PackageId>
-		<Version>2.1.1</Version>
-		<PackageReleaseNotes>Scanned-doc preprocessing (deskew, orientation, binarize, denoise), automatic language detection, full 86-language coverage, region-of-interest, concurrent recognition, perspective de-warp, paragraph grouping, byte[]/Image overloads, DI. See CHANGELOG.md.</PackageReleaseNotes>
+		<Version>2.2.1</Version>
+		<PackageReleaseNotes>2.2.1: malformed/corrupt/empty/encrypted PDFs now raise a clear EasyOcrSharpException (instead of a raw underlying exception); added robustness/edge-case test coverage. No API changes. 2.2.0: built-in PDF input + searchable-PDF output; hOCR/ALTO/TSV/JSON exporters; OpenTelemetry metrics/tracing + health check; resilient resumable model downloads; automatic GPU (CUDA/CoreML) with CPU fallback; EasyOCR parity (beam / word-beam decoders, per-box rotation, recognize-from-boxes, custom recognizers, int8 quantized models, exposed grouping/contrast thresholds). All additive — existing APIs unchanged. See CHANGELOG.md.</PackageReleaseNotes>
 		<Authors>Farhan Lodi</Authors>
 		<Description>High-accuracy native .NET OCR powered by EasyOCR's neural models running on ONNX Runtime. No Python required.</Description>
 		<PackageTags>OCR;EasyOCR;ONNX;TextRecognition;CRAFT;CRNN;.NET10;AOT</PackageTags>
@@ -31,9 +31,12 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
+		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.8" />
 		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
 		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
 		<PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
+		<!-- PDFium-based PDF rasterization for the built-in PDF input / searchable-PDF output. -->
+		<PackageReference Include="Docnet.Core" Version="2.6.0" />
 	</ItemGroup>
 
 	<ItemGroup>

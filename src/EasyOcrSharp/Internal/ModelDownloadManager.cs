@@ -1,40 +1,45 @@
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using EasyOcrSharp.Diagnostics;
+using EasyOcrSharp.Services;
 using Microsoft.Extensions.Logging;
 
 namespace EasyOcrSharp.Internal;
 
 /// <summary>
 /// Resolves the local on-disk path for an ONNX model asset, downloading from the
-/// configured base URL if not already cached. Downloads are atomic (write to .part, rename)
-/// and SHA256-verified when the registry supplies a checksum.
+/// configured base URL if not already cached. Downloads are atomic (write to .part, rename),
+/// resumable (HTTP range), retried with exponential backoff on transient failures, and
+/// SHA256-verified when the registry supplies a checksum.
 /// </summary>
 internal static class ModelDownloadManager
 {
     private static readonly SemaphoreSlim CacheLock = new(1, 1);
-    private static readonly HttpClient Http = CreateHttpClient();
+    private static readonly HttpClient SharedHttp = CreateHttpClient();
     private static string? _modelCacheRoot;
 
     private static HttpClient CreateHttpClient()
     {
         var handler = new SocketsHttpHandler
         {
-            AutomaticDecompression = System.Net.DecompressionMethods.All,
+            AutomaticDecompression = DecompressionMethods.All,
             PooledConnectionLifetime = TimeSpan.FromMinutes(10),
         };
-        var client = new HttpClient(handler);
-        client.Timeout = TimeSpan.FromMinutes(30);
-        client.DefaultRequestHeaders.UserAgent.ParseAdd("EasyOcrSharp/2.0");
+        var client = new HttpClient(handler) { Timeout = TimeSpan.FromMinutes(30) };
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("EasyOcrSharp/2.2");
         return client;
     }
 
     /// <summary>
     /// Returns the absolute path to a cached copy of <paramref name="asset"/>, downloading it
-    /// if not already present. Safe for concurrent callers — only one download per file runs at a time.
+    /// if not already present. Safe for concurrent callers — only one download runs at a time.
     /// </summary>
     public static async Task<string> EnsureModelAsync(
         ModelAsset asset,
         string? customCachePath,
+        ModelDownloadOptions options,
         ILogger? logger,
         CancellationToken cancellationToken)
     {
@@ -42,10 +47,16 @@ internal static class ModelDownloadManager
         Directory.CreateDirectory(cacheDir);
 
         var finalPath = Path.Combine(cacheDir, asset.FileName);
-
         if (File.Exists(finalPath))
         {
             return finalPath;
+        }
+
+        if (options.Offline)
+        {
+            throw new EasyOcrSharpException(
+                $"Model '{asset.FileName}' is not present in the cache ('{cacheDir}') and offline mode is enabled. " +
+                "Pre-seed the cache with the required .onnx/.vocab.json files, or disable ModelDownloadOptions.Offline.");
         }
 
         await CacheLock.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -56,50 +67,7 @@ internal static class ModelDownloadManager
                 return finalPath;
             }
 
-            var url = ResolveUrl(asset);
-            logger?.LogInformation("Downloading model {Name} from {Url}", asset.FileName, url);
-
-            var tempPath = finalPath + ".part";
-            using (var response = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false))
-            {
-                response.EnsureSuccessStatusCode();
-
-                var total = response.Content.Headers.ContentLength ?? -1L;
-                long downloaded = 0;
-                var lastReport = DateTime.UtcNow;
-
-                await using var http = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                await using var file = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
-
-                var buffer = new byte[81920];
-                int read;
-                while ((read = await http.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
-                {
-                    await file.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-                    downloaded += read;
-
-                    if (logger is not null && (DateTime.UtcNow - lastReport).TotalSeconds >= 2)
-                    {
-                        ReportProgress(logger, asset.FileName, downloaded, total);
-                        lastReport = DateTime.UtcNow;
-                    }
-                }
-
-                if (logger is not null) ReportProgress(logger, asset.FileName, downloaded, total);
-            }
-
-            if (!string.IsNullOrEmpty(asset.Sha256))
-            {
-                var actual = await ComputeSha256Async(tempPath, cancellationToken).ConfigureAwait(false);
-                if (!string.Equals(actual, asset.Sha256, StringComparison.OrdinalIgnoreCase))
-                {
-                    File.Delete(tempPath);
-                    throw new EasyOcrSharpException(
-                        $"Downloaded model '{asset.FileName}' failed SHA256 verification. Expected {asset.Sha256}, got {actual}.");
-                }
-            }
-
-            File.Move(tempPath, finalPath, overwrite: false);
+            await DownloadWithRetryAsync(asset, finalPath, options, logger, cancellationToken).ConfigureAwait(false);
             logger?.LogInformation("Model {Name} cached at {Path}", asset.FileName, finalPath);
             return finalPath;
         }
@@ -109,27 +77,127 @@ internal static class ModelDownloadManager
         }
     }
 
-    private static string ResolveUrl(ModelAsset asset)
+    private static async Task DownloadWithRetryAsync(
+        ModelAsset asset, string finalPath, ModelDownloadOptions options, ILogger? logger, CancellationToken ct)
     {
-        var baseOverride = Environment.GetEnvironmentVariable("EASYOCRSHARP_MODEL_BASE_URL");
-        if (!string.IsNullOrWhiteSpace(baseOverride))
+        var url = ResolveUrl(asset, options);
+        var tempPath = finalPath + ".part";
+        int maxAttempts = Math.Max(1, options.MaxRetries + 1);
+
+        for (int attempt = 1; ; attempt++)
         {
-            return $"{baseOverride.TrimEnd('/')}/{asset.FileName}";
+            try
+            {
+                await DownloadOnceAsync(url, asset, tempPath, options, logger, ct).ConfigureAwait(false);
+                await VerifyChecksumAsync(asset, tempPath, ct).ConfigureAwait(false);
+                File.Move(tempPath, finalPath, overwrite: false);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex) && !ct.IsCancellationRequested)
+            {
+                var delay = TimeSpan.FromMilliseconds(options.RetryBaseDelay.TotalMilliseconds * Math.Pow(2, attempt - 1));
+                logger?.LogWarning(ex, "Download of {Name} failed (attempt {Attempt}/{Max}); retrying in {Delay:0.0}s.",
+                    asset.FileName, attempt, maxAttempts, delay.TotalSeconds);
+                await Task.Delay(delay, ct).ConfigureAwait(false);
+            }
         }
-        return asset.Url;
     }
 
-    private static void ReportProgress(ILogger logger, string name, long downloaded, long total)
+    private static async Task DownloadOnceAsync(
+        string url, ModelAsset asset, string tempPath, ModelDownloadOptions options, ILogger? logger, CancellationToken ct)
     {
+        var http = options.HttpClientFactory?.Invoke() ?? SharedHttp;
+
+        // Resume a partial download where possible (the model repo supports HTTP range requests).
+        long existing = File.Exists(tempPath) ? new FileInfo(tempPath).Length : 0;
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        if (existing > 0)
+        {
+            request.Headers.Range = new RangeHeaderValue(existing, null);
+        }
+
+        using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+
+        bool resuming = existing > 0 && response.StatusCode == HttpStatusCode.PartialContent;
+        if (existing > 0 && !resuming)
+        {
+            // Server ignored the range (sent full 200) — restart cleanly.
+            existing = 0;
+            File.Delete(tempPath);
+        }
+        response.EnsureSuccessStatusCode();
+
+        long total = response.Content.Headers.ContentLength is { } len ? len + existing : -1L;
+        long downloaded = existing;
+        logger?.LogInformation("Downloading model {Name} from {Url}{Resume}",
+            asset.FileName, url, resuming ? $" (resuming at {existing:N0} bytes)" : string.Empty);
+
+        var fileMode = resuming ? FileMode.Append : FileMode.Create;
+        await using (var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
+        await using (var file = new FileStream(tempPath, fileMode, FileAccess.Write, FileShare.None, 81920, useAsync: true))
+        {
+            var buffer = new byte[81920];
+            var lastReport = DateTime.UtcNow;
+            int read;
+            while ((read = await source.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+            {
+                await file.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+                downloaded += read;
+                EasyOcrDiagnostics.ModelDownloadBytes.Add(read);
+
+                if ((DateTime.UtcNow - lastReport).TotalSeconds >= 1)
+                {
+                    Report(logger, options, asset.FileName, downloaded, total);
+                    lastReport = DateTime.UtcNow;
+                }
+            }
+        }
+
+        Report(logger, options, asset.FileName, downloaded, total);
+    }
+
+    private static async Task VerifyChecksumAsync(ModelAsset asset, string tempPath, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(asset.Sha256)) return;
+
+        var actual = await ComputeSha256Async(tempPath, ct).ConfigureAwait(false);
+        if (!string.Equals(actual, asset.Sha256, StringComparison.OrdinalIgnoreCase))
+        {
+            File.Delete(tempPath);
+            throw new EasyOcrSharpException(
+                $"Downloaded model '{asset.FileName}' failed SHA256 verification. Expected {asset.Sha256}, got {actual}.");
+        }
+    }
+
+    private static bool IsTransient(Exception ex) => ex switch
+    {
+        EasyOcrSharpException => false,                 // checksum mismatch — retrying won't help
+        HttpRequestException => true,
+        IOException => true,
+        TaskCanceledException => true,                  // request timeout (user cancel filtered by caller)
+        _ => false,
+    };
+
+    private static void Report(ILogger? logger, ModelDownloadOptions options, string name, long downloaded, long total)
+    {
+        options.Progress?.Report(new ModelDownloadProgress(name, downloaded, total));
+        if (logger is null) return;
         if (total > 0)
-        {
-            var pct = downloaded * 100.0 / total;
-            logger.LogInformation("  {Name}: {Downloaded:N0} / {Total:N0} bytes ({Pct:F1}%)", name, downloaded, total, pct);
-        }
+            logger.LogInformation("  {Name}: {Downloaded:N0} / {Total:N0} bytes ({Pct:F1}%)", name, downloaded, total, downloaded * 100.0 / total);
         else
-        {
             logger.LogInformation("  {Name}: {Downloaded:N0} bytes", name, downloaded);
-        }
+    }
+
+    private static string ResolveUrl(ModelAsset asset, ModelDownloadOptions options)
+    {
+        var baseUrl = options.BaseUrlOverride;
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            baseUrl = Environment.GetEnvironmentVariable("EASYOCRSHARP_MODEL_BASE_URL");
+
+        return string.IsNullOrWhiteSpace(baseUrl)
+            ? asset.Url
+            : $"{baseUrl.TrimEnd('/')}/{asset.FileName}";
     }
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)
@@ -141,31 +209,32 @@ internal static class ModelDownloadManager
 
     private static string GetModelCachePath(string? customCachePath)
     {
+        // An explicit cache path is always honored verbatim and never mutates the shared default,
+        // so services configured with different cache paths don't interfere with one another.
         if (!string.IsNullOrWhiteSpace(customCachePath))
         {
-            _modelCacheRoot = Path.GetFullPath(customCachePath);
-            return _modelCacheRoot;
+            return Path.GetFullPath(customCachePath);
         }
 
-        if (_modelCacheRoot is not null)
-        {
-            return _modelCacheRoot;
-        }
+        return _modelCacheRoot ??= ResolveDefaultCacheRoot();
+    }
 
+    private static string ResolveDefaultCacheRoot()
+    {
         var envOverride = Environment.GetEnvironmentVariable("EASYOCRSHARP_CACHE");
         if (!string.IsNullOrWhiteSpace(envOverride))
         {
-            _modelCacheRoot = Path.GetFullPath(envOverride);
-            return _modelCacheRoot;
+            return Path.GetFullPath(envOverride);
         }
 
-        var defaultPath = Path.Combine(
+        return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "EasyOcrSharp",
             "models");
-        _modelCacheRoot = defaultPath;
-        return _modelCacheRoot;
     }
+
+    /// <summary>Resolves the effective model cache directory for the given (optional) override.</summary>
+    public static string ResolveCacheRoot(string? customCachePath) => GetModelCachePath(customCachePath);
 
     public static string ModelCacheRootPath => GetModelCachePath(null);
 }

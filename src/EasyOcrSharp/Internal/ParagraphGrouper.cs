@@ -4,14 +4,20 @@ namespace EasyOcrSharp.Internal;
 
 /// <summary>
 /// Merges recognized text lines into paragraph blocks by vertical proximity and horizontal
-/// overlap — a pragmatic port of EasyOCR's <c>get_paragraph</c>. Lines that sit close together
-/// vertically and overlap horizontally are concatenated (newline-separated) into one result whose
-/// bounding box is the union of the merged lines.
+/// overlap/closeness — a pragmatic port of EasyOCR's <c>get_paragraph</c>. Lines that sit close
+/// together vertically and either overlap horizontally or are within a line-height of each other are
+/// concatenated (newline-separated) into one result whose bounding box is the union of the merged
+/// lines. The vertical/horizontal join distances are exposed via
+/// <see cref="GroupingOptions.ParagraphYThreshold"/> / <see cref="GroupingOptions.ParagraphXThreshold"/>.
 /// </summary>
 internal static class ParagraphGrouper
 {
-    public static List<OcrLine> Merge(IReadOnlyList<OcrLine> lines)
+    public static List<OcrLine> Merge(IReadOnlyList<OcrLine> lines, GroupingOptions? grouping = null)
     {
+        grouping ??= GroupingOptions.Default;
+        double xThreshold = grouping.ParagraphXThreshold;
+        double yThreshold = grouping.ParagraphYThreshold;
+
         var remaining = lines.Where(l => !string.IsNullOrEmpty(l.Text)).ToList();
         remaining.Sort((a, b) => a.BoundingBox.MinY.CompareTo(b.BoundingBox.MinY));
 
@@ -25,10 +31,10 @@ internal static class ParagraphGrouper
                 double lineHeight = Math.Max(line.BoundingBox.Height, last.BoundingBox.Height);
                 double verticalGap = line.BoundingBox.MinY - last.BoundingBox.MaxY;
 
-                // Same block if the next line starts within ~1 line-height below the previous one
-                // and their horizontal spans overlap.
-                if (verticalGap <= lineHeight * 1.0 && verticalGap >= -lineHeight
-                    && HorizontalOverlap(last.BoundingBox, line.BoundingBox))
+                // Same block if the next line starts within ~y_ths line-heights below the previous one
+                // and their horizontal spans either overlap or sit within ~x_ths line-heights.
+                if (verticalGap <= lineHeight * yThreshold && verticalGap >= -lineHeight
+                    && HorizontalClose(last.BoundingBox, line.BoundingBox, lineHeight * xThreshold))
                 {
                     para.Add(line);
                     placed = true;
@@ -70,10 +76,12 @@ internal static class ParagraphGrouper
         return result;
     }
 
-    private static bool HorizontalOverlap(OcrBoundingBox a, OcrBoundingBox b)
+    private static bool HorizontalClose(OcrBoundingBox a, OcrBoundingBox b, double maxGap)
     {
         double overlap = Math.Min(a.MaxX, b.MaxX) - Math.Max(a.MinX, b.MinX);
-        double minWidth = Math.Min(a.Width, b.Width);
-        return overlap > 0.2 * minWidth;
+        if (overlap > 0.2 * Math.Min(a.Width, b.Width)) return true;
+        // No overlap: allow joining if the horizontal gap between the spans is within maxGap.
+        double gap = Math.Max(a.MinX, b.MinX) - Math.Min(a.MaxX, b.MaxX);
+        return gap <= maxGap;
     }
 }

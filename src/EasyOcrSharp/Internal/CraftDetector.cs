@@ -24,6 +24,13 @@ internal sealed class CraftDetector : IDisposable
     }
 
     /// <summary>
+    /// Returns one polygon per detected text region using the supplied <see cref="DetectionOptions"/>.
+    /// </summary>
+    public IReadOnlyList<OcrPoint[]> Detect(Image<Rgb24> image, DetectionOptions options)
+        => Detect(image, options.CanvasSize, options.MagRatio, options.TextThreshold,
+                  options.LinkThreshold, options.LowText, options.MinSize);
+
+    /// <summary>
     /// Returns one polygon per detected text region. Each polygon has 4 corners
     /// in clockwise order starting from the visual top-left.
     /// </summary>

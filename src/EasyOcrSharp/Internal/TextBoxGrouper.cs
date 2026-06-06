@@ -6,7 +6,8 @@ namespace EasyOcrSharp.Internal;
 /// Ports EasyOCR's <c>group_text_box</c> (horizontal path): groups raw CRAFT detection
 /// boxes into reading-order lines, merges adjacent boxes on the same line into a single
 /// region, adds a small margin, and sorts top-to-bottom. This makes the engine's output
-/// match EasyOCR's <c>readtext()</c> structure (one box per text line, not per word).
+/// match EasyOCR's <c>readtext()</c> structure (one box per text line, not per word). The
+/// merge thresholds are exposed via <see cref="GroupingOptions"/>.
 /// </summary>
 internal static class TextBoxGrouper
 {
@@ -14,20 +15,24 @@ internal static class TextBoxGrouper
         IReadOnlyList<OcrPoint[]> polygons,
         int imageWidth,
         int imageHeight,
-        double ycenterThreshold = 0.5,
-        double heightThreshold = 0.5,
-        double widthThreshold = 1.0,
-        double addMargin = 0.05)
+        GroupingOptions? grouping = null)
     {
+        grouping ??= GroupingOptions.Default;
+        double ycenterThreshold = grouping.YCenterThreshold;
+        double heightThreshold = grouping.HeightThreshold;
+        double widthThreshold = grouping.WidthThreshold;
+        double addMargin = grouping.AddMargin;
+        double slopeThreshold = grouping.SlopeThreshold;
+
         if (polygons.Count == 0) return polygons;
 
-        // Reduce each quad to an axis-aligned box: [xMin, xMax, yMin, yMax, yCenter, height].
+        // Reduce each quad to an axis-aligned box: [xMin, xMax, yMin, yMax, xCenter, yCenter, height].
         var boxes = new List<Box>(polygons.Count);
         foreach (var poly in polygons)
         {
             double xMin = poly.Min(p => p.X), xMax = poly.Max(p => p.X);
             double yMin = poly.Min(p => p.Y), yMax = poly.Max(p => p.Y);
-            boxes.Add(new Box(xMin, xMax, yMin, yMax, 0.5 * (yMin + yMax), yMax - yMin));
+            boxes.Add(new Box(xMin, xMax, yMin, yMax, 0.5 * (xMin + xMax), 0.5 * (yMin + yMax), yMax - yMin));
         }
 
         // Sort by vertical center, then split into lines by comparable y-center.
@@ -44,8 +49,27 @@ internal static class TextBoxGrouper
                 current.Add(box);
                 bHeights.Add(box.Height);
                 bYCenters.Add(box.YCenter);
+                continue;
             }
-            else if (Math.Abs(Mean(bYCenters) - box.YCenter) < ycenterThreshold * Mean(bHeights))
+
+            double meanHeight = Mean(bHeights);
+            bool sameLine = Math.Abs(Mean(bYCenters) - box.YCenter) < ycenterThreshold * meanHeight;
+
+            // Additive slope tolerance (EasyOCR's slope_ths): a box that fails the vertical-centre test
+            // can still join the line if it is horizontally separated and the connecting slope is gentle
+            // — this keeps gently tilted lines together without ever splitting clean horizontal text.
+            if (!sameLine)
+            {
+                var last = current[^1];
+                double dx = Math.Abs(box.XCenter - last.XCenter);
+                double dy = Math.Abs(box.YCenter - last.YCenter);
+                if (dx > meanHeight && dy <= slopeThreshold * dx)
+                {
+                    sameLine = true;
+                }
+            }
+
+            if (sameLine)
             {
                 current.Add(box);
                 bHeights.Add(box.Height);
@@ -110,7 +134,7 @@ internal static class TextBoxGrouper
         double xMax = run.Max(b => b.XMax);
         double yMin = run.Min(b => b.YMin);
         double yMax = run.Max(b => b.YMax);
-        return WithMargin(new Box(xMin, xMax, yMin, yMax, 0, yMax - yMin), addMargin, imgW, imgH);
+        return WithMargin(new Box(xMin, xMax, yMin, yMax, 0, 0, yMax - yMin), addMargin, imgW, imgH);
     }
 
     private static OcrPoint[] WithMargin(Box b, double addMargin, int imgW, int imgH)
@@ -140,5 +164,5 @@ internal static class TextBoxGrouper
         return values.Count > 0 ? sum / values.Count : 0;
     }
 
-    private readonly record struct Box(double XMin, double XMax, double YMin, double YMax, double YCenter, double Height);
+    private readonly record struct Box(double XMin, double XMax, double YMin, double YMax, double XCenter, double YCenter, double Height);
 }

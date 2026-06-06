@@ -10,9 +10,11 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.8" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
     <PackageReference Include="xunit" Version="2.9.2" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.23" />
   </ItemGroup>
 
   <ItemGroup>
@@ -23,6 +25,12 @@
   <ItemGroup>
     <None Include="../assets/sample.png" Link="assets/sample.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/sample.png')" />
     <None Include="../assets/ocr_test3.png" Link="assets/ocr_test3.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/ocr_test3.png')" />
+  </ItemGroup>
+
+  <!-- PDF + complex-image fixtures for integration tests (add your own — see test/assets/pdf/README.md). -->
+  <ItemGroup>
+    <None Include="../assets/pdf/*.pdf" Link="assets/pdf/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../assets/images/*.*" Exclude="../assets/images/*.md" Link="assets/images/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

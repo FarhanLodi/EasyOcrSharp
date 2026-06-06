@@ -67,6 +67,22 @@ internal static class ModelRegistry
         ["kannada_g2.vocab.json"]   = "EF031572EA8E2598966625797975E8548C3EBE1E02162AB31BC2652F119D0709",
         ["zh_tra_g1.onnx"]          = "FEE9D297196CDDF74D8B1C4DCC1C269589133EF4A54452B4822078FD98928CCC",
         ["zh_tra_g1.vocab.json"]    = "3D481F58A7AA5283F17E07974DCE7BBBBE904E56E088CCA8279B72B175C60275",
+
+        // int8-quantized recognizer variants (EasyOcrServiceOptions.Quantize), produced by
+        // tools/quantize_onnx.py. Hosted alongside the float models; vocab sidecars are shared.
+        ["arabic_g2.int8.onnx"]     = "96873B85CB75F24AB590D5AFF82BDD9AC9B6C12C4462342EF52553225A4DFA94",
+        ["bengali_g2.int8.onnx"]    = "8980FB0B0C8A9F90780C3BEF763630E5C4FE744C134DACC7C8F939CC7D98DFB2",
+        ["cyrillic_g2.int8.onnx"]   = "3BD8A1D5916DA44B2D6DEE49B22E488F855D344778A57474FCC1E1D742661ECE",
+        ["devanagari_g2.int8.onnx"] = "8A92C9185E0DA513A6DF15A0C9F3E15134AB2F0C014B19776880B9F5C2BCCA63",
+        ["japanese_g2.int8.onnx"]   = "F29AD867D2A6D3CF3ABCEFB849A318D722D1F0D81C99006E4D83FDADDDFF475B",
+        ["kannada_g2.int8.onnx"]    = "37A8B4F51ECEF1FA4F5750B50A43B7BD90D7635F3BC53A5715A18B4D26837A77",
+        ["korean_g2.int8.onnx"]     = "92BC1D47F78CF4682DF6D30158FA9E655E7D07F28F7884BA09E9040696C8A470",
+        ["latin_g2.int8.onnx"]      = "EDC800BB03D35BE2392CD0BD33903EE64E2713B7DDF9A5CE96124C01BAFFCED4",
+        ["tamil_g1.int8.onnx"]      = "460A9913C35A81F72C40D4C10CCF44C519CF774E6ECFA77BAA28177A6FCF41D6",
+        ["telugu_g2.int8.onnx"]     = "D1E88F1B39C547050E84D1D2EB06D06651C36DFF69CBCBB7EE4488CEEDC4CC8C",
+        ["thai_g1.int8.onnx"]       = "0489D01351BDF912C09409CA1FF58CE8CFEC8E1F5A5FE68AFCD57D155C73B3D2",
+        ["zh_sim_g2.int8.onnx"]     = "E321B59FE43A22444E6AEED9B3E23EB50049E4F842C7285649FA2EB676DE6AC3",
+        ["zh_tra_g1.int8.onnx"]     = "F2A543425A360F80EB9E1973ECFC2CBB05D7C1F38173A67BD5FFE70E85C82E7C",
     }.ToFrozenDictionary();
 
     private static ModelAsset Asset(string fileName) =>
@@ -158,4 +174,12 @@ internal static class ModelRegistry
     /// </summary>
     public static RecognizerDefinition? FindByLanguage(string language)
         => ByLanguage.TryGetValue(language, out var def) ? def : null;
+
+    /// <summary>
+    /// The int8-quantized variant of a recognizer's ONNX model (EasyOCR's <c>quantize=True</c>),
+    /// hosted alongside the float model as <c>&lt;pack&gt;.int8.onnx</c>. The vocab sidecar is shared.
+    /// Produced by <c>tools/quantize_onnx.py</c>; its checksum, once known, can be added to
+    /// <see cref="Checksums"/>.
+    /// </summary>
+    public static ModelAsset QuantizedModel(RecognizerDefinition def) => Asset($"{def.Name}.int8.onnx");
 }

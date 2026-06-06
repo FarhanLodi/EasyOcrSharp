@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using EasyOcrSharp.Diagnostics;
 using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using Microsoft.Extensions.Logging;
@@ -36,18 +37,39 @@ public sealed class EasyOcrService : IEasyOcrService
     /// and a CUDA-capable GPU; silently falls back to CPU on failure.
     /// </param>
     public EasyOcrService(string? modelCachePath = null, ILogger<EasyOcrService>? logger = null, bool useGpu = false)
+        : this(new EasyOcrServiceOptions { ModelCachePath = modelCachePath, UseGpu = useGpu }, logger)
     {
-        _logger = logger;
-        _useGpu = useGpu;
-        var cachePath = string.IsNullOrWhiteSpace(modelCachePath) ? null : Path.GetFullPath(modelCachePath);
-        _engine = new OnnxEasyOcrEngine(cachePath, useGpu, logger);
     }
 
     /// <summary>
-    /// Gets a value indicating whether GPU acceleration was requested for this service.
-    /// (The CUDA provider may silently fall back to CPU if the GPU runtime is missing.)
+    /// Initializes a new instance configured by <see cref="EasyOcrServiceOptions"/> — the way to opt
+    /// into execution providers, thread limits, and download resilience without changing the legacy
+    /// constructor.
+    /// </summary>
+    public EasyOcrService(EasyOcrServiceOptions options, ILogger<EasyOcrService>? logger = null)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        _logger = logger;
+        var engineOptions = options.ToEngineOptions();
+        _engine = new OnnxEasyOcrEngine(engineOptions, logger);
+        // ResolvedProvider has already turned Auto into a concrete choice based on the installed runtime.
+        _useGpu = _engine.ResolvedProvider != OcrExecutionProvider.Cpu;
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether a GPU accelerator was selected for this service — either requested
+    /// explicitly or chosen by <see cref="OcrExecutionProvider.Auto"/> detection. (The provider may still
+    /// silently fall back to CPU if the device turns out to be unusable at the first model load.)
     /// </summary>
     public bool UseGpu => _useGpu;
+
+    /// <summary>
+    /// When <see cref="OcrExecutionProvider.Auto"/> fell back to CPU but a usable GPU is physically present,
+    /// an actionable message naming the exact provider package to install (<c>EasyOcrSharp.Gpu</c> for an
+    /// NVIDIA GPU, <c>EasyOcrSharp.DirectMl</c> otherwise). Null when a GPU is already in use, CPU was
+    /// chosen explicitly, or no GPU was detected. The same text is also logged once at startup as a warning.
+    /// </summary>
+    public string? GpuAccelerationHint => _engine.GpuHint;
 
     /// <inheritdoc />
     public async Task<OcrResult> ExtractTextFromImage(
@@ -148,6 +170,94 @@ public sealed class EasyOcrService : IEasyOcrService
         return await DetectLanguagesAsync(image, candidates, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Locates text regions <b>without</b> recognizing them — fast, language-independent, and useful
+    /// for layout analysis, redaction, or cropping fields for a later recognition pass. Honors
+    /// <see cref="RecognitionOptions.Region"/>, <see cref="RecognitionOptions.Grouping"/> and
+    /// <see cref="RecognitionOptions.Detection"/>; recognition-only options are ignored.
+    /// </summary>
+    public async Task<IReadOnlyList<DetectedRegion>> DetectRegionsAsync(
+        Image<Rgb24> image,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        ArgumentNullException.ThrowIfNull(image);
+        options ??= RecognitionOptions.Default;
+
+        if (options.Region is not { } region)
+        {
+            return await _engine.DetectRegionsAsync(image, options.Detection, options.Grouping, options.GroupingOptions, cancellationToken).ConfigureAwait(false);
+        }
+
+        var (rx, ry, rw, rh) = region.Resolve(image.Width, image.Height);
+        if (rw < 2 || rh < 2) return Array.Empty<DetectedRegion>();
+
+        using var roi = image.Clone(ctx => ctx.Crop(new Rectangle(rx, ry, rw, rh)));
+        var regions = await _engine.DetectRegionsAsync(roi, options.Detection, options.Grouping, options.GroupingOptions, cancellationToken).ConfigureAwait(false);
+        return TranslateRegions(regions, rx, ry);
+    }
+
+    /// <summary>Locates text regions in an image file without recognizing them.</summary>
+    public async Task<IReadOnlyList<DetectedRegion>> DetectRegionsAsync(
+        string imagePath,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var image = await Image.LoadAsync<Rgb24>(Path.GetFullPath(imagePath), cancellationToken).ConfigureAwait(false);
+        return await DetectRegionsAsync(image, options, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Recognizes text inside caller-supplied regions, <b>skipping detection</b> — EasyOCR's
+    /// <c>recognize()</c>. Each region is a polygon (3+ points) in the image's pixel coordinates, e.g.
+    /// from a prior <see cref="DetectRegionsAsync(Image{Rgb24}, RecognitionOptions?, CancellationToken)"/>
+    /// pass or your own layout analysis. Boxes are reported back in the same coordinates. Honors the
+    /// character filters, decoder, rotation and paragraph grouping in <paramref name="options"/>;
+    /// <see cref="RecognitionOptions.Region"/> and detection thresholds are ignored.
+    /// </summary>
+    public async Task<OcrResult> RecognizeRegionsAsync(
+        Image<Rgb24> image,
+        IEnumerable<IReadOnlyList<OcrPoint>> regions,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureNotDisposed();
+        ArgumentNullException.ThrowIfNull(image);
+        ArgumentNullException.ThrowIfNull(regions);
+        options ??= RecognitionOptions.Default;
+
+        var polygons = regions
+            .Where(r => r is { Count: >= 3 })
+            .Select(r => r.ToArray())
+            .ToArray();
+
+        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Recognize", ActivityKind.Internal);
+        var sw = Stopwatch.StartNew();
+
+        var langs = ResolveLanguages(languages, allowEmpty: false);
+        if (polygons.Length == 0)
+        {
+            return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity);
+        }
+
+        var lines = await _engine.RecognizeRegionsAsync(image, langs, polygons, options, cancellationToken).ConfigureAwait(false);
+        return BuildResult(lines, langs, sw, activity);
+    }
+
+    /// <summary>Recognizes text inside regions located by a prior <see cref="DetectRegionsAsync(Image{Rgb24}, RecognitionOptions?, CancellationToken)"/> pass.</summary>
+    public Task<OcrResult> RecognizeRegionsAsync(
+        Image<Rgb24> image,
+        IEnumerable<DetectedRegion> regions,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(regions);
+        return RecognizeRegionsAsync(image, regions.Select(r => r.BoundingPolygon), languages, options, cancellationToken);
+    }
+
     // ---- pipeline ----
 
     private async Task<OcrResult> RunPipelineAsync(
@@ -157,6 +267,7 @@ public sealed class EasyOcrService : IEasyOcrService
         CancellationToken cancellationToken)
     {
         options ??= RecognitionOptions.Default;
+        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Extract", ActivityKind.Internal);
         var sw = Stopwatch.StartNew();
 
         (IReadOnlyList<OcrLine> Lines, string[] Languages) outcome;
@@ -170,15 +281,31 @@ public sealed class EasyOcrService : IEasyOcrService
             outcome = await CoreAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
         }
 
-        var ordered = SortLinesByReadingOrder(outcome.Lines);
+        return BuildResult(outcome.Lines, outcome.Languages, sw, activity);
+    }
+
+    /// <summary>Sorts into reading order, records metrics/trace tags, and assembles the result.</summary>
+    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity)
+    {
+        var ordered = SortLinesByReadingOrder(lines);
         sw.Stop();
         _logger?.LogInformation("OCR completed: {Count} lines in {Ms:F0} ms", ordered.Count, sw.Elapsed.TotalMilliseconds);
+
+        EasyOcrDiagnostics.Operations.Add(1);
+        EasyOcrDiagnostics.Duration.Record(sw.Elapsed.TotalMilliseconds);
+        EasyOcrDiagnostics.LinesRecognized.Add(ordered.Count);
+        if (activity is not null)
+        {
+            activity.SetTag("easyocr.languages", string.Join(",", languages));
+            activity.SetTag("easyocr.lines", ordered.Count);
+            activity.SetTag("easyocr.gpu", _useGpu);
+        }
 
         return new OcrResult
         {
             FullText = BuildFullText(ordered),
             Lines = ordered,
-            Languages = outcome.Languages,
+            Languages = languages,
             Duration = sw.Elapsed,
             UsedGpu = _useGpu,
         };
@@ -282,6 +409,18 @@ public sealed class EasyOcrService : IEasyOcrService
             throw new ArgumentException("At least one valid language must be specified.", nameof(languages));
 
         return arr;
+    }
+
+    private static IReadOnlyList<DetectedRegion> TranslateRegions(IReadOnlyList<DetectedRegion> regions, int dx, int dy)
+    {
+        if (dx == 0 && dy == 0) return regions;
+        var translated = new List<DetectedRegion>(regions.Count);
+        foreach (var r in regions)
+        {
+            var poly = r.BoundingPolygon.Select(p => new OcrPoint(p.X + dx, p.Y + dy)).ToArray();
+            translated.Add(r with { BoundingPolygon = poly, BoundingBox = OcrBoundingBox.FromPoints(poly) });
+        }
+        return translated;
     }
 
     private static IReadOnlyList<OcrLine> TranslateLines(IReadOnlyList<OcrLine> lines, int dx, int dy)

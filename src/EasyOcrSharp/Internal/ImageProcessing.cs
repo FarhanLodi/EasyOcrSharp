@@ -12,6 +12,14 @@ namespace EasyOcrSharp.Internal;
 internal static class ImageProcessing
 {
     /// <summary>
+    /// Minimum width (px) of a recognizer input. The CRNN's conv/pooling stack downsamples width ~4×;
+    /// a thinner input (a 1–2px sliver from a noisy scan) collapses to a zero/one-width feature map and
+    /// makes ONNX Runtime throw "Invalid input shape". Narrow crops are edge-padded up to this width.
+    /// </summary>
+    private const int MinCrnnWidth = 16;
+
+
+    /// <summary>
     /// EasyOCR's CRAFT preprocessing: resize so the longer edge ≤ <paramref name="canvasSize"/>,
     /// pad to a multiple of 32, normalize with ImageNet mean/std.
     /// Returns the input tensor in NCHW order plus the (heatmap → original-image) scale factors
@@ -82,7 +90,7 @@ internal static class ImageProcessing
     /// Width is dynamic (no fixed-canvas padding) — the ONNX graph accepts variable width, so each
     /// box is fed at its true resized width just like upstream EasyOCR's single-box inference.
     /// </summary>
-    public static float[] PreprocessForCrnn(Image<Rgb24> crop, int targetHeight, int maxWidth, bool adjustContrast, out int width)
+    public static float[] PreprocessForCrnn(Image<Rgb24> crop, int targetHeight, int maxWidth, bool adjustContrast, out int width, double contrastTarget = 0.5)
     {
         int srcW = crop.Width;
         int srcH = crop.Height;
@@ -94,39 +102,48 @@ internal static class ImageProcessing
 
         // EasyOCR: resized_w = ceil(imgH * w/h), capped at imgW (the batch max width).
         double ratio = (double)srcW / srcH;
-        int newW = (int)Math.Ceiling(targetHeight * ratio);
-        if (newW < 1) newW = 1;
-        if (newW > maxWidth) newW = maxWidth;
-        width = newW;
+        int contentW = (int)Math.Ceiling(targetHeight * ratio);
+        if (contentW < 1) contentW = 1;
+        if (contentW > maxWidth) contentW = maxWidth;
+
+        // Guarantee a minimum width so the CRNN never receives a degenerate tensor. Narrow crops keep
+        // their true aspect (resized to contentW) and are right-padded by replicating the last column —
+        // EasyOCR's NormalizePAD behaviour.
+        int finalW = Math.Min(maxWidth, Math.Max(contentW, MinCrnnWidth));
+        width = finalW;
 
         using var resized = crop.Clone(ctx => ctx
             .Grayscale()
             .Resize(new ResizeOptions
             {
-                Size = new Size(newW, targetHeight),
+                Size = new Size(contentW, targetHeight),
                 Sampler = KnownResamplers.Bicubic,
                 Mode = ResizeMode.Stretch,
             }));
 
-        // Pull grayscale bytes (stored equally in R/G/B) into a H×W buffer.
-        var grey = new byte[targetHeight * newW];
+        // Pull grayscale bytes (stored equally in R/G/B) into a H×finalW buffer, edge-padding the right.
+        var grey = new byte[targetHeight * finalW];
         resized.ProcessPixelRows(rows =>
         {
             for (int y = 0; y < targetHeight; y++)
             {
                 var row = rows.GetRowSpan(y);
-                int baseIdx = y * newW;
-                for (int x = 0; x < newW; x++)
+                int baseIdx = y * finalW;
+                for (int x = 0; x < contentW; x++)
                     grey[baseIdx + x] = row[x].R;
+
+                byte edge = row[contentW - 1].R; // replicate last real column into the padding
+                for (int x = contentW; x < finalW; x++)
+                    grey[baseIdx + x] = edge;
             }
         });
 
         if (adjustContrast)
         {
-            AdjustContrastGrey(grey, target: 0.5);
+            AdjustContrastGrey(grey, target: contrastTarget);
         }
 
-        var tensor = new float[targetHeight * newW];
+        var tensor = new float[grey.Length];
         for (int i = 0; i < grey.Length; i++)
         {
             tensor[i] = (grey[i] / 255f - 0.5f) / 0.5f;
