@@ -7,8 +7,8 @@
 		<LangVersion>latest</LangVersion>
 		<IsAotCompatible>true</IsAotCompatible>
 		<PackageId>EasyOcrSharp</PackageId>
-		<Version>2.2.2</Version>
-		<PackageReleaseNotes>2.2.2: hardening + performance + accuracy pass. Security: image decompression-bomb guard (MaxImagePixels), PDF page/size guards (MaxPages, MaxPageMegapixels), HTTPS-only model source + fail-closed checksum verification, model file-name traversal check. Thread-safety: recognizer cache no longer poisoned by a cancelled/failed load; DisposeAsync drains in-flight OCR before releasing sessions. Performance: contiguous Buffer.Span tensor reads, PerspectiveWarp sub-rect copy, CPU intra-op=1 under box-level parallelism, pooled scratch buffers, new WarmUp() to remove cold-start latency. Accuracy: column/font-aware reading order, IoU NMS box de-dup, dominant-script bias on multi-language requests. Added typed exceptions (ModelDownload/Checksum/OfflineModelMissing/PdfProcessing/ImageTooLarge) and OcrResult.SourceWidth/Height. No public method renamed; all additive or safer defaults. See CHANGELOG.md. 2.2.1: clearer typed errors for bad PDFs. 2.2.0: PDF I/O, exporters, telemetry, resilient downloads, auto-GPU, EasyOCR parity.</PackageReleaseNotes>
+		<Version>2.2.3</Version>
+		<PackageReleaseNotes>2.2.3: dependency updates (ONNX Runtime 1.27.0, Microsoft.Extensions 10.0.9) plus the hardening + performance + accuracy pass. Security: image decompression-bomb guard (MaxImagePixels), PDF page/size guards (MaxPages, MaxPageMegapixels), HTTPS-only model source + fail-closed checksum verification, model file-name traversal check. Thread-safety: recognizer cache no longer poisoned by a cancelled/failed load; DisposeAsync drains in-flight OCR before releasing sessions. Performance: contiguous Buffer.Span tensor reads, PerspectiveWarp sub-rect copy, CPU intra-op=1 under box-level parallelism, pooled scratch buffers, new WarmUp() to remove cold-start latency. Accuracy: column/font-aware reading order, IoU NMS box de-dup, dominant-script bias on multi-language requests. Added typed exceptions (ModelDownload/Checksum/OfflineModelMissing/PdfProcessing/ImageTooLarge) and OcrResult.SourceWidth/Height. No public method renamed; all additive or safer defaults. See CHANGELOG.md. 2.2.1: clearer typed errors for bad PDFs. 2.2.0: PDF I/O, exporters, telemetry, resilient downloads, auto-GPU, EasyOCR parity.</PackageReleaseNotes>
 		<Authors>Farhan Lodi</Authors>
 		<Description>High-accuracy native .NET OCR powered by EasyOCR's neural models running on ONNX Runtime. No Python required.</Description>
 		<PackageTags>OCR;EasyOCR;ONNX;TextRecognition;CRAFT;CRNN;.NET10;AOT</PackageTags>
@@ -30,10 +30,10 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.8" />
-		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.8" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
-		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.26.0" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.9" />
+		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.9" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.0" />
 		<PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
 		<!-- PDFium-based PDF rasterization for the built-in PDF input / searchable-PDF output. -->
 		<PackageReference Include="Docnet.Core" Version="2.6.0" />

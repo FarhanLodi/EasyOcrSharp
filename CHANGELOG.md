@@ -2,11 +2,15 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
-## 2.2.2
+## 2.2.3
 
 Hardening, performance, accuracy, and thread-safety pass from a full technical review. **No public method
 was renamed and no existing API was removed** — every change is additive or a safer default. A few
 defaults change observable behaviour (noted below); set the new options back if you need the old behaviour.
+
+### Dependencies
+- ONNX Runtime `1.26.0` → **`1.27.0`**.
+- `Microsoft.Extensions.*` (DI Abstractions, Diagnostics.HealthChecks, Logging.Abstractions) `10.0.8` → **`10.0.9`**.
 
 ### Security
 - **Image decompression-bomb / pixel-flood guard.** Untrusted images are rejected from their header
