@@ -510,18 +510,24 @@ missing or the device fails to initialize — your app keeps working. The legacy
 still works and forces CUDA. Check `ocr.UseGpu` to see whether an accelerator was selected.
 
 **GPU upgrade hint.** When `Auto` runs on CPU but a real NVIDIA GPU is physically present, EasyOcrSharp
-detects it and tells you the *exact* package to add — `EasyOcrSharp.Gpu` — so there's no guessing. The
-message is logged once at startup and also exposed:
+detects it and can tell you the *exact* package to add — `EasyOcrSharp.Gpu`. It's **silent by default**:
+the hint is exposed as a property you can surface yourself, and nothing is logged unless you opt in with
+`LogGpuHint = true`.
 
 ```csharp
+// Silent by default — read it only if you want to nudge the user yourself:
 await using var ocr = new EasyOcrService();
 if (ocr.GpuAccelerationHint is { } hint) Console.WriteLine(hint);
 // e.g. "EasyOcrSharp: an NVIDIA GPU was detected but OCR is running on CPU. Install the
 //       'EasyOcrSharp.Gpu' NuGet package for CUDA acceleration. ..."
+
+// Opt in to a one-time startup warning in the logs instead:
+await using var verbose = new EasyOcrService(new EasyOcrServiceOptions { LogGpuHint = true });
 ```
 
-(NuGet can't add the package for you at restore time, so the library does the next best thing: detects
-the hardware at runtime and names the precise package to install. Adding it is the only manual step.)
+(NuGet can't add the package for you at restore time, and a library can't install one at runtime — so
+once `EasyOcrSharp.Gpu` is referenced, GPU is used automatically with no code change; adding the package
+is the only manual step.)
 
 ## Resilient & offline model downloads
 

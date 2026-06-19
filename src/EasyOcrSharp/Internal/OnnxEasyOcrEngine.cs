@@ -38,7 +38,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         ResolvedProvider = ExecutionProviderResolver.Resolve(options.ExecutionProvider, logger);
         _activeProvider = ResolvedProvider;
         _primarySessionOptions = ExecutionProviderResolver.BuildSessionOptions(ResolvedProvider, options, logger);
-        GpuHint = BuildGpuHint(options.ExecutionProvider, ResolvedProvider, logger);
+        GpuHint = BuildGpuHint(options.ExecutionProvider, ResolvedProvider, options.LogGpuHint, logger);
         _customByLanguage = BuildCustomIndex(options.CustomRecognizers);
     }
 
@@ -58,10 +58,12 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
 
     /// <summary>
     /// When auto-detection landed on CPU but the host actually has a GPU, builds the package-specific
-    /// upgrade hint (and logs it once). The provider package can't be added at runtime, so the most we
-    /// can do is tell the user precisely which one to install.
+    /// upgrade hint. The string is always returned (and exposed via <see cref="GpuHint"/>); it is only
+    /// logged as a startup warning when <paramref name="logHint"/> is true (off by default, so the
+    /// library stays silent). The provider package can't be added at runtime, so the most we can do is
+    /// tell the user precisely which one to install.
     /// </summary>
-    private static string? BuildGpuHint(OcrExecutionProvider requested, OcrExecutionProvider resolved, ILogger? logger)
+    private static string? BuildGpuHint(OcrExecutionProvider requested, OcrExecutionProvider resolved, bool logHint, ILogger? logger)
     {
         // Only nudge when WE chose CPU via Auto. An explicit Cpu request is a deliberate choice (don't
         // nag); an explicit GPU request that's missing its package is already warned about at append time.
@@ -77,7 +79,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
             : $"EasyOcrSharp: a GPU ({vendor}) was detected but OCR is running on CPU. GPU acceleration is " +
               "currently available for NVIDIA GPUs via the 'EasyOcrSharp.Gpu' package (CUDA 12+).";
 
-        logger?.LogWarning("{GpuHint}", message);
+        if (logHint) logger?.LogWarning("{GpuHint}", message);
         return message;
     }
 

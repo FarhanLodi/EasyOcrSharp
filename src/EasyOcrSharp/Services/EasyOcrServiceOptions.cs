@@ -53,6 +53,15 @@ public sealed class EasyOcrServiceOptions
     /// </summary>
     public bool Quantize { get; set; }
 
+    /// <summary>
+    /// When <c>true</c>, a one-time startup <b>warning</b> is logged if a usable GPU is physically present
+    /// but OCR is running on CPU (it names the exact provider package to install, e.g.
+    /// <c>EasyOcrSharp.Gpu</c>). Default <c>false</c> — the hint is silent, so nothing is logged.
+    /// Regardless of this flag, <see cref="EasyOcrService.GpuAccelerationHint"/> is still populated, so an
+    /// app that wants the nudge can read and surface it itself.
+    /// </summary>
+    public bool LogGpuHint { get; set; }
+
     /// <summary>Maps the public options to the engine's internal configuration record.</summary>
     internal EngineOptions ToEngineOptions()
     {
@@ -73,6 +82,7 @@ public sealed class EasyOcrServiceOptions
             Download = Download,
             CustomRecognizers = CustomRecognizers.ToArray(),
             Quantize = Quantize,
+            LogGpuHint = LogGpuHint,
         };
     }
 }

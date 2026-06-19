@@ -223,6 +223,14 @@ public class OptionsTests
     }
 
     [Fact]
+    public void LogGpuHint_IsSilentByDefault()
+    {
+        // The startup GPU warning is opt-in: off unless the caller explicitly turns it on. The hint is
+        // still exposed via the property (covered by AutoGpuHint_WhenPresent_NamesTheGpuPackage).
+        Assert.False(new EasyOcrServiceOptions().LogGpuHint);
+    }
+
+    [Fact]
     public void AutoGpuHint_WhenPresent_NamesTheGpuPackage()
     {
         // On CI (no GPU) this is null; on a GPU box it must name the concrete, installable package

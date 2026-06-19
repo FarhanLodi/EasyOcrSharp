@@ -26,4 +26,10 @@ internal sealed record EngineOptions
 
     /// <summary>Use the int8-quantized recognizer variants (EasyOCR's <c>quantize=True</c>).</summary>
     public bool Quantize { get; init; }
+
+    /// <summary>
+    /// Log the GPU upgrade hint as a one-time startup warning (default false). The hint string is always
+    /// computed and exposed via <see cref="OnnxEasyOcrEngine.GpuHint"/> regardless of this flag.
+    /// </summary>
+    public bool LogGpuHint { get; init; }
 }
