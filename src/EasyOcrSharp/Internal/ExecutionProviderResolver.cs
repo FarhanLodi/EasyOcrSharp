@@ -85,7 +85,16 @@ internal static class ExecutionProviderResolver
     /// Builds <see cref="SessionOptions"/> for a concrete (already-resolved) provider. A non-CPU
     /// provider that fails to attach logs a warning and leaves the options on CPU rather than throwing.
     /// </summary>
-    public static SessionOptions BuildSessionOptions(OcrExecutionProvider provider, EngineOptions options, ILogger? logger)
+    /// <param name="provider">The concrete, already-resolved execution provider to configure.</param>
+    /// <param name="options">Engine options supplying optional intra/inter-op thread counts.</param>
+    /// <param name="logger">Optional logger for provider-attach diagnostics.</param>
+    /// <param name="perBoxParallel">
+    /// True for the per-box CRNN recognizer, which is invoked from a data-parallel <c>Parallel.For</c> over
+    /// regions. On CPU, when the caller hasn't pinned a thread count, its intra-op threads are capped to 1 so
+    /// the box-level parallelism supplies the concurrency instead of fighting ORT's intra-op pool for it. The
+    /// CRAFT detector (a single big run per image) keeps the default and benefits from intra-op parallelism.
+    /// </param>
+    public static SessionOptions BuildSessionOptions(OcrExecutionProvider provider, EngineOptions options, ILogger? logger, bool perBoxParallel = false)
     {
         var opts = new SessionOptions
         {
@@ -93,6 +102,7 @@ internal static class ExecutionProviderResolver
         };
 
         if (options.IntraOpNumThreads is { } intra and > 0) opts.IntraOpNumThreads = intra;
+        else if (perBoxParallel && provider == OcrExecutionProvider.Cpu) opts.IntraOpNumThreads = 1;
         if (options.InterOpNumThreads is { } inter and > 0) opts.InterOpNumThreads = inter;
 
         switch (provider)

@@ -7,8 +7,8 @@
 		<LangVersion>latest</LangVersion>
 		<IsAotCompatible>true</IsAotCompatible>
 		<PackageId>EasyOcrSharp</PackageId>
-		<Version>2.2.1</Version>
-		<PackageReleaseNotes>2.2.1: malformed/corrupt/empty/encrypted PDFs now raise a clear EasyOcrSharpException (instead of a raw underlying exception); added robustness/edge-case test coverage. No API changes. 2.2.0: built-in PDF input + searchable-PDF output; hOCR/ALTO/TSV/JSON exporters; OpenTelemetry metrics/tracing + health check; resilient resumable model downloads; automatic GPU (CUDA/CoreML) with CPU fallback; EasyOCR parity (beam / word-beam decoders, per-box rotation, recognize-from-boxes, custom recognizers, int8 quantized models, exposed grouping/contrast thresholds). All additive — existing APIs unchanged. See CHANGELOG.md.</PackageReleaseNotes>
+		<Version>2.2.2</Version>
+		<PackageReleaseNotes>2.2.2: hardening + performance + accuracy pass. Security: image decompression-bomb guard (MaxImagePixels), PDF page/size guards (MaxPages, MaxPageMegapixels), HTTPS-only model source + fail-closed checksum verification, model file-name traversal check. Thread-safety: recognizer cache no longer poisoned by a cancelled/failed load; DisposeAsync drains in-flight OCR before releasing sessions. Performance: contiguous Buffer.Span tensor reads, PerspectiveWarp sub-rect copy, CPU intra-op=1 under box-level parallelism, pooled scratch buffers, new WarmUp() to remove cold-start latency. Accuracy: column/font-aware reading order, IoU NMS box de-dup, dominant-script bias on multi-language requests. Added typed exceptions (ModelDownload/Checksum/OfflineModelMissing/PdfProcessing/ImageTooLarge) and OcrResult.SourceWidth/Height. No public method renamed; all additive or safer defaults. See CHANGELOG.md. 2.2.1: clearer typed errors for bad PDFs. 2.2.0: PDF I/O, exporters, telemetry, resilient downloads, auto-GPU, EasyOCR parity.</PackageReleaseNotes>
 		<Authors>Farhan Lodi</Authors>
 		<Description>High-accuracy native .NET OCR powered by EasyOCR's neural models running on ONNX Runtime. No Python required.</Description>
 		<PackageTags>OCR;EasyOCR;ONNX;TextRecognition;CRAFT;CRNN;.NET10;AOT</PackageTags>

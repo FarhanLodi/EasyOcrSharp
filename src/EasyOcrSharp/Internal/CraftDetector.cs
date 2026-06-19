@@ -55,16 +55,17 @@ internal sealed class CraftDetector : IDisposable
         int hh = output.Dimensions[1];
         int hw = output.Dimensions[2];
 
-        var textMap = new float[hh * hw];
-        var linkMap = new float[hh * hw];
-        for (int y = 0; y < hh; y++)
+        // The output is row-major contiguous with the two channels interleaved (…, text, link, text, …).
+        // Drain the buffer in one linear pass instead of the strided 4-D indexer (which recomputes the
+        // offset per element); splitting even/odd into the two heatmaps.
+        int plane = hh * hw;
+        var textMap = new float[plane];
+        var linkMap = new float[plane];
+        var data = output is DenseTensor<float> dense ? dense.Buffer.Span : output.ToArray();
+        for (int p = 0; p < plane; p++)
         {
-            for (int x = 0; x < hw; x++)
-            {
-                int idx = y * hw + x;
-                textMap[idx] = output[0, y, x, 0];
-                linkMap[idx] = output[0, y, x, 1];
-            }
+            textMap[p] = data[p * 2];
+            linkMap[p] = data[p * 2 + 1];
         }
 
         return ExtractBoxes(textMap, linkMap, hw, hh,

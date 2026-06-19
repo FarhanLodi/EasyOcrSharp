@@ -34,6 +34,15 @@ public sealed record OcrResult
     public bool UsedGpu { get; init; }
 
     /// <summary>
+    /// Gets the width (px) of the image OCR ran on, or 0 if unknown. Useful for exporters (hOCR/ALTO) and
+    /// for normalizing bounding boxes without having to carry the source image alongside the result.
+    /// </summary>
+    public int SourceWidth { get; init; }
+
+    /// <summary>Gets the height (px) of the image OCR ran on, or 0 if unknown.</summary>
+    public int SourceHeight { get; init; }
+
+    /// <summary>
     /// Creates an empty result instance.
     /// </summary>
     public static OcrResult Empty { get; } = new()

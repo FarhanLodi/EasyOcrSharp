@@ -42,9 +42,29 @@ internal static class PerspectiveWarp
         var h = ComputeHomography(dst, src);
         if (h is null) return AxisAlignedCrop(source, quad);
 
-        int sw = source.Width, sh = source.Height;
+        // Copy only the source bounding box of the quad (plus a 1px halo for bilinear sampling), not the
+        // whole frame — a slanted box on a 2560² page otherwise copied ~20 MB per region. Homography
+        // sample coordinates are in full-image space, so subtract the sub-rect origin before sampling.
+        double qMinX = Math.Min(Math.Min(tl.X, tr.X), Math.Min(br.X, bl.X));
+        double qMinY = Math.Min(Math.Min(tl.Y, tr.Y), Math.Min(br.Y, bl.Y));
+        double qMaxX = Math.Max(Math.Max(tl.X, tr.X), Math.Max(br.X, bl.X));
+        double qMaxY = Math.Max(Math.Max(tl.Y, tr.Y), Math.Max(br.Y, bl.Y));
+        int ox = Math.Max(0, (int)Math.Floor(qMinX) - 1);
+        int oy = Math.Max(0, (int)Math.Floor(qMinY) - 1);
+        int ex = Math.Min(source.Width, (int)Math.Ceiling(qMaxX) + 1);
+        int ey = Math.Min(source.Height, (int)Math.Ceiling(qMaxY) + 1);
+        int sw = ex - ox, sh = ey - oy;
+        if (sw < 2 || sh < 2) return AxisAlignedCrop(source, quad);
+
         var srcBuf = new Rgb24[sw * sh];
-        source.CopyPixelDataTo(srcBuf);
+        source.ProcessPixelRows(rows =>
+        {
+            for (int yy = 0; yy < sh; yy++)
+            {
+                var row = rows.GetRowSpan(oy + yy);
+                row.Slice(ox, sw).CopyTo(srcBuf.AsSpan(yy * sw, sw));
+            }
+        });
 
         var dstBuf = new Rgb24[dstW * dstH];
         for (int v = 0; v < dstH; v++)
@@ -55,7 +75,7 @@ internal static class PerspectiveWarp
                 if (Math.Abs(denom) < 1e-9) continue;
                 double sx = (h[0] * u + h[1] * v + h[2]) / denom;
                 double sy = (h[3] * u + h[4] * v + h[5]) / denom;
-                dstBuf[v * dstW + u] = BilinearSample(srcBuf, sw, sh, sx, sy);
+                dstBuf[v * dstW + u] = BilinearSample(srcBuf, sw, sh, sx - ox, sy - oy);
             }
         }
         return Image.LoadPixelData<Rgb24>(dstBuf, dstW, dstH);

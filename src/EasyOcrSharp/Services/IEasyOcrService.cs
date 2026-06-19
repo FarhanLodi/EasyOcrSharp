@@ -102,4 +102,12 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
         CancellationToken cancellationToken = default)
         => throw new NotSupportedException(
             $"{GetType().Name} does not implement RecognizeRegionsAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>
+    /// Optionally preloads the detector and the recognizer pack(s) for the given languages so the first
+    /// real OCR call doesn't pay model-download + ONNX session-initialization latency. A no-op by default
+    /// on custom implementations; <see cref="EasyOcrService"/> performs the warm-up.
+    /// </summary>
+    Task WarmUp(IEnumerable<string> languages, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
 }

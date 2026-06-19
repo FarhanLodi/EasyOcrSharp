@@ -33,7 +33,9 @@ public class OfflineModeTests
             });
 
             using var image = new Image<Rgb24>(64, 64, new Rgb24(255, 255, 255));
-            var ex = await Assert.ThrowsAsync<EasyOcrSharpException>(
+            // Now a typed subclass of EasyOcrSharpException so callers can distinguish offline-missing
+            // from other failures; catch-all `catch (EasyOcrSharpException)` still works at runtime.
+            var ex = await Assert.ThrowsAsync<OfflineModelMissingException>(
                 () => ocr.ExtractTextFromImage(image, new[] { "en" }));
 
             Assert.Contains("offline", ex.Message, StringComparison.OrdinalIgnoreCase);

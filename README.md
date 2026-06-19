@@ -53,6 +53,7 @@ Python interpreter, no PyTorch, no native OCR binaries, and nothing leaves the m
 - [Observability & health checks](#observability--health-checks)
 - [Dependency injection](#dependency-injection)
 - [GPU & execution providers](#gpu--execution-providers)
+- [Hardening & resource limits](#hardening--resource-limits)
 - [Resilient & offline model downloads](#resilient--offline-model-downloads)
 - [Supported languages](#supported-languages)
 - [How model downloads work](#how-model-downloads-work)
@@ -100,11 +101,13 @@ The first call for a language downloads its model (cached afterwards). Detected 
 ```csharp
 public sealed record OcrResult
 {
-    public string FullText { get; }                 // all lines joined by newlines
+    public string FullText { get; }                 // all lines joined by newlines (reading order)
     public IReadOnlyList<OcrLine> Lines { get; }
     public IReadOnlyList<string> Languages { get; }
     public TimeSpan Duration { get; }
     public bool UsedGpu { get; }
+    public int SourceWidth { get; }                 // dimensions OCR ran on (0 if unknown) — handy for exporters
+    public int SourceHeight { get; }
 }
 
 public sealed record OcrLine
@@ -529,10 +532,49 @@ await using var verbose = new EasyOcrService(new EasyOcrServiceOptions { LogGpuH
 once `EasyOcrSharp.Gpu` is referenced, GPU is used automatically with no code change; adding the package
 is the only manual step.)
 
+## Hardening & resource limits
+
+When OCR-ing **untrusted** images or PDFs, EasyOcrSharp guards against decompression-bomb / pixel-flood
+denial of service. The defaults are generous; raise them if you legitimately process larger inputs, or
+set them to `0` to disable a guard.
+
+```csharp
+await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
+{
+    MaxImagePixels = 100_000_000,   // reject images over 100 MP from the header, before decode (default)
+});
+
+var pdfOptions = new PdfOcrOptions
+{
+    MaxPages = 5000,                // reject documents with more pages (default)
+    MaxPageMegapixels = 200,        // reject a page that would rasterize larger at the chosen DPI (default)
+};
+```
+
+Failures surface as **typed exceptions** (all derive `EasyOcrSharpException`, so a catch-all still works):
+
+| Exception | When |
+|---|---|
+| `ImageTooLargeException` | image exceeds `MaxImagePixels` |
+| `PdfProcessingException` | corrupt / encrypted PDF, or a page/size guard tripped |
+| `ModelDownloadException` | download failed, or a non-HTTPS / malformed model source |
+| `ModelChecksumException` | downloaded model failed (or lacks) SHA256 verification |
+| `OfflineModelMissingException` | model not cached and `Offline = true` |
+
+### Warm-up (remove cold-start latency)
+
+Preload the detector and recognizer packs so the first real request doesn't pay model-download +
+session-init latency — ideal for serverless / scale-out:
+
+```csharp
+await ocr.WarmUp(new[] { "en" });   // downloads + initializes once, up front
+```
+
 ## Resilient & offline model downloads
 
 Model downloads are production-hardened: atomic, SHA256-verified, **resumable** (HTTP range), and
-**retried** with exponential backoff. Tune everything via `ModelDownloadOptions`:
+**retried** with exponential backoff. By default the model source must be **HTTPS** and every model must
+have a known checksum. Tune everything via `ModelDownloadOptions`:
 
 ```csharp
 await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
@@ -541,8 +583,10 @@ await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
     {
         MaxRetries = 5,
         Offline = false,                              // true = never download; fail fast if not cached
-        BaseUrlOverride = "https://mirror.corp/ocr",  // private mirror
+        BaseUrlOverride = "https://mirror.corp/ocr",  // private mirror (must be https unless opted out)
         HttpClientFactory = () => httpClientFactory.CreateClient("ocr"), // proxy / corporate certs
+        // AllowInsecureModelSource = true,           // permit a plain-http mirror you control
+        // AllowUnverifiedModels   = true,            // permit unlisted models that have no registry checksum
         Progress = new Progress<ModelDownloadProgress>(p =>
             Console.WriteLine($"{p.FileName}: {p.Fraction:P0}")),
     },
@@ -612,7 +656,16 @@ EASYOCRSHARP_MODEL_BASE_URL=https://files.mycorp.example/ocr   # private/offline
 EasyOcrSharp reproduces EasyOCR's pipeline faithfully — aspect-preserving resize, normalization, a
 low-confidence contrast-retry pass, CRAFT box dilation, perspective de-warping of rotated text, and
 CTC decoding (greedy by default, with optional beam / word-beam search) — so output matches upstream
-EasyOCR. As with any OCR:
+EasyOCR. On top of that:
+
+- **Reading order** is column-aware and bands rows by a line-height-relative tolerance, so headings,
+  high-DPI scans, and multi-column pages come out in natural reading order.
+- **Overlapping detections are de-duplicated** with IoU NMS (`DetectionOptions.NmsIouThreshold`, default
+  `0.6`; set `0` to disable).
+- On **multi-language** requests, scoring is biased toward the page's dominant script so an over-confident
+  wrong-script pack can't hijack individual boxes.
+
+As with any OCR:
 
 - Visually identical glyphs (capital `I` vs lowercase `l`, `$` vs `8`) can be confused.
 - Handwriting and low-resolution / low-contrast text are harder than clean printed text.

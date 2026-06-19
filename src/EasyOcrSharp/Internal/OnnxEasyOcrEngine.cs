@@ -18,10 +18,14 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
 {
     private readonly EngineOptions _options;
     private readonly ILogger? _logger;
-    // Session options for the resolved provider. If an accelerated session fails to initialize at
-    // model-load time we build a CPU set once and route every later session through it.
-    private readonly SessionOptions _primarySessionOptions;
-    private SessionOptions? _cpuFallbackOptions;
+    // Session options for the resolved provider, split by workload: the detector runs one big graph per
+    // image (wants intra-op parallelism); recognizers run from a data-parallel Parallel.For over boxes
+    // (on CPU each gets intra-op=1 so the loop supplies the parallelism). If an accelerated session fails
+    // to initialize at model-load time we build the matching CPU sets once and route later sessions through them.
+    private readonly SessionOptions _detectorSessionOptions;
+    private readonly SessionOptions _recognizerSessionOptions;
+    private SessionOptions? _detectorCpuFallback;
+    private SessionOptions? _recognizerCpuFallback;
     private volatile OcrExecutionProvider _activeProvider;
     private readonly object _fallbackLock = new();
 
@@ -37,7 +41,8 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         _logger = logger;
         ResolvedProvider = ExecutionProviderResolver.Resolve(options.ExecutionProvider, logger);
         _activeProvider = ResolvedProvider;
-        _primarySessionOptions = ExecutionProviderResolver.BuildSessionOptions(ResolvedProvider, options, logger);
+        _detectorSessionOptions = ExecutionProviderResolver.BuildSessionOptions(ResolvedProvider, options, logger, perBoxParallel: false);
+        _recognizerSessionOptions = ExecutionProviderResolver.BuildSessionOptions(ResolvedProvider, options, logger, perBoxParallel: true);
         GpuHint = BuildGpuHint(options.ExecutionProvider, ResolvedProvider, options.LogGpuHint, logger);
         _customByLanguage = BuildCustomIndex(options.CustomRecognizers);
     }
@@ -106,34 +111,39 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
     /// provider is compiled in yet no usable device is present), this permanently downgrades the engine
     /// to CPU and retries once, so the very first model load can't hard-fail on a bad accelerator.
     /// </summary>
-    private T CreateSessionBacked<T>(Func<SessionOptions, T> factory)
+    private T CreateSessionBacked<T>(Func<SessionOptions, T> factory, bool recognizer)
     {
+        var primary = recognizer ? _recognizerSessionOptions : _detectorSessionOptions;
         if (_activeProvider == OcrExecutionProvider.Cpu)
-            return factory(_cpuFallbackOptions ?? _primarySessionOptions);
+        {
+            var fallback = recognizer ? _recognizerCpuFallback : _detectorCpuFallback;
+            return factory(fallback ?? primary);
+        }
 
         try
         {
-            return factory(_primarySessionOptions);
+            return factory(primary);
         }
         catch (Exception ex)
         {
-            return factory(DowngradeToCpu(ex));
+            return factory(DowngradeToCpu(ex, recognizer));
         }
     }
 
-    private SessionOptions DowngradeToCpu(Exception cause)
+    private SessionOptions DowngradeToCpu(Exception cause, bool recognizer)
     {
         lock (_fallbackLock)
         {
-            if (_cpuFallbackOptions is null)
+            if (_detectorCpuFallback is null)
             {
                 _logger?.LogWarning(cause,
                     "{Provider} session initialization failed at model load; falling back to CPU for all sessions.",
                     _activeProvider);
-                _cpuFallbackOptions = ExecutionProviderResolver.BuildSessionOptions(OcrExecutionProvider.Cpu, _options, _logger);
+                _detectorCpuFallback = ExecutionProviderResolver.BuildSessionOptions(OcrExecutionProvider.Cpu, _options, _logger, perBoxParallel: false);
+                _recognizerCpuFallback = ExecutionProviderResolver.BuildSessionOptions(OcrExecutionProvider.Cpu, _options, _logger, perBoxParallel: true);
                 _activeProvider = OcrExecutionProvider.Cpu;
             }
-            return _cpuFallbackOptions;
+            return (recognizer ? _recognizerCpuFallback : _detectorCpuFallback)!;
         }
     }
 
@@ -151,6 +161,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         var polygons = options.Grouping == TextGrouping.Word
             ? rawPolygons
             : TextBoxGrouper.Group(rawPolygons, image.Width, image.Height, options.GroupingOptions);
+        polygons = BoxNms.Reduce(polygons, options.Detection.NmsIouThreshold);
         _logger?.LogInformation("CRAFT detected {Raw} regions, using {Count} regions ({Mode} grouping)",
             rawPolygons.Count, polygons.Count, options.Grouping);
 
@@ -191,19 +202,42 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
             perPackResults.Add(recognizer.Recognize(image, polygons, run));
         }
 
-        // Pick the highest-confidence non-empty result per polygon across packs.
+        // Pick the best reading per polygon. With one pack it's simply that pack's output. With multiple
+        // packs (a multi-script request), confidences from different CRNN heads aren't perfectly comparable,
+        // so first find the dominant pack — the one with the highest total confidence·length over the page —
+        // and give it a margin bonus: a rival pack must beat the dominant pack by more than the margin to
+        // override on a given box. This stops a systematically over-confident wrong-script pack from
+        // hijacking individual boxes against the page's main script.
+        int dominant = 0;
+        if (perPackResults.Count > 1)
+        {
+            double bestAgg = double.NegativeInfinity;
+            for (int p = 0; p < perPackResults.Count; p++)
+            {
+                double agg = perPackResults[p]
+                    .Where(l => !string.IsNullOrWhiteSpace(l.Text))
+                    .Sum(l => l.Confidence * l.Text.Length);
+                if (agg > bestAgg) { bestAgg = agg; dominant = p; }
+            }
+        }
+        const double dominantBonus = 0.10;
+
         var merged = new List<OcrLine>(polygons.Count);
         for (int i = 0; i < polygons.Count; i++)
         {
             OcrLine? best = null;
-            foreach (var pack in perPackResults)
+            double bestScore = double.NegativeInfinity;
+            for (int p = 0; p < perPackResults.Count; p++)
             {
+                var pack = perPackResults[p];
                 if (i >= pack.Count) continue;
                 var candidate = pack[i];
                 if (string.IsNullOrWhiteSpace(candidate.Text)) continue;
-                if (best is null || candidate.Confidence > best.Confidence)
+                double score = candidate.Confidence + (p == dominant ? dominantBonus : 0.0);
+                if (best is null || score > bestScore)
                 {
                     best = candidate;
+                    bestScore = score;
                 }
             }
             if (best is not null && best.Confidence >= options.MinConfidence) merged.Add(best);
@@ -303,6 +337,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         var polygons = grouping == TextGrouping.Word
             ? raw
             : TextBoxGrouper.Group(raw, image.Width, image.Height, groupingOptions);
+        polygons = BoxNms.Reduce(polygons, detection.NmsIouThreshold);
 
         var regions = new List<DetectedRegion>(polygons.Count);
         foreach (var poly in polygons)
@@ -314,6 +349,20 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
             });
         }
         return regions;
+    }
+
+    /// <summary>
+    /// Eagerly loads the CRAFT detector and the recognizer pack(s) for the given languages so the first
+    /// real OCR call doesn't pay model download + ONNX session-initialization latency (cold start).
+    /// </summary>
+    public async Task WarmUp(IReadOnlyList<string> languages, CancellationToken cancellationToken)
+    {
+        await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var spec in ResolvePacks(languages).Values)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            await GetOrLoadRecognizerAsync(spec, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static double PolygonArea(OcrPoint[] poly)
@@ -331,7 +380,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         {
             if (_detector is not null) return _detector;
             var path = await ModelDownloadManager.EnsureModelAsync(ModelRegistry.Detector, _options.ModelCachePath, _options.Download, _logger, cancellationToken).ConfigureAwait(false);
-            _detector = CreateSessionBacked(so => new CraftDetector(path, so));
+            _detector = CreateSessionBacked(so => new CraftDetector(path, so), recognizer: false);
             EasyOcrDiagnostics.ModelLoads.Add(1, new KeyValuePair<string, object?>("model", "craft"));
             _logger?.LogInformation("CRAFT detector loaded from {Path}", path);
             return _detector;
@@ -342,12 +391,34 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         }
     }
 
-    private Task<CrnnRecognizer> GetOrLoadRecognizerAsync(RecognizerSpec spec, CancellationToken cancellationToken)
+    private async Task<CrnnRecognizer> GetOrLoadRecognizerAsync(RecognizerSpec spec, CancellationToken cancellationToken)
     {
+        // The load Task is shared across all callers, so it must NOT capture any single caller's
+        // CancellationToken — otherwise the first caller cancelling would poison the cached Task and
+        // every later caller (with a live token) would observe that cancellation. Load with None and
+        // let each caller observe only its own token via WaitAsync.
         var lazy = _recognizers.GetOrAdd(spec.Name, _ => new Lazy<Task<CrnnRecognizer>>(
-            () => LoadRecognizerAsync(spec, cancellationToken),
+            () => LoadRecognizerAsync(spec, CancellationToken.None),
             LazyThreadSafetyMode.ExecutionAndPublication));
-        return lazy.Value;
+
+        var loadTask = lazy.Value;
+        try
+        {
+            return await loadTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // If the shared load itself failed (download/IO/corrupt model), evict the poisoned entry so
+            // a later call retries instead of being served the cached faulted Task forever. A per-caller
+            // cancellation leaves a still-running/successful task in place (loadTask is not faulted),
+            // so only the genuine fault path evicts. TryRemove(pair) is a CAS: it removes only when the
+            // current value is still this exact Lazy, so we never evict a healthy replacement.
+            if (loadTask.IsFaulted)
+            {
+                _recognizers.TryRemove(new KeyValuePair<string, Lazy<Task<CrnnRecognizer>>>(spec.Name, lazy));
+            }
+            throw;
+        }
     }
 
     private async Task<CrnnRecognizer> LoadRecognizerAsync(RecognizerSpec spec, CancellationToken cancellationToken)
@@ -372,7 +443,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
 
         EasyOcrDiagnostics.ModelLoads.Add(1, new KeyValuePair<string, object?>("model", spec.Name));
         _logger?.LogInformation("Recognizer '{Name}' loaded from {Path} ({Count} chars)", spec.Name, modelPath, characters.Length);
-        return CreateSessionBacked(so => new CrnnRecognizer(modelPath, characters, so));
+        return CreateSessionBacked(so => new CrnnRecognizer(modelPath, characters, so), recognizer: true);
     }
 
     /// <summary>
@@ -425,7 +496,9 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
             }
         }
         _recognizers.Clear();
-        _primarySessionOptions.Dispose();
-        _cpuFallbackOptions?.Dispose();
+        _detectorSessionOptions.Dispose();
+        _recognizerSessionOptions.Dispose();
+        _detectorCpuFallback?.Dispose();
+        _recognizerCpuFallback?.Dispose();
     }
 }

@@ -33,7 +33,7 @@ public class PdfRobustnessTests
         var garbage = Encoding.ASCII.GetBytes("%PDF-1.7\nthis is not a real pdf at all\n%%EOF");
         await using var ocr = NewService();
 
-        var ex = await Assert.ThrowsAsync<EasyOcrSharpException>(
+        var ex = await Assert.ThrowsAsync<PdfProcessingException>(
             () => ocr.ExtractTextFromPdfAsync(garbage, new[] { "en" }));
 
         Assert.Contains("PDF", ex.Message);
@@ -46,7 +46,7 @@ public class PdfRobustnessTests
         var notPdf = Encoding.UTF8.GetBytes("just some plain text, definitely not a PDF document");
         await using var ocr = NewService();
 
-        await Assert.ThrowsAsync<EasyOcrSharpException>(
+        await Assert.ThrowsAsync<PdfProcessingException>(
             () => ocr.ExtractTextFromPdfAsync(notPdf, new[] { "en" }));
     }
 
@@ -58,7 +58,7 @@ public class PdfRobustnessTests
         var truncated = valid.AsSpan(0, valid.Length / 2).ToArray();
         await using var ocr = NewService();
 
-        await Assert.ThrowsAsync<EasyOcrSharpException>(
+        await Assert.ThrowsAsync<PdfProcessingException>(
             () => ocr.ExtractTextFromPdfAsync(truncated, new[] { "en" }));
     }
 
@@ -67,7 +67,7 @@ public class PdfRobustnessTests
     {
         await using var ocr = NewService();
 
-        var ex = await Assert.ThrowsAsync<EasyOcrSharpException>(
+        var ex = await Assert.ThrowsAsync<PdfProcessingException>(
             () => ocr.ExtractTextFromPdfAsync(Array.Empty<byte>(), new[] { "en" }));
 
         Assert.Contains("empty", ex.Message, StringComparison.OrdinalIgnoreCase);
@@ -88,7 +88,7 @@ public class PdfRobustnessTests
         var garbage = Encoding.ASCII.GetBytes("%PDF-1.7 broken %%EOF");
         await using var ocr = NewService();
 
-        await Assert.ThrowsAsync<EasyOcrSharpException>(
+        await Assert.ThrowsAsync<PdfProcessingException>(
             () => ocr.CreateSearchablePdfAsync(garbage, new[] { "en" }));
     }
 
@@ -101,7 +101,7 @@ public class PdfRobustnessTests
         Skip.If(pdf is null, "Add an encrypted/password-protected PDF to test/assets/pdf/ to run this.");
 
         await using var ocr = NewService();
-        await Assert.ThrowsAsync<EasyOcrSharpException>(
+        await Assert.ThrowsAsync<PdfProcessingException>(
             () => ocr.ExtractTextFromPdfAsync(pdf!, new[] { "en" }));
     }
 }

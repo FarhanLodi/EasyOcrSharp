@@ -1,3 +1,4 @@
+using System.Buffers;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
@@ -122,55 +123,74 @@ internal static class ImageProcessing
             }));
 
         // Pull grayscale bytes (stored equally in R/G/B) into a H×finalW buffer, edge-padding the right.
-        var grey = new byte[targetHeight * finalW];
-        resized.ProcessPixelRows(rows =>
+        // The scratch grey buffer is pooled (its lifetime is fully contained here); the returned tensor
+        // escapes to ONNX Runtime, so it stays a plain allocation.
+        int greyLen = targetHeight * finalW;
+        var grey = ArrayPool<byte>.Shared.Rent(greyLen);
+        try
         {
-            for (int y = 0; y < targetHeight; y++)
+            resized.ProcessPixelRows(rows =>
             {
-                var row = rows.GetRowSpan(y);
-                int baseIdx = y * finalW;
-                for (int x = 0; x < contentW; x++)
-                    grey[baseIdx + x] = row[x].R;
+                for (int y = 0; y < targetHeight; y++)
+                {
+                    var row = rows.GetRowSpan(y);
+                    int baseIdx = y * finalW;
+                    for (int x = 0; x < contentW; x++)
+                        grey[baseIdx + x] = row[x].R;
 
-                byte edge = row[contentW - 1].R; // replicate last real column into the padding
-                for (int x = contentW; x < finalW; x++)
-                    grey[baseIdx + x] = edge;
+                    byte edge = row[contentW - 1].R; // replicate last real column into the padding
+                    for (int x = contentW; x < finalW; x++)
+                        grey[baseIdx + x] = edge;
+                }
+            });
+
+            if (adjustContrast)
+            {
+                AdjustContrastGrey(grey, greyLen, target: contrastTarget);
             }
-        });
 
-        if (adjustContrast)
-        {
-            AdjustContrastGrey(grey, target: contrastTarget);
+            var tensor = new float[greyLen];
+            for (int i = 0; i < greyLen; i++)
+            {
+                tensor[i] = (grey[i] / 255f - 0.5f) / 0.5f;
+            }
+            return tensor;
         }
-
-        var tensor = new float[grey.Length];
-        for (int i = 0; i < grey.Length; i++)
+        finally
         {
-            tensor[i] = (grey[i] / 255f - 0.5f) / 0.5f;
+            ArrayPool<byte>.Shared.Return(grey);
         }
-        return tensor;
     }
 
     /// <summary>
     /// EasyOCR's <c>adjust_contrast_grey</c>: if the 10th–90th percentile contrast of the grayscale
     /// patch is below <paramref name="target"/>, linearly stretch it. Operates in place on 0–255 bytes.
     /// </summary>
-    private static void AdjustContrastGrey(byte[] grey, double target)
+    private static void AdjustContrastGrey(byte[] grey, int length, double target)
     {
         // contrast = (high - low) / max(10, high + low), where high/low are the 90th/10th percentiles.
-        var sorted = (byte[])grey.Clone();
-        Array.Sort(sorted);
-        byte high = sorted[(int)(0.9 * (sorted.Length - 1))];
-        byte low = sorted[(int)(0.1 * (sorted.Length - 1))];
-
-        double contrast = (high - low) / Math.Max(10.0, high + low);
-        if (contrast >= target) return;
-
-        double ratio = 200.0 / Math.Max(10, high - low);
-        for (int i = 0; i < grey.Length; i++)
+        // `grey` may be an over-sized pooled buffer, so operate strictly on the first `length` bytes.
+        var sorted = ArrayPool<byte>.Shared.Rent(length);
+        try
         {
-            double v = (grey[i] - low + 25) * ratio;
-            grey[i] = (byte)Math.Clamp(v, 0, 255);
+            Array.Copy(grey, sorted, length);
+            Array.Sort(sorted, 0, length);
+            byte high = sorted[(int)(0.9 * (length - 1))];
+            byte low = sorted[(int)(0.1 * (length - 1))];
+
+            double contrast = (high - low) / Math.Max(10.0, high + low);
+            if (contrast >= target) return;
+
+            double ratio = 200.0 / Math.Max(10, high - low);
+            for (int i = 0; i < length; i++)
+            {
+                double v = (grey[i] - low + 25) * ratio;
+                grey[i] = (byte)Math.Clamp(v, 0, 255);
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(sorted);
         }
     }
 }

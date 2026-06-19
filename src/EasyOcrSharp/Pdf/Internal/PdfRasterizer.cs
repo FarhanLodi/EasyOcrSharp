@@ -27,11 +27,13 @@ internal static class PdfRasterizer
     public static async Task ForEachPageAsync(
         byte[] pdfBytes,
         int dpi,
+        int maxPages,
+        long maxPagePixels,
         Func<int, int, Image<Rgb24>, Task> handler,
         CancellationToken cancellationToken)
     {
         if (pdfBytes is null || pdfBytes.Length == 0)
-            throw new EasyOcrSharpException("The PDF input is empty. Provide the bytes of a valid PDF document.");
+            throw new PdfProcessingException("The PDF input is empty. Provide the bytes of a valid PDF document.");
 
         // PDF user space is 72 dpi; scale up to the requested rendering resolution.
         double scale = dpi / 72.0;
@@ -46,7 +48,7 @@ internal static class PdfRasterizer
         }
         catch (Exception ex) when (ex is DocnetException or ArgumentException)
         {
-            throw new EasyOcrSharpException(
+            throw new PdfProcessingException(
                 "The PDF could not be opened. It may be corrupt, not a PDF, or password-protected/encrypted.", ex);
         }
 
@@ -59,7 +61,14 @@ internal static class PdfRasterizer
             }
             catch (DocnetException ex)
             {
-                throw new EasyOcrSharpException("The PDF page count could not be read; the document may be corrupt.", ex);
+                throw new PdfProcessingException("The PDF page count could not be read; the document may be corrupt.", ex);
+            }
+
+            if (maxPages > 0 && count > maxPages)
+            {
+                throw new PdfProcessingException(
+                    $"The PDF has {count} pages, exceeding the limit of {maxPages} (PdfOcrOptions.MaxPages). " +
+                    "Raise the limit to process it, or split the document.");
             }
 
             for (int i = 0; i < count; i++)
@@ -75,13 +84,21 @@ internal static class PdfRasterizer
                     int width = pageReader.GetPageWidth();
                     int height = pageReader.GetPageHeight();
 
+                    if (maxPagePixels > 0 && (long)width * height > maxPagePixels)
+                    {
+                        throw new PdfProcessingException(
+                            $"Page {i + 1} renders to {width}x{height} ({(long)width * height:N0} px) at {dpi} DPI, " +
+                            $"exceeding the per-page limit of {maxPagePixels:N0} px (PdfOcrOptions.MaxPageMegapixels). " +
+                            "Lower the DPI or raise the limit.");
+                    }
+
                     // PDFium emits BGRA with a transparent background; flatten onto white so OCR sees a clean page.
                     byte[] bgra = pageReader.GetImage(new NaiveTransparencyRemover());
                     image = ConvertToRgb24(bgra, width, height);
                 }
                 catch (Exception ex) when (ex is DocnetException or ArgumentException or InvalidOperationException)
                 {
-                    throw new EasyOcrSharpException($"Page {i + 1} of the PDF could not be rendered; the document may be corrupt.", ex);
+                    throw new PdfProcessingException($"Page {i + 1} of the PDF could not be rendered; the document may be corrupt.", ex);
                 }
 
                 using (image)

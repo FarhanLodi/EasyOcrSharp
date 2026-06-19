@@ -177,33 +177,32 @@ internal sealed class CrnnRecognizer : IDisposable
     /// <summary>Normalises a single-sample recognizer output (shape (T,1,C) or (1,T,C)) to (T, C).</summary>
     private static InferenceResult ExtractSingle(Tensor<float> output)
     {
+        var dims = output.Dimensions;
         int t, c;
-        float[,] logits;
-        if (output.Dimensions.Length == 3 && output.Dimensions[1] == 1)
-        {
-            t = output.Dimensions[0];
-            c = output.Dimensions[2];
-            logits = new float[t, c];
-            for (int i = 0; i < t; i++)
-                for (int j = 0; j < c; j++)
-                    logits[i, j] = output[i, 0, j];
-        }
-        else if (output.Dimensions.Length == 3 && output.Dimensions[0] == 1)
-        {
-            t = output.Dimensions[1];
-            c = output.Dimensions[2];
-            logits = new float[t, c];
-            for (int i = 0; i < t; i++)
-                for (int j = 0; j < c; j++)
-                    logits[i, j] = output[0, i, j];
-        }
+        if (dims.Length == 3 && dims[1] == 1) { t = dims[0]; c = dims[2]; }       // (T, 1, C)
+        else if (dims.Length == 3 && dims[0] == 1) { t = dims[1]; c = dims[2]; }  // (1, T, C)
         else
         {
             throw new EasyOcrSharpException(
-                $"Unexpected recognizer output shape [{string.Join(",", output.Dimensions.ToArray())}]. Expected 3D tensor.");
+                $"Unexpected recognizer output shape [{string.Join(",", dims.ToArray())}]. Expected 3D tensor.");
         }
+
+        // Both (T,1,C) and (1,T,C) are row-major contiguous and the singleton axis contributes nothing,
+        // so logical element (i,j) sits at flat index i*c + j in either layout. Read the contiguous buffer
+        // sequentially rather than via the strided multi-dimensional indexer (which recomputes the offset
+        // and bounds-checks on every element — by far the slowest way to drain an ORT tensor).
+        var data = AsReadOnlySpan(output);
+        var logits = new float[t, c];
+        int k = 0;
+        for (int i = 0; i < t; i++)
+            for (int j = 0; j < c; j++)
+                logits[i, j] = data[k++];
         return new InferenceResult(logits, t, c);
     }
+
+    /// <summary>Zero-copy view over an ORT output's contiguous buffer (falls back to a copy if not dense).</summary>
+    private static ReadOnlySpan<float> AsReadOnlySpan(Tensor<float> tensor)
+        => tensor is DenseTensor<float> dense ? dense.Buffer.Span : tensor.ToArray();
 
     // ---- batched inference ----
 
@@ -336,6 +335,7 @@ internal sealed class CrnnRecognizer : IDisposable
 
         int d0 = output.Dimensions[0], d1 = output.Dimensions[1], d2 = output.Dimensions[2];
         var results = new InferenceResult[n];
+        var data = AsReadOnlySpan(output);
 
         // Prefer (N, T, C) when the first axis matches the batch and the second doesn't.
         bool batchFirst = d0 == n && d1 != n;
@@ -348,25 +348,31 @@ internal sealed class CrnnRecognizer : IDisposable
 
         if (batchFirst)
         {
+            // (N, T, C): each sample's T*C block is contiguous at b*T*C.
             int t = d1, c = d2;
             for (int b = 0; b < n; b++)
             {
                 var logits = new float[t, c];
+                int k = b * t * c;
                 for (int i = 0; i < t; i++)
                     for (int j = 0; j < c; j++)
-                        logits[i, j] = output[b, i, j];
+                        logits[i, j] = data[k++];
                 results[b] = new InferenceResult(logits, t, c);
             }
         }
         else
         {
+            // (T, N, C): element (i, j) of sample b is at i*N*C + b*C + j.
             int t = d0, c = d2;
             for (int b = 0; b < n; b++)
             {
                 var logits = new float[t, c];
                 for (int i = 0; i < t; i++)
+                {
+                    int rowBase = i * n * c + b * c;
                     for (int j = 0; j < c; j++)
-                        logits[i, j] = output[i, b, j];
+                        logits[i, j] = data[rowBase + j];
+                }
                 results[b] = new InferenceResult(logits, t, c);
             }
         }

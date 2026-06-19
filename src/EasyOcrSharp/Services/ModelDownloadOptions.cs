@@ -53,4 +53,20 @@ public sealed class ModelDownloadOptions
     /// <c>EASYOCRSHARP_MODEL_BASE_URL</c> environment variable). Use for a private/offline mirror.
     /// </summary>
     public string? BaseUrlOverride { get; set; }
+
+    /// <summary>
+    /// Allow downloading models over a plain (non-HTTPS) URL. Default <c>false</c>: a <c>BaseUrlOverride</c>
+    /// or <c>EASYOCRSHARP_MODEL_BASE_URL</c> that is not <c>https://</c> is rejected, because the model
+    /// download is the supply-chain trust root (a downloaded <c>.onnx</c> is parsed by native ONNX Runtime).
+    /// Enable only for a trusted on-host/offline mirror you control.
+    /// </summary>
+    public bool AllowInsecureModelSource { get; set; }
+
+    /// <summary>
+    /// Allow loading a downloaded model that has no known SHA256 checksum in the registry. Default
+    /// <c>false</c> (fail-closed): every remote model must be integrity-verified. Enable only when serving
+    /// your own unlisted assets from a trusted <c>BaseUrlOverride</c>; local custom recognizers are never
+    /// downloaded and are unaffected.
+    /// </summary>
+    public bool AllowUnverifiedModels { get; set; }
 }

@@ -46,6 +46,14 @@ internal static class ModelDownloadManager
         var cacheDir = GetModelCachePath(customCachePath);
         Directory.CreateDirectory(cacheDir);
 
+        // The asset's file name is concatenated into the cache directory; require it to be a single path
+        // segment so a registry/mirror name can never traverse out of the cache (Zip-Slip-style write).
+        if (asset.FileName.Length == 0 ||
+            !string.Equals(Path.GetFileName(asset.FileName), asset.FileName, StringComparison.Ordinal))
+        {
+            throw new ModelDownloadException($"Refusing to cache model with an unexpected file name '{asset.FileName}'.");
+        }
+
         var finalPath = Path.Combine(cacheDir, asset.FileName);
         if (File.Exists(finalPath))
         {
@@ -54,7 +62,7 @@ internal static class ModelDownloadManager
 
         if (options.Offline)
         {
-            throw new EasyOcrSharpException(
+            throw new OfflineModelMissingException(
                 $"Model '{asset.FileName}' is not present in the cache ('{cacheDir}') and offline mode is enabled. " +
                 "Pre-seed the cache with the required .onnx/.vocab.json files, or disable ModelDownloadOptions.Offline.");
         }
@@ -89,7 +97,7 @@ internal static class ModelDownloadManager
             try
             {
                 await DownloadOnceAsync(url, asset, tempPath, options, logger, ct).ConfigureAwait(false);
-                await VerifyChecksumAsync(asset, tempPath, ct).ConfigureAwait(false);
+                await VerifyChecksumAsync(asset, tempPath, options, ct).ConfigureAwait(false);
                 File.Move(tempPath, finalPath, overwrite: false);
                 return;
             }
@@ -157,15 +165,24 @@ internal static class ModelDownloadManager
         Report(logger, options, asset.FileName, downloaded, total);
     }
 
-    private static async Task VerifyChecksumAsync(ModelAsset asset, string tempPath, CancellationToken ct)
+    private static async Task VerifyChecksumAsync(ModelAsset asset, string tempPath, ModelDownloadOptions options, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(asset.Sha256)) return;
+        if (string.IsNullOrEmpty(asset.Sha256))
+        {
+            // Fail closed: a downloaded model parsed by native ONNX Runtime must be integrity-verified
+            // unless the caller has explicitly opted into unverified assets from a trusted mirror.
+            if (options.AllowUnverifiedModels) return;
+            File.Delete(tempPath);
+            throw new ModelChecksumException(
+                $"Downloaded model '{asset.FileName}' has no known SHA256 checksum to verify against. " +
+                "Set ModelDownloadOptions.AllowUnverifiedModels = true to allow unverified models from a trusted source.");
+        }
 
         var actual = await ComputeSha256Async(tempPath, ct).ConfigureAwait(false);
         if (!string.Equals(actual, asset.Sha256, StringComparison.OrdinalIgnoreCase))
         {
             File.Delete(tempPath);
-            throw new EasyOcrSharpException(
+            throw new ModelChecksumException(
                 $"Downloaded model '{asset.FileName}' failed SHA256 verification. Expected {asset.Sha256}, got {actual}.");
         }
     }
@@ -195,9 +212,29 @@ internal static class ModelDownloadManager
         if (string.IsNullOrWhiteSpace(baseUrl))
             baseUrl = Environment.GetEnvironmentVariable("EASYOCRSHARP_MODEL_BASE_URL");
 
-        return string.IsNullOrWhiteSpace(baseUrl)
-            ? asset.Url
-            : $"{baseUrl.TrimEnd('/')}/{asset.FileName}";
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            return asset.Url; // built-in host is https.
+
+        var url = $"{baseUrl.TrimEnd('/')}/{asset.FileName}";
+        EnsureSecureSource(url, options);
+        return url;
+    }
+
+    /// <summary>
+    /// Rejects a non-HTTPS model source unless the caller has explicitly opted in. The download is the
+    /// supply-chain trust root, so a cleartext override (which an attacker on the path or who can set an
+    /// env var could influence) is refused by default.
+    /// </summary>
+    private static void EnsureSecureSource(string url, ModelDownloadOptions options)
+    {
+        if (options.AllowInsecureModelSource) return;
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+            !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ModelDownloadException(
+                $"Refusing to download a model from a non-HTTPS source '{url}'. Use an https:// mirror, or set " +
+                "ModelDownloadOptions.AllowInsecureModelSource = true to override for a trusted on-host mirror.");
+        }
     }
 
     private static async Task<string> ComputeSha256Async(string path, CancellationToken cancellationToken)

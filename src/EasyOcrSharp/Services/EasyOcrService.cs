@@ -22,7 +22,13 @@ public sealed class EasyOcrService : IEasyOcrService
     private readonly ILogger<EasyOcrService>? _logger;
     private readonly OnnxEasyOcrEngine _engine;
     private readonly bool _useGpu;
-    private bool _disposed;
+    private readonly long _maxImagePixels;
+    private volatile bool _disposed;
+    // Count of OCR operations currently touching the engine's ONNX sessions. DisposeAsync drains this
+    // to zero before disposing the sessions so a session is never freed while a Recognize is in flight
+    // (which would be a native use-after-free, not a clean managed exception).
+    private int _activeOperations;
+    private int _disposeGuard;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="EasyOcrService"/> class.
@@ -50,6 +56,7 @@ public sealed class EasyOcrService : IEasyOcrService
     {
         ArgumentNullException.ThrowIfNull(options);
         _logger = logger;
+        _maxImagePixels = options.MaxImagePixels;
         var engineOptions = options.ToEngineOptions();
         _engine = new OnnxEasyOcrEngine(engineOptions, logger);
         // ResolvedProvider has already turned Auto into a concrete choice based on the installed runtime.
@@ -87,7 +94,7 @@ public sealed class EasyOcrService : IEasyOcrService
             throw new FileNotFoundException($"The image file '{fullPath}' could not be found.", fullPath);
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var image = await Image.LoadAsync<Rgb24>(fullPath, cancellationToken).ConfigureAwait(false);
+        using var image = await LoadGuarded(fullPath, cancellationToken).ConfigureAwait(false);
         return await RunPipelineAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -100,7 +107,7 @@ public sealed class EasyOcrService : IEasyOcrService
     {
         EnsureNotDisposed();
         ArgumentNullException.ThrowIfNull(imageStream);
-        using var image = await Image.LoadAsync<Rgb24>(imageStream, cancellationToken).ConfigureAwait(false);
+        using var image = await LoadGuarded(imageStream, cancellationToken).ConfigureAwait(false);
         return await RunPipelineAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -127,7 +134,7 @@ public sealed class EasyOcrService : IEasyOcrService
             throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var image = Image.Load<Rgb24>(imageBytes.Span);
+        using var image = LoadGuarded(imageBytes.Span);
         return await RunPipelineAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -154,7 +161,7 @@ public sealed class EasyOcrService : IEasyOcrService
         IEnumerable<string>? candidates = null,
         CancellationToken cancellationToken = default)
     {
-        EnsureNotDisposed();
+        using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
         var cand = (candidates?.ToArray() is { Length: > 0 } c) ? c : DefaultAutoDetectCandidates;
         return await _engine.DetectLanguagesAsync(image, cand, cancellationToken).ConfigureAwait(false);
@@ -166,7 +173,7 @@ public sealed class EasyOcrService : IEasyOcrService
         IEnumerable<string>? candidates = null,
         CancellationToken cancellationToken = default)
     {
-        using var image = await Image.LoadAsync<Rgb24>(Path.GetFullPath(imagePath), cancellationToken).ConfigureAwait(false);
+        using var image = await LoadGuarded(Path.GetFullPath(imagePath), cancellationToken).ConfigureAwait(false);
         return await DetectLanguagesAsync(image, candidates, cancellationToken).ConfigureAwait(false);
     }
 
@@ -181,7 +188,7 @@ public sealed class EasyOcrService : IEasyOcrService
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        EnsureNotDisposed();
+        using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
         options ??= RecognitionOptions.Default;
 
@@ -204,7 +211,7 @@ public sealed class EasyOcrService : IEasyOcrService
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        using var image = await Image.LoadAsync<Rgb24>(Path.GetFullPath(imagePath), cancellationToken).ConfigureAwait(false);
+        using var image = await LoadGuarded(Path.GetFullPath(imagePath), cancellationToken).ConfigureAwait(false);
         return await DetectRegionsAsync(image, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -223,7 +230,7 @@ public sealed class EasyOcrService : IEasyOcrService
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        EnsureNotDisposed();
+        using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(regions);
         options ??= RecognitionOptions.Default;
@@ -239,11 +246,11 @@ public sealed class EasyOcrService : IEasyOcrService
         var langs = ResolveLanguages(languages, allowEmpty: false);
         if (polygons.Length == 0)
         {
-            return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity);
+            return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity, image.Width, image.Height);
         }
 
         var lines = await _engine.RecognizeRegionsAsync(image, langs, polygons, options, cancellationToken).ConfigureAwait(false);
-        return BuildResult(lines, langs, sw, activity);
+        return BuildResult(lines, langs, sw, activity, image.Width, image.Height);
     }
 
     /// <summary>Recognizes text inside regions located by a prior <see cref="DetectRegionsAsync(Image{Rgb24}, RecognitionOptions?, CancellationToken)"/> pass.</summary>
@@ -258,6 +265,14 @@ public sealed class EasyOcrService : IEasyOcrService
         return RecognizeRegionsAsync(image, regions.Select(r => r.BoundingPolygon), languages, options, cancellationToken);
     }
 
+    /// <inheritdoc />
+    public async Task WarmUp(IEnumerable<string> languages, CancellationToken cancellationToken = default)
+    {
+        using var op = BeginOperation();
+        var langs = ResolveLanguages(languages, allowEmpty: false);
+        await _engine.WarmUp(langs, cancellationToken).ConfigureAwait(false);
+    }
+
     // ---- pipeline ----
 
     private async Task<OcrResult> RunPipelineAsync(
@@ -266,6 +281,7 @@ public sealed class EasyOcrService : IEasyOcrService
         RecognitionOptions? options,
         CancellationToken cancellationToken)
     {
+        using var op = BeginOperation();
         options ??= RecognitionOptions.Default;
         using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Extract", ActivityKind.Internal);
         var sw = Stopwatch.StartNew();
@@ -281,11 +297,11 @@ public sealed class EasyOcrService : IEasyOcrService
             outcome = await CoreAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
         }
 
-        return BuildResult(outcome.Lines, outcome.Languages, sw, activity);
+        return BuildResult(outcome.Lines, outcome.Languages, sw, activity, image.Width, image.Height);
     }
 
     /// <summary>Sorts into reading order, records metrics/trace tags, and assembles the result.</summary>
-    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity)
+    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0)
     {
         var ordered = SortLinesByReadingOrder(lines);
         sw.Stop();
@@ -308,6 +324,8 @@ public sealed class EasyOcrService : IEasyOcrService
             Languages = languages,
             Duration = sw.Elapsed,
             UsedGpu = _useGpu,
+            SourceWidth = sourceWidth,
+            SourceHeight = sourceHeight,
         };
     }
 
@@ -411,7 +429,7 @@ public sealed class EasyOcrService : IEasyOcrService
         return arr;
     }
 
-    private static IReadOnlyList<DetectedRegion> TranslateRegions(IReadOnlyList<DetectedRegion> regions, int dx, int dy)
+    internal static IReadOnlyList<DetectedRegion> TranslateRegions(IReadOnlyList<DetectedRegion> regions, int dx, int dy)
     {
         if (dx == 0 && dy == 0) return regions;
         var translated = new List<DetectedRegion>(regions.Count);
@@ -423,7 +441,7 @@ public sealed class EasyOcrService : IEasyOcrService
         return translated;
     }
 
-    private static IReadOnlyList<OcrLine> TranslateLines(IReadOnlyList<OcrLine> lines, int dx, int dy)
+    internal static IReadOnlyList<OcrLine> TranslateLines(IReadOnlyList<OcrLine> lines, int dx, int dy)
     {
         if (dx == 0 && dy == 0) return lines;
         var translated = new List<OcrLine>(lines.Count);
@@ -440,13 +458,70 @@ public sealed class EasyOcrService : IEasyOcrService
         return translated;
     }
 
-    private static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines)
+    /// <summary>
+    /// Orders lines into human reading order: split into columns by a clear vertical gutter (read each
+    /// column top-to-bottom before moving right), and within a column band rows by a tolerance derived
+    /// from the median line height — so large headings / high-DPI scans aren't split across bands and
+    /// dense small text isn't merged, unlike a fixed pixel tolerance.
+    /// </summary>
+    internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines)
     {
-        const double yTolerance = 10.0;
-        return lines
-            .OrderBy(l => Math.Round(l.BoundingBox.MinY / yTolerance) * yTolerance)
-            .ThenBy(l => l.BoundingBox.MinX)
-            .ToList();
+        if (lines.Count <= 1) return lines.ToList();
+
+        double medianHeight = Median(lines.Select(l => (double)l.BoundingBox.Height).Where(h => h > 0));
+        double tol = Math.Max(4.0, 0.5 * medianHeight);
+
+        var result = new List<OcrLine>(lines.Count);
+        foreach (var column in DetectColumns(lines, medianHeight))
+        {
+            result.AddRange(column
+                .OrderBy(l => Math.Round(l.BoundingBox.MinY / tol) * tol)
+                .ThenBy(l => l.BoundingBox.MinX));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Groups lines into left-to-right columns separated by a vertical gutter wider than the text. Uses an
+    /// interval sweep over left edges: a new column starts only when the next box's left edge clears the
+    /// running right edge of the current block by more than a gutter (so a full-width title, which bridges
+    /// the gutter, collapses everything back to a single column). Conservative — returns one column when no
+    /// clean gutter exists.
+    /// </summary>
+    private static List<List<OcrLine>> DetectColumns(IReadOnlyList<OcrLine> lines, double medianHeight)
+    {
+        var sorted = lines.OrderBy(l => l.BoundingBox.MinX).ToList();
+        double gutter = Math.Max(20.0, 1.5 * medianHeight);
+
+        var columns = new List<List<OcrLine>>();
+        var current = new List<OcrLine> { sorted[0] };
+        double runningMaxX = sorted[0].BoundingBox.MaxX;
+        for (int i = 1; i < sorted.Count; i++)
+        {
+            var box = sorted[i].BoundingBox;
+            if (box.MinX - runningMaxX > gutter)
+            {
+                columns.Add(current);
+                current = new List<OcrLine>();
+                runningMaxX = box.MaxX;
+            }
+            else
+            {
+                runningMaxX = Math.Max(runningMaxX, box.MaxX);
+            }
+            current.Add(sorted[i]);
+        }
+        columns.Add(current);
+        return columns;
+    }
+
+    private static double Median(IEnumerable<double> values)
+    {
+        var arr = values.ToArray();
+        if (arr.Length == 0) return 0;
+        Array.Sort(arr);
+        int mid = arr.Length / 2;
+        return (arr.Length & 1) == 1 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2.0;
     }
 
     private static string BuildFullText(IEnumerable<OcrLine> lines)
@@ -461,6 +536,59 @@ public sealed class EasyOcrService : IEasyOcrService
         return sb.ToString();
     }
 
+    // ---- guarded image loading (decompression-bomb / pixel-flood DoS guard) ----
+
+    private async Task<Image<Rgb24>> LoadGuarded(string path, CancellationToken ct)
+    {
+        if (_maxImagePixels > 0)
+        {
+            var info = await Image.IdentifyAsync(path, ct).ConfigureAwait(false);
+            GuardPixels(info.Width, info.Height);
+        }
+        return await Image.LoadAsync<Rgb24>(path, ct).ConfigureAwait(false);
+    }
+
+    private async Task<Image<Rgb24>> LoadGuarded(Stream stream, CancellationToken ct)
+    {
+        if (_maxImagePixels <= 0)
+            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+
+        if (stream.CanSeek)
+        {
+            long pos = stream.Position;
+            var info = await Image.IdentifyAsync(stream, ct).ConfigureAwait(false);
+            GuardPixels(info.Width, info.Height);
+            stream.Seek(pos, SeekOrigin.Begin);
+            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+        }
+
+        // Non-seekable: buffer the (small) compressed bytes once so we can inspect the header before
+        // decoding into the full pixel buffer.
+        using var ms = new MemoryStream();
+        await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
+        return LoadGuarded(ms.GetBuffer().AsSpan(0, (int)ms.Length));
+    }
+
+    private Image<Rgb24> LoadGuarded(ReadOnlySpan<byte> bytes)
+    {
+        if (_maxImagePixels > 0)
+        {
+            var info = Image.Identify(bytes);
+            GuardPixels(info.Width, info.Height);
+        }
+        return Image.Load<Rgb24>(bytes);
+    }
+
+    private void GuardPixels(int width, int height)
+    {
+        long pixels = (long)width * height;
+        if (pixels > _maxImagePixels)
+            throw new ImageTooLargeException(
+                $"Image is {width}x{height} ({pixels:N0} px), exceeding the configured limit of " +
+                $"{_maxImagePixels:N0} px (EasyOcrServiceOptions.MaxImagePixels). Raise the limit or downscale " +
+                "the image. This guard protects against decompression-bomb / pixel-flood denial of service.");
+    }
+
     /// <summary>Releases the underlying ONNX sessions. Prefer <see cref="DisposeAsync"/>.</summary>
     public void Dispose()
     {
@@ -471,13 +599,44 @@ public sealed class EasyOcrService : IEasyOcrService
     /// <summary>Asynchronously releases the underlying ONNX detector and recognizer sessions.</summary>
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        await _engine.DisposeAsync().ConfigureAwait(false);
+        // Dispose-once: a second concurrent or repeated call is a no-op.
+        if (Interlocked.Exchange(ref _disposeGuard, 1) != 0) return;
+
+        // Stop new operations entering the gate, then wait for everything already in flight to finish so
+        // we never free an ONNX session out from under an active Recognize.
         _disposed = true;
+        while (Volatile.Read(ref _activeOperations) > 0)
+        {
+            await Task.Delay(15).ConfigureAwait(false);
+        }
+
+        await _engine.DisposeAsync().ConfigureAwait(false);
     }
 
     private void EnsureNotDisposed()
     {
         if (_disposed) throw new ObjectDisposedException(nameof(EasyOcrService));
+    }
+
+    /// <summary>
+    /// Registers an in-flight engine operation and returns a scope that deregisters it on dispose.
+    /// Increment-then-check ordering (paired with <see cref="DisposeAsync"/>'s set-then-drain) guarantees
+    /// that once disposal starts no new operation slips past the gate, and disposal waits for every
+    /// operation already past the gate to finish before the sessions are released.
+    /// </summary>
+    private OperationScope BeginOperation()
+    {
+        Interlocked.Increment(ref _activeOperations);
+        if (_disposed)
+        {
+            Interlocked.Decrement(ref _activeOperations);
+            throw new ObjectDisposedException(nameof(EasyOcrService));
+        }
+        return new OperationScope(this);
+    }
+
+    private readonly struct OperationScope(EasyOcrService owner) : IDisposable
+    {
+        public void Dispose() => Interlocked.Decrement(ref owner._activeOperations);
     }
 }

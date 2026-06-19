@@ -2,6 +2,77 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## 2.2.2
+
+Hardening, performance, accuracy, and thread-safety pass from a full technical review. **No public method
+was renamed and no existing API was removed** — every change is additive or a safer default. A few
+defaults change observable behaviour (noted below); set the new options back if you need the old behaviour.
+
+### Security
+- **Image decompression-bomb / pixel-flood guard.** Untrusted images are rejected from their header
+  *before* the pixels are decoded when the decoded pixel count exceeds
+  `EasyOcrServiceOptions.MaxImagePixels` (default **100 MP**; set `0` to disable) — throws
+  `ImageTooLargeException`.
+- **PDF size guards.** `PdfOcrOptions.MaxPages` (default **5000**) and `MaxPageMegapixels` (default **200**)
+  reject oversized documents before rendering, preventing unbounded memory/CPU from a hostile PDF.
+- **HTTPS-only model source.** A non-`https://` `BaseUrlOverride` / `EASYOCRSHARP_MODEL_BASE_URL` is now
+  refused unless `ModelDownloadOptions.AllowInsecureModelSource = true`.
+- **Fail-closed integrity.** A downloaded model with no known SHA256 checksum is rejected unless
+  `ModelDownloadOptions.AllowUnverifiedModels = true`. Model file names are validated as a single path
+  segment (anti-traversal).
+
+### Fixed — correctness & thread-safety
+- **Recognizer cache no longer poisoned by cancellation.** A per-caller `CancellationToken` is no longer
+  captured into the shared model-load task, so one caller cancelling can't fail the language pack for
+  every other caller. A genuinely failed load is now evicted and retried on the next call (was cached as
+  a permanent failure).
+- **Safe disposal under load.** `DisposeAsync` drains in-flight OCR operations before releasing the ONNX
+  sessions, preventing a native use-after-free when a service is disposed while a request is in flight.
+  Double-dispose is a no-op.
+
+### Performance
+- ONNX outputs are drained via the contiguous `Buffer.Span` instead of the per-element strided tensor
+  indexer (recognizer and detector) — markedly faster output extraction.
+- `PerspectiveWarp` copies only a region's bounding box, not the whole page, for each rotated box.
+- On CPU, per-box recognizer sessions default to a single intra-op thread (the box-level `Parallel.For`
+  supplies the parallelism), avoiding thread-pool oversubscription; the detector keeps full intra-op
+  parallelism for its single large run.
+- Per-box scratch buffers are pooled (`ArrayPool`).
+- **`IEasyOcrService.WarmUp(languages)`** preloads the detector and recognizer packs so the first real
+  request doesn't pay model-download + session-init latency.
+
+### Accuracy
+- **Reading order** is now column-aware and bands rows by a line-height-relative tolerance (was a fixed
+  10 px) — fixes line ordering on large headings, high-DPI scans, and multi-column pages.
+- **IoU NMS** de-duplicates overlapping detected boxes (`DetectionOptions.NmsIouThreshold`, default
+  **0.6**; `0` disables).
+- **Multi-language requests** bias toward the page's dominant script, so an over-confident wrong-script
+  recognizer pack can't hijack individual boxes.
+- Confirmed the greedy-decode confidence (`custom_mean`) matches EasyOCR's reference (averaged over
+  non-blank timesteps) and pinned it with a regression test.
+
+### Added — API (additive, non-breaking)
+- Typed exceptions deriving `EasyOcrSharpException` (catch-all keeps working): `ModelDownloadException`,
+  `ModelChecksumException`, `OfflineModelMissingException`, `PdfProcessingException`,
+  `ImageTooLargeException`.
+- `OcrResult.SourceWidth` / `SourceHeight` (the dimensions OCR ran on; handy for exporters).
+- PDF file reads (`ExtractTextFromPdfAsync(path)`, `CreateSearchablePdfAsync(inputPath, …)`) are now fully
+  async and honour the `CancellationToken`.
+
+### Tests & CI
+- New CI-safe unit tests: column/font-aware reading order, IoU NMS, the confidence-formula pin, region→
+  image coordinate translation, disposal semantics, the image-size guard, and the hardened download path
+  (checksum mismatch, retry/backoff, HTTP-range resume, HTTPS-only, fail-closed, file-name traversal).
+- New **CER/WER accuracy harness** (`TextMetrics` + a fixture-driven, ground-truth-gated regression test).
+- CI now also runs on **macOS** and adds an informational **Native AOT publish** smoke job.
+
+### Behaviour changes to be aware of
+- IoU NMS and the new reading order slightly change box de-duplication and line ordering versus 2.2.1.
+- The new image/PDF size guards may reject very large *untrusted* inputs — raise `MaxImagePixels` /
+  `MaxPages` / `MaxPageMegapixels` if you legitimately process larger inputs.
+- A custom mirror over plain HTTP, or serving models without a registry checksum, now needs the explicit
+  `AllowInsecureModelSource` / `AllowUnverifiedModels` opt-ins.
+
 ## 2.2.1
 
 Patch release — robustness and clearer errors. **No API changes.**

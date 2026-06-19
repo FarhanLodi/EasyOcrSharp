@@ -12,7 +12,9 @@ namespace EasyOcrSharp.Export;
 /// </summary>
 public static class OcrExportExtensions
 {
-    private const string Producer = "EasyOcrSharp 2.2.1";
+    // Derived from the assembly version so the exporter "producer" tag never drifts from the package version.
+    private static readonly string Producer =
+        "EasyOcrSharp " + (typeof(OcrExportExtensions).Assembly.GetName().Version?.ToString(3) ?? "");
 
     private static readonly EasyOcrJsonContext IndentedJson = new(new JsonSerializerOptions { WriteIndented = true });
 

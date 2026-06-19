@@ -41,6 +41,13 @@ public sealed record DetectionOptions
     /// <summary>Discard detected components smaller than this area (px). Default 10.</summary>
     public int MinSize { get; init; } = 10;
 
+    /// <summary>
+    /// Non-maximum-suppression IoU threshold (0–1) for de-duplicating overlapping detected boxes: when two
+    /// boxes overlap by more than this (axis-aligned IoU), the smaller is dropped, removing duplicate lines
+    /// from overlapping CRAFT components. Default 0.6. Set to 0 to disable.
+    /// </summary>
+    public double NmsIouThreshold { get; init; } = 0.6;
+
     /// <summary>The default detection thresholds (match EasyOCR).</summary>
     public static DetectionOptions Default { get; } = new();
 }

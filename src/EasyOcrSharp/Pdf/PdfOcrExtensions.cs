@@ -12,7 +12,7 @@ namespace EasyOcrSharp.Pdf;
 public static class PdfOcrExtensions
 {
     /// <summary>OCRs every page of a PDF file and returns per-page results.</summary>
-    public static Task<PdfOcrResult> ExtractTextFromPdfAsync(
+    public static async Task<PdfOcrResult> ExtractTextFromPdfAsync(
         this IEasyOcrService service,
         string pdfPath,
         IEnumerable<string> languages,
@@ -21,8 +21,8 @@ public static class PdfOcrExtensions
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pdfPath);
-        var bytes = File.ReadAllBytes(Path.GetFullPath(pdfPath));
-        return ExtractTextFromPdfAsync(service, bytes, languages, options, pdfOptions, cancellationToken);
+        var bytes = await File.ReadAllBytesAsync(Path.GetFullPath(pdfPath), cancellationToken).ConfigureAwait(false);
+        return await ExtractTextFromPdfAsync(service, bytes, languages, options, pdfOptions, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>OCRs every page of an in-memory PDF and returns per-page results.</summary>
@@ -42,7 +42,7 @@ public static class PdfOcrExtensions
         var langs = languages as string[] ?? languages.ToArray();
 
         var pages = new List<PdfPageResult>();
-        await PdfRasterizer.ForEachPageAsync(pdfBytes, pdfOptions.Dpi, async (index, count, image) =>
+        await PdfRasterizer.ForEachPageAsync(pdfBytes, pdfOptions.Dpi, pdfOptions.MaxPages, pdfOptions.MaxPagePixels, async (index, count, image) =>
         {
             var ocr = await service.ExtractTextFromImage(image, langs, options, cancellationToken).ConfigureAwait(false);
             pages.Add(new PdfPageResult
@@ -73,7 +73,7 @@ public static class PdfOcrExtensions
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(inputPdfPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPdfPath);
-        var bytes = File.ReadAllBytes(Path.GetFullPath(inputPdfPath));
+        var bytes = await File.ReadAllBytesAsync(Path.GetFullPath(inputPdfPath), cancellationToken).ConfigureAwait(false);
 
         var (result, pdf) = await CreateSearchablePdfAsync(service, bytes, languages, options, pdfOptions, cancellationToken).ConfigureAwait(false);
         await File.WriteAllBytesAsync(Path.GetFullPath(outputPdfPath), pdf, cancellationToken).ConfigureAwait(false);
@@ -101,7 +101,7 @@ public static class PdfOcrExtensions
         var builder = new SearchablePdfBuilder();
         var pages = new List<PdfPageResult>();
 
-        await PdfRasterizer.ForEachPageAsync(pdfBytes, pdfOptions.Dpi, async (index, count, image) =>
+        await PdfRasterizer.ForEachPageAsync(pdfBytes, pdfOptions.Dpi, pdfOptions.MaxPages, pdfOptions.MaxPagePixels, async (index, count, image) =>
         {
             var ocr = await service.ExtractTextFromImage(image, langs, options, cancellationToken).ConfigureAwait(false);
             builder.AddPage(image, ocr, pdfOptions.Dpi, pdfOptions.JpegQuality);

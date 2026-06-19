@@ -13,6 +13,15 @@ public sealed class EasyOcrServiceOptions
     public string? ModelCachePath { get; set; }
 
     /// <summary>
+    /// Reject an image whose decoded pixel count (width × height) exceeds this value, checked from the
+    /// image header <b>before</b> the pixels are decoded into memory when loading from a file, stream, or
+    /// byte buffer. Guards against decompression-bomb / pixel-flood denial of service when OCR-ing
+    /// untrusted input. Default 100,000,000 (100 MP). Set to 0 to disable. Already-decoded
+    /// <see cref="SixLabors.ImageSharp.Image{TPixel}"/> inputs (the caller's own allocation) are not checked.
+    /// </summary>
+    public long MaxImagePixels { get; set; } = 100_000_000;
+
+    /// <summary>
     /// Convenience flag kept for backwards compatibility: when true (and <see cref="ExecutionProvider"/>
     /// has not been set to an explicit provider) the CUDA provider is forced. Prefer leaving
     /// <see cref="ExecutionProvider"/> at <see cref="OcrExecutionProvider.Auto"/>, which already enables a
