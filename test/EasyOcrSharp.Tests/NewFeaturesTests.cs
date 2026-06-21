@@ -4,6 +4,7 @@ using EasyOcrSharp.Models;
 using EasyOcrSharp.Pdf;
 using EasyOcrSharp.Pdf.Internal;
 using EasyOcrSharp.Services;
+using Microsoft.ML.OnnxRuntime;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using Xunit;
@@ -200,10 +201,21 @@ public class OptionsTests
     [Fact]
     public void AutoExecutionProvider_ResolvesToInstalledRuntime()
     {
-        // The base test package references only Microsoft.ML.OnnxRuntime (CPU), so Auto must resolve to
-        // CPU here — never inventing a provider whose native code isn't present.
+        // Auto must select an accelerator only when the loaded ONNX Runtime genuinely reports one for this
+        // OS — never inventing a provider whose native code isn't present — and must select one when it is.
+        // The base Microsoft.ML.OnnxRuntime package is CPU-only on Windows/Linux, but its macOS build
+        // bundles CoreML, so we compare against what the runtime actually offers rather than hardcoding CPU.
+        var available = OrtEnv.Instance().GetAvailableProviders();
+        string[] osAccelerators =
+            OperatingSystem.IsWindows() ? new[] { "DmlExecutionProvider", "CUDAExecutionProvider" } :
+            OperatingSystem.IsMacOS()   ? new[] { "CoreMLExecutionProvider" } :
+            OperatingSystem.IsLinux()   ? new[] { "CUDAExecutionProvider" } :
+            Array.Empty<string>();
+        var acceleratorPresent = osAccelerators.Any(p => available.Contains(p));
+
         using var service = new EasyOcrService(new EasyOcrServiceOptions { ExecutionProvider = OcrExecutionProvider.Auto });
-        Assert.False(service.UseGpu);
+
+        Assert.Equal(acceleratorPresent, service.UseGpu);
     }
 
     [Fact]
