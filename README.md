@@ -59,6 +59,8 @@ Python interpreter, no PyTorch, no native OCR binaries, and nothing leaves the m
 - [How model downloads work](#how-model-downloads-work)
 - [Accuracy notes](#accuracy-notes)
 - [Building & testing](#building--testing)
+- [Contributing](#contributing)
+- [Contact](#contact)
 - [License](#license)
 
 ## Installation
@@ -709,6 +711,26 @@ for the exact one-page and three-page PDFs to drop in.
 
 CI (GitHub Actions) builds and runs the unit tests on Linux and Windows for every push and PR.
 See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Contributing
+
+**Contributions are welcome!** New features, accuracy improvements, performance tuning, bug fixes,
+additional language/model coverage, documentation, and tests are all appreciated.
+
+- 🐛 **Found a bug?** Open an [issue](https://github.com/easyocrsharp/EasyOcrSharp/issues) with a
+  minimal repro (image/PDF + the code and options you used).
+- 💡 **Have an idea or feature request?** Open an issue to discuss it first, then send a PR.
+- 🔧 **Sending a PR?** Branch from `main`, keep changes focused, and make sure `dotnet build -c Release`
+  and the unit tests (`dotnet test --filter "Category!=Integration"`) pass.
+
+If you're working on something larger, or want to collaborate on a feature, feel free to reach out
+before starting so we can align on the approach.
+
+## Contact
+
+For work inquiries, collaboration, feature requests, or any questions, reach out to:
+
+**Farhan Lodi** — [farhanlodi31@gmail.com](mailto:farhanlodi31@gmail.com)
 
 ## License
 
