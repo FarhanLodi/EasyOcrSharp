@@ -12,15 +12,22 @@ namespace EasyOcrSharp.Services;
 
 /// <summary>
 /// High-level OCR service. Native .NET implementation running EasyOCR's CRAFT detector
-/// and per-language CRNN recognizers via ONNX Runtime — no Python required.
+/// and per-language CRNN recognizers via ONNX Runtime — no Python required. Document-structure
+/// analysis (layout, tables, formulas, seals) is available through
+/// <see cref="AnalyzeDocumentAsync(string, DocumentAnalysisOptions?, CancellationToken)"/>,
+/// implemented in the companion partial (<c>EasyOcrService.DocumentAnalysis.cs</c>).
 /// </summary>
-public sealed class EasyOcrService : IEasyOcrService
+public sealed partial class EasyOcrService : IEasyOcrService
 {
     /// <summary>Default candidate scripts considered by auto language detection.</summary>
     private static readonly string[] DefaultAutoDetectCandidates = { "en", "ru", "ch_sim", "ja", "ko" };
 
     private readonly ILogger<EasyOcrService>? _logger;
     private readonly OnnxEasyOcrEngine _engine;
+    private readonly DocumentPreprocessHost _docPreprocess;
+    // Retained so the lazily-created document-structure analyzer shares this service's provider,
+    // cache and download configuration (see EasyOcrService.DocumentAnalysis.cs).
+    private readonly EngineOptions _engineOptions;
     private readonly bool _useGpu;
     private readonly long _maxImagePixels;
     private volatile bool _disposed;
@@ -58,7 +65,11 @@ public sealed class EasyOcrService : IEasyOcrService
         _logger = logger;
         _maxImagePixels = options.MaxImagePixels;
         var engineOptions = options.ToEngineOptions();
+        _engineOptions = engineOptions;
         _engine = new OnnxEasyOcrEngine(engineOptions, logger);
+        // Sessions/models behind DocumentOrientation / DocumentUnwarp load only on first use, so this
+        // host is free to construct for the vast majority of callers that never enable them.
+        _docPreprocess = new DocumentPreprocessHost(engineOptions, logger);
         // ResolvedProvider has already turned Auto into a concrete choice based on the installed runtime.
         _useGpu = _engine.ResolvedProvider != OcrExecutionProvider.Cpu;
     }
@@ -286,18 +297,39 @@ public sealed class EasyOcrService : IEasyOcrService
         using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Extract", ActivityKind.Internal);
         var sw = Stopwatch.StartNew();
 
-        (IReadOnlyList<OcrLine> Lines, string[] Languages) outcome;
-
-        if (options.Preprocessing.DetectOrientation)
+        // Model-based document preprocessing (PP-LCNet orientation / UVDoc unwarp) runs first, so every
+        // later stage — including the brute-force DetectOrientation fallback — sees the corrected page.
+        // Boxes are reported in the corrected image's coordinate space (as documented on the options).
+        Image<Rgb24>? docCorrected = null;
+        try
         {
-            outcome = await RecognizeBestOrientationAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            outcome = await CoreAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
-        }
+            if (options.Preprocessing.DocumentOrientation || options.Preprocessing.DocumentUnwarp)
+            {
+                var (corrected, rotation) = await _docPreprocess.ApplyAsync(
+                    image, options.Preprocessing.DocumentOrientation, options.Preprocessing.DocumentUnwarp, cancellationToken).ConfigureAwait(false);
+                docCorrected = corrected;
+                if (rotation != 0)
+                    _logger?.LogInformation("Document orientation corrected by {Degrees}° clockwise", rotation);
+            }
+            var working = docCorrected ?? image;
 
-        return BuildResult(outcome.Lines, outcome.Languages, sw, activity, image.Width, image.Height);
+            (IReadOnlyList<OcrLine> Lines, string[] Languages) outcome;
+
+            if (options.Preprocessing.DetectOrientation)
+            {
+                outcome = await RecognizeBestOrientationAsync(working, languages, options, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                outcome = await CoreAsync(working, languages, options, cancellationToken).ConfigureAwait(false);
+            }
+
+            return BuildResult(outcome.Lines, outcome.Languages, sw, activity, working.Width, working.Height);
+        }
+        finally
+        {
+            docCorrected?.Dispose();
+        }
     }
 
     /// <summary>Sorts into reading order, records metrics/trace tags, and assembles the result.</summary>
@@ -338,6 +370,7 @@ public sealed class EasyOcrService : IEasyOcrService
 
         (IReadOnlyList<OcrLine> Lines, string[] Langs)? best = null;
         double bestScore = double.NegativeInfinity;
+        int bestDegrees = 0;
 
         foreach (var degrees in new[] { 0, 90, 180, 270 })
         {
@@ -352,6 +385,7 @@ public sealed class EasyOcrService : IEasyOcrService
                 {
                     bestScore = score;
                     best = (lines, langs);
+                    bestDegrees = degrees;
                 }
             }
             finally
@@ -360,15 +394,73 @@ public sealed class EasyOcrService : IEasyOcrService
             }
         }
 
-        return best ?? (Array.Empty<OcrLine>(), langsList);
+        if (best is not { } chosen)
+        {
+            return (Array.Empty<OcrLine>(), langsList);
+        }
+
+        // The winning pass detected its boxes in the rotated copy. Map them back into the original image's
+        // coordinate space so they stay anchored to the image the caller passed — and so they agree with the
+        // SourceWidth/SourceHeight reported for the result (which are the un-rotated dimensions). This mirrors
+        // EasyOCR, which rotates coordinates back to the source frame after its orientation sweep.
+        var mapped = MapLinesToOriginalOrientation(chosen.Lines, bestDegrees, image.Width, image.Height);
+        return (mapped, chosen.Langs);
+    }
+
+    /// <summary>
+    /// Rotates every line's polygon (and its derived axis-aligned box) from a right-angle-rotated frame back
+    /// into the original image's coordinate space. <paramref name="degrees"/> is the clockwise rotation that
+    /// had been applied to the image before detection (0/90/180/270); <paramref name="width"/> and
+    /// <paramref name="height"/> are the original (un-rotated) image dimensions. Returns the input unchanged
+    /// at 0° or when there is nothing to map.
+    /// </summary>
+    internal static IReadOnlyList<OcrLine> MapLinesToOriginalOrientation(
+        IReadOnlyList<OcrLine> lines, int degrees, int width, int height)
+    {
+        if (degrees == 0 || lines.Count == 0)
+        {
+            return lines;
+        }
+
+        // Inverse of ImageSharp's clockwise Rotate(degrees): a point (x,y) detected in the rotated frame
+        // maps back to the un-rotated (width×height) frame as below. Coordinates are continuous, so the
+        // extents width/height (not width-1/height-1) are used and results stay within [0,width]×[0,height].
+        static OcrPoint MapBack(OcrPoint p, int degrees, int width, int height) => degrees switch
+        {
+            90 => new OcrPoint(p.Y, height - p.X),
+            180 => new OcrPoint(width - p.X, height - p.Y),
+            270 => new OcrPoint(width - p.Y, p.X),
+            _ => p,
+        };
+
+        var result = new List<OcrLine>(lines.Count);
+        foreach (var line in lines)
+        {
+            var polygon = line.BoundingPolygon;
+            var mapped = new OcrPoint[polygon.Count];
+            for (int i = 0; i < mapped.Length; i++)
+            {
+                mapped[i] = MapBack(polygon[i], degrees, width, height);
+            }
+
+            result.Add(line with
+            {
+                BoundingPolygon = mapped,
+                BoundingBox = OcrBoundingBox.FromPoints(mapped),
+            });
+        }
+
+        return result;
     }
 
     /// <summary>Preprocess → resolve/auto-detect languages → region crop → recognize.</summary>
     private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages)> CoreAsync(
         Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
     {
-        // Denoise / deskew / binarize into a working image (orientation handled by the caller).
-        bool needsPreprocess = options.Preprocessing.Denoise || options.Preprocessing.Deskew || options.Preprocessing.Binarize;
+        // Denoise / deskew / sharpen / binarize into a working image (orientation and the model-based
+        // document steps are handled by the caller).
+        bool needsPreprocess = options.Preprocessing.Denoise || options.Preprocessing.Deskew
+            || options.Preprocessing.Sharpen || options.Preprocessing.Binarize;
         Image<Rgb24> working = needsPreprocess ? ImagePreprocessor.Apply(image, options.Preprocessing) : image;
         try
         {
@@ -611,6 +703,12 @@ public sealed class EasyOcrService : IEasyOcrService
         }
 
         await _engine.DisposeAsync().ConfigureAwait(false);
+        _docPreprocess.Dispose();
+        // The drain above also guarantees no AnalyzeDocumentAsync is mid-flight on the analyzer.
+        if (_documentAnalyzer is not null)
+        {
+            await _documentAnalyzer.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private void EnsureNotDisposed()

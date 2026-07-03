@@ -28,6 +28,7 @@
   <ItemGroup>
     <None Include="../assets/sample.png" Link="assets/sample.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/sample.png')" />
     <None Include="../assets/ocr_test3.png" Link="assets/ocr_test3.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/ocr_test3.png')" />
+    <None Include="../assets/structure_sample.png" Link="assets/structure_sample.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/structure_sample.png')" />
   </ItemGroup>
 
   <!-- PDF + complex-image fixtures for integration tests (add your own — see test/assets/pdf/README.md). -->

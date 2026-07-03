@@ -2,6 +2,49 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## 2.2.4
+
+**Document-structure analysis (layout, tables, formulas, seals) + document sharpen/orientation/unwarp
+preprocessing.** Everything is additive and opt-in: no public method changed, no existing default
+changed — a service configured exactly as before behaves exactly as before.
+
+### Added — document structure & tables (`AnalyzeDocumentAsync`)
+- **`IEasyOcrService.AnalyzeDocumentAsync`** (file / `Stream` / `byte[]` / `ReadOnlyMemory<byte>` /
+  `Image<Rgb24>` overloads, default-implemented on the interface so custom implementations and mocks
+  keep compiling): full PP-StructureV3 document analysis — layout regions, **tables recovered as
+  HTML**, formulas as LaTeX, seal/stamp text, and reading order — returning a `StructureResult` with
+  typed blocks plus `ToMarkdown()` / `ToJson()` exporters.
+- **`DocumentAnalysisOptions`**: `DocumentOrientation` / `DocumentUnwarp` page correction,
+  `RecognizeTables` / `RecognizeFormulas` / `RecognizeSeals` toggles (default on), `TableModel`
+  (`DocumentTableModel.SlanetPlus` default, `SlaNeXt` for higher accuracy), and `Languages`
+  (PaddleOCR codes; the default pack covers Chinese + English + Japanese).
+- Powered by the **`PaddleOcrNet`** package (new dependency): the analyzer is created lazily on the
+  first `AnalyzeDocumentAsync` call, shares the service's execution provider, thread limits, cache
+  path (when set), pixel-flood guard and download-resilience settings, and is disposed with the
+  service. Plain OCR calls never load any structure model.
+
+### Added — document preprocessing
+- **`PreprocessingOptions.Sharpen`** + **`SharpenAmount`** (default 1.0): unsharp-mask sharpening for
+  soft, low-DPI or slightly out-of-focus scans. Runs after denoise/deskew, before binarize.
+- **`PreprocessingOptions.DocumentOrientation`**: corrects whole-page 90°/180°/270° rotation with the
+  PP-LCNet document-orientation classifier — a single tiny model pass instead of
+  `DetectOrientation`'s 4× OCR sweep.
+- **`PreprocessingOptions.DocumentUnwarp`**: dewarps curved/folded pages (photographed book pages,
+  creased receipts) with the UVDoc model before OCR.
+- Both document models download lazily on first use with fail-closed SHA256 verification and are
+  never touched otherwise.
+
+### Fixed
+- **`DetectOrientation` coordinate space.** When the orientation sweep chose a 90°/180°/270° rotation,
+  bounding boxes were returned in the *rotated* frame while `SourceWidth`/`SourceHeight` reported the
+  original (un-rotated) dimensions — so a consumer normalizing box coordinates by the reported size
+  mis-placed them on non-square pages. Boxes (and their polygons) are now mapped back onto the original
+  image, keeping them in the same coordinate space as `SourceWidth`/`SourceHeight` and matching EasyOCR,
+  which rotates coordinates back after its orientation sweep.
+
+### Dependencies
+- Added `PaddleOcrNet` 1.0.0 (document-structure engine behind `AnalyzeDocumentAsync`).
+
 ## 2.2.3
 
 Hardening, performance, accuracy, and thread-safety pass from a full technical review. **No public method

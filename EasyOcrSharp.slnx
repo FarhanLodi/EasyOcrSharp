@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="src/EasyOcrSharp/EasyOcrSharp.csproj" />
+  <Project Path="src/EasyOcrSharp.Gpu/EasyOcrSharp.Gpu.csproj" />
+  <Project Path="test/EasyOcrSharp.Tests/EasyOcrSharp.Tests.csproj" />
+  <Project Path="test/EasyOcrSharp.Demo/EasyOcrSharp.Demo.csproj" />
+</Solution>

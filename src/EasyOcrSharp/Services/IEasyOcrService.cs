@@ -110,4 +110,56 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
     /// </summary>
     Task WarmUp(IEnumerable<string> languages, CancellationToken cancellationToken = default)
         => Task.CompletedTask;
+
+    // ---- document-structure analysis (layout, tables, formulas, seals) ----
+
+    /// <summary>
+    /// Analyzes the full structure of a document image file — layout regions, <b>tables</b> (recovered
+    /// as HTML), formulas, seals, and reading order — using PaddleOCR's PP-StructureV3 models (via the
+    /// PaddleOcrNet engine). The returned <see cref="PaddleOcrNet.Structure.StructureResult"/> exposes
+    /// typed blocks plus <c>ToMarkdown()</c> / <c>ToJson()</c>. Implemented by
+    /// <see cref="EasyOcrService"/>; a default-implementing stub throws so custom
+    /// <see cref="IEasyOcrService"/> implementations and mocks keep compiling unchanged.
+    /// </summary>
+    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+        string imagePath,
+        DocumentAnalysisOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>Analyzes the structure of a document image from a stream (format auto-detected).</summary>
+    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+        Stream imageStream,
+        DocumentAnalysisOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>Analyzes the structure of a document image from an encoded byte array (PNG/JPEG/etc.).</summary>
+    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+        byte[] imageBytes,
+        DocumentAnalysisOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>Analyzes the structure of a document image from encoded bytes.</summary>
+    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+        ReadOnlyMemory<byte> imageBytes,
+        DocumentAnalysisOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>
+    /// Analyzes the structure of an already-decoded document image. The caller retains ownership of
+    /// the image (it is not disposed by this method).
+    /// </summary>
+    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+        Image<Rgb24> image,
+        DocumentAnalysisOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
 }

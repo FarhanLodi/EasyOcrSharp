@@ -6,16 +6,19 @@ using SixLabors.ImageSharp.Processing;
 namespace EasyOcrSharp.Internal;
 
 /// <summary>
-/// Scanned-document clean-up: optional denoise, adaptive binarization, and projection-profile
-/// deskew. Orientation (90°/180°/270°) detection is handled at the service level because it needs
-/// the OCR result to score each rotation. Returns a new image; the caller owns and disposes it.
+/// Scanned-document clean-up: optional denoise, unsharp-mask sharpen, adaptive binarization, and
+/// projection-profile deskew. Orientation (90°/180°/270°) detection is handled at the service level
+/// because it needs the OCR result to score each rotation; the model-based document orientation /
+/// unwarp steps live in <see cref="DocPreprocessor"/>. Returns a new image; the caller owns and
+/// disposes it.
 /// </summary>
 internal static class ImagePreprocessor
 {
     /// <summary>
-    /// Applies denoise → deskew → binarize (in that order) per <paramref name="options"/>.
-    /// Always returns a fresh image (a clone even when nothing is enabled) so the caller can dispose
-    /// uniformly without touching the original.
+    /// Applies denoise → deskew → sharpen → binarize (in that order) per <paramref name="options"/>.
+    /// Sharpening runs after denoise/deskew so speckle noise isn't amplified, and before binarize so
+    /// the threshold sees the crisper edges. Always returns a fresh image (a clone even when nothing
+    /// is enabled) so the caller can dispose uniformly without touching the original.
     /// </summary>
     public static Image<Rgb24> Apply(Image<Rgb24> source, PreprocessingOptions options)
     {
@@ -36,6 +39,14 @@ internal static class ImagePreprocessor
                     img.Dispose();
                     img = rotated;
                 }
+            }
+
+            if (options.Sharpen)
+            {
+                // Unsharp mask; clamp the caller-supplied strength into a range that can't destroy
+                // the glyphs (0 disables sharpening entirely inside ImageSharp, huge sigmas ring).
+                float sigma = Math.Clamp(options.SharpenAmount, 0.1f, 10f);
+                img.Mutate(c => c.GaussianSharpen(sigma));
             }
 
             if (options.Binarize)
