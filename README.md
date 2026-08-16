@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/easyocrsharp/EasyOcrSharp/main/src/EasyOcrSharp/Assets/icon.png" alt="EasyOcrSharp" width="120" height="120">
+<img src="https://raw.githubusercontent.com/FarhanLodi/EasyOcrSharp/main/src/EasyOcrSharp/Assets/icon.png" alt="EasyOcrSharp" width="120" height="120">
 
 # EasyOcrSharp
 
@@ -8,7 +8,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/EasyOcrSharp.svg?label=NuGet&color=004880&logo=nuget)](https://www.nuget.org/packages/EasyOcrSharp)
 [![Downloads](https://img.shields.io/nuget/dt/EasyOcrSharp.svg?label=Downloads&color=success)](https://www.nuget.org/packages/EasyOcrSharp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/FarhanLodi/EasyOcrSharp/blob/main/LICENSE)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4.svg?logo=dotnet)](https://dotnet.microsoft.com/)
 [![AOT ready](https://img.shields.io/badge/Native%20AOT-ready-6f42c1.svg)](#gpu--execution-providers)
 
@@ -967,7 +967,7 @@ and accepts the same tuning as the library (`--allowlist`, `--min-confidence`, `
 
 ### 🌐 Web service sample
 
-[`samples/EasyOcrSharp.WebApi`](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/samples/EasyOcrSharp.WebApi) is a runnable ASP.NET Core service —
+[`samples/EasyOcrSharp.WebApi`](https://github.com/FarhanLodi/EasyOcrSharp/blob/main/samples/EasyOcrSharp.WebApi) is a runnable ASP.NET Core service —
 `POST /ocr`, `POST /ocr/pdf`, `GET /health` and a browser upload page — with bounded concurrency,
 upload limits, problem-details errors and a Dockerfile that already includes the native prerequisites
 PDFium and ONNX Runtime need.
@@ -1059,7 +1059,7 @@ As with any OCR:
 ### Building & testing
 
 ```bash
-git clone https://github.com/easyocrsharp/EasyOcrSharp.git
+git clone https://github.com/FarhanLodi/EasyOcrSharp.git
 cd EasyOcrSharp
 dotnet build -c Release
 
@@ -1079,9 +1079,12 @@ dotnet run --project test/EasyOcrSharp.Demo
 
 The integration tests exercise every feature against the **real** engine (allow/block-lists,
 detection-only, exporters, batch, metrics/tracing, health check, execution-provider fallback, and the
-full PDF pipeline) — no mocks. The **PDF** tests need two small fixtures you generate yourself; they're
-**skipped** (never failed) until present. See [test/assets/pdf/README.md](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/test/assets/pdf/README.md)
-for the exact one-page and three-page PDFs to drop in.
+full PDF pipeline) — no mocks. The PDF fixtures live in
+[test/assets/pdf/](https://github.com/FarhanLodi/EasyOcrSharp/tree/main/test/assets/pdf) and are
+committed, so those tests run out of the box. A couple of tests still **skip** (never fail) until you
+supply an optional fixture — a password-protected PDF named e.g. `encrypted_secret.pdf` for the
+encrypted-document path, and `EASYOCRSHARP_TROCR_DIR` pointing at a TrOCR export for the handwriting
+integration test.
 
 | Path | Purpose |
 |---|---|
@@ -1095,7 +1098,7 @@ for the exact one-page and three-page PDFs to drop in.
 | `tools/` | maintainer-only ONNX export + quantization scripts |
 
 CI (GitHub Actions) builds and runs the unit tests on Linux and Windows for every push and PR.
-See [CHANGELOG.md](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/CHANGELOG.md) for release history.
+See [CHANGELOG.md](https://github.com/FarhanLodi/EasyOcrSharp/blob/main/CHANGELOG.md) for release history.
 
 <br>
 
@@ -1104,7 +1107,7 @@ See [CHANGELOG.md](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/CHANGE
 **Contributions are welcome!** New features, accuracy improvements, performance tuning, bug fixes,
 additional language/model coverage, documentation, and tests are all appreciated.
 
-- 🐛 **Found a bug?** Open an [issue](https://github.com/easyocrsharp/EasyOcrSharp/issues) with a
+- 🐛 **Found a bug?** Open an [issue](https://github.com/FarhanLodi/EasyOcrSharp/issues) with a
   minimal repro (image/PDF + the code and options you used).
 - 💡 **Have an idea or feature request?** Open an issue to discuss it first, then send a PR.
 - 🔧 **Sending a PR?** Branch from `main`, keep changes focused, and make sure `dotnet build -c Release`
@@ -1154,7 +1157,7 @@ For work inquiries, collaboration, feature requests, or any questions, reach out
 
 ## 📄 License
 
-MIT — see [LICENSE](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/LICENSE). EasyOCR (the upstream model authors) is also MIT-licensed.
+MIT — see [LICENSE](https://github.com/FarhanLodi/EasyOcrSharp/blob/main/LICENSE). EasyOCR (the upstream model authors) is also MIT-licensed.
 
 ## 🙏 Acknowledgments
 

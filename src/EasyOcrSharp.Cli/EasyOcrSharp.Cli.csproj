@@ -11,12 +11,12 @@
 		<PackAsTool>true</PackAsTool>
 		<ToolCommandName>easyocrsharp</ToolCommandName>
 		<PackageId>EasyOcrSharp.Cli</PackageId>
-		<Version>2.3.0</Version>
+		<Version>2.3.2</Version>
 		<Authors>Farhan Lodi</Authors>
 		<Description>Command-line OCR powered by EasyOcrSharp — EasyOCR's neural models on ONNX Runtime, no Python required. Scans images, PDFs, globs and folders to text, JSON, hOCR, ALTO or TSV, writes searchable PDFs, and pre-pulls models for air-gapped deployment.</Description>
 		<PackageTags>OCR;EasyOCR;ONNX;CLI;dotnet-tool;TextRecognition;hOCR;ALTO;SearchablePDF;.NET10</PackageTags>
-		<RepositoryUrl>https://github.com/easyocrsharp/EasyOcrSharp</RepositoryUrl>
-		<PackageProjectUrl>https://github.com/easyocrsharp/EasyOcrSharp</PackageProjectUrl>
+		<RepositoryUrl>https://github.com/FarhanLodi/EasyOcrSharp</RepositoryUrl>
+		<PackageProjectUrl>https://github.com/FarhanLodi/EasyOcrSharp</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageIcon>icon.png</PackageIcon>
