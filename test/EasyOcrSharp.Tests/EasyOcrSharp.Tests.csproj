@@ -8,9 +8,19 @@
     <AssemblyName>EasyOcrSharp.Tests</AssemblyName>
   </PropertyGroup>
 
+  <!--
+    Bounds how many test collections run at once. Each model-backed integration class builds its own
+    EasyOcrService (CRAFT + recognizer ONNX sessions) and OCRs at MaxDegreeOfParallelism ==
+    ProcessorCount, so the default (one collection per core) oversubscribes the machine several times
+    over and has been observed to make an OCR assertion fail intermittently under load.
+  -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
-    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.9" />
+    <Content Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.11" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.6.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.5">
@@ -22,6 +32,8 @@
 
   <ItemGroup>
     <ProjectReference Include="../../src/EasyOcrSharp/EasyOcrSharp.csproj" />
+    <!-- The CLI ships as a dotnet tool, so its parsing/binding logic is unit-tested here too. -->
+    <ProjectReference Include="../../src/EasyOcrSharp.Cli/EasyOcrSharp.Cli.csproj" />
   </ItemGroup>
 
   <!-- Sample images for integration tests, copied next to the test assembly. -->
@@ -29,6 +41,11 @@
     <None Include="../assets/sample.png" Link="assets/sample.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/sample.png')" />
     <None Include="../assets/ocr_test3.png" Link="assets/ocr_test3.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/ocr_test3.png')" />
     <None Include="../assets/structure_sample.png" Link="assets/structure_sample.png" CopyToOutputDirectory="PreserveNewest" Condition="Exists('../assets/structure_sample.png')" />
+    <!--
+      Ground truth for the accuracy regression gate: every <name>.gt.txt next to a matching <name>.<ext>
+      image becomes a CER assertion. Drop in more pairs to widen the gate.
+    -->
+    <None Include="../assets/*.gt.txt" Link="assets/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- PDF + complex-image fixtures for integration tests (add your own — see test/assets/pdf/README.md). -->

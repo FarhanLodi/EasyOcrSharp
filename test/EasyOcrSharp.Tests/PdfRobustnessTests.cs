@@ -15,6 +15,7 @@ namespace EasyOcrSharp.Tests;
 /// These need no models (they fail before OCR), so they run fast and offline.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class PdfRobustnessTests
 {
     private static EasyOcrService NewService() => new();

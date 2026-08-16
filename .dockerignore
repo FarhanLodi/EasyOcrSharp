@@ -1,0 +1,16 @@
+# The sample Dockerfile builds from the repository root (it needs the library sources), but only
+# src/EasyOcrSharp and samples/EasyOcrSharp.WebApi are actually COPYed. Without this file the daemon
+# receives several GB of onnx_models/, test assets and the Python export venv on every build.
+#
+# Allowlist: exclude everything, then re-include exactly what the Dockerfile copies.
+*
+
+!LICENSE
+!README.md
+!src/EasyOcrSharp
+!samples/EasyOcrSharp.WebApi
+
+# ...minus local build output inside those trees.
+**/bin
+**/obj
+**/*.user

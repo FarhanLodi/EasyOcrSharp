@@ -103,6 +103,83 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
         => throw new NotSupportedException(
             $"{GetType().Name} does not implement RecognizeRegionsAsync. Use {nameof(EasyOcrService)}.");
 
+    // ---- streaming recognition ----
+
+    /// <summary>
+    /// OCRs an already-decoded image and yields each <see cref="OcrLine"/> <b>as soon as its region has
+    /// been recognized</b>, instead of buffering the whole page — the responsive alternative to
+    /// <see cref="ExtractTextFromImage(Image{Rgb24}, IEnumerable{string}, RecognitionOptions?, CancellationToken)"/>
+    /// for large scans and progressive UIs. Detection still runs once up front (it is a single whole-image
+    /// model pass); only recognition is streamed. Lines arrive in <b>reading order</b>, not completion
+    /// order, so the sequence reads like the page. The caller retains ownership of the image, which must
+    /// stay alive and unmodified until the enumeration completes.
+    /// Implemented by <see cref="EasyOcrService"/>; a default-implementing stub throws so custom
+    /// <see cref="IEasyOcrService"/> implementations and mocks keep compiling unchanged.
+    /// </summary>
+    /// <remarks>
+    /// Two option combinations cannot be delivered incrementally and are handled as follows:
+    /// <list type="bullet">
+    /// <item><description><see cref="TextGrouping.Paragraph"/> merges lines across the whole page, so every
+    /// line is recognized before the first paragraph can be emitted. Recognition still runs concurrently
+    /// and the results are correct — they simply all arrive at the end.</description></item>
+    /// <item><description><see cref="PreprocessingOptions.DetectOrientation"/> scores four whole-page OCR
+    /// passes against each other, so the buffered pipeline runs and its lines are replayed at the end.</description></item>
+    /// </list>
+    /// <see cref="TextGrouping.Word"/> and <see cref="TextGrouping.Line"/> stream line by line: box merging
+    /// happens during detection, so a streamed <see cref="TextGrouping.Line"/> result is genuinely
+    /// line-grouped, never raw word boxes.
+    /// </remarks>
+    IAsyncEnumerable<OcrLine> ExtractTextStreamAsync(
+        Image<Rgb24> image,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement ExtractTextStreamAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>
+    /// OCRs an image file on disk, yielding each <see cref="OcrLine"/> in reading order as its region is
+    /// recognized. See
+    /// <see cref="ExtractTextStreamAsync(Image{Rgb24}, IEnumerable{string}, RecognitionOptions?, CancellationToken)"/>
+    /// for the ordering and grouping guarantees.
+    /// </summary>
+    IAsyncEnumerable<OcrLine> ExtractTextStreamAsync(
+        string imagePath,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement ExtractTextStreamAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>
+    /// OCRs an image read from a stream (format auto-detected), yielding each <see cref="OcrLine"/> in
+    /// reading order as its region is recognized. The stream is fully read before the first line is
+    /// produced. See
+    /// <see cref="ExtractTextStreamAsync(Image{Rgb24}, IEnumerable{string}, RecognitionOptions?, CancellationToken)"/>
+    /// for the ordering and grouping guarantees.
+    /// </summary>
+    IAsyncEnumerable<OcrLine> ExtractTextStreamAsync(
+        Stream imageStream,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement ExtractTextStreamAsync. Use {nameof(EasyOcrService)}.");
+
+    /// <summary>
+    /// OCRs an image from an encoded byte array (PNG/JPEG/etc.), yielding each <see cref="OcrLine"/> in
+    /// reading order as its region is recognized. See
+    /// <see cref="ExtractTextStreamAsync(Image{Rgb24}, IEnumerable{string}, RecognitionOptions?, CancellationToken)"/>
+    /// for the ordering and grouping guarantees.
+    /// </summary>
+    IAsyncEnumerable<OcrLine> ExtractTextStreamAsync(
+        byte[] imageBytes,
+        IEnumerable<string> languages,
+        RecognitionOptions? options = null,
+        CancellationToken cancellationToken = default)
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement ExtractTextStreamAsync. Use {nameof(EasyOcrService)}.");
+
     /// <summary>
     /// Optionally preloads the detector and the recognizer pack(s) for the given languages so the first
     /// real OCR call doesn't pay model-download + ONNX session-initialization latency. A no-op by default

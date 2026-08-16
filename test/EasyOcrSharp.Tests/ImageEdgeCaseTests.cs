@@ -17,6 +17,7 @@ namespace EasyOcrSharp.Tests;
 /// (the public API takes a decoded image/stream, so format support is whatever ImageSharp provides).
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class ImageEdgeCaseTests
 {
     private static string Sample() => TestAssets.Image("sample.png")

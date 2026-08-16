@@ -14,6 +14,7 @@ namespace EasyOcrSharp.Tests;
 /// "Integration" trait (and CI exclusion) as <see cref="OcrIntegrationTests"/>.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class DocumentAnalysisIntegrationTests
 {
     private static string? FindAsset(string name)

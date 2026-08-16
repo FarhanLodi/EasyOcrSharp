@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>Exe</OutputType>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<RootNamespace>EasyOcrSharp.Cli</RootNamespace>
+		<AssemblyName>EasyOcrSharp.Cli</AssemblyName>
+		<PackAsTool>true</PackAsTool>
+		<ToolCommandName>easyocrsharp</ToolCommandName>
+		<PackageId>EasyOcrSharp.Cli</PackageId>
+		<Version>2.3.0</Version>
+		<Authors>Farhan Lodi</Authors>
+		<Description>Command-line OCR powered by EasyOcrSharp — EasyOCR's neural models on ONNX Runtime, no Python required. Scans images, PDFs, globs and folders to text, JSON, hOCR, ALTO or TSV, writes searchable PDFs, and pre-pulls models for air-gapped deployment.</Description>
+		<PackageTags>OCR;EasyOCR;ONNX;CLI;dotnet-tool;TextRecognition;hOCR;ALTO;SearchablePDF;.NET10</PackageTags>
+		<RepositoryUrl>https://github.com/easyocrsharp/EasyOcrSharp</RepositoryUrl>
+		<PackageProjectUrl>https://github.com/easyocrsharp/EasyOcrSharp</PackageProjectUrl>
+		<PackageReadmeFile>README.md</PackageReadmeFile>
+		<PackageLicenseExpression>MIT</PackageLicenseExpression>
+		<PackageIcon>icon.png</PackageIcon>
+		<NeutralLanguage>en-US</NeutralLanguage>
+		<PublishRepositoryUrl>true</PublishRepositoryUrl>
+		<UseWindowsForms>false</UseWindowsForms>
+		<UseWPF>false</UseWPF>
+		<SupportedOSPlatforms>Windows;Linux;macOS</SupportedOSPlatforms>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\EasyOcrSharp\EasyOcrSharp.csproj" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<InternalsVisibleTo Include="EasyOcrSharp.Tests" />
+	</ItemGroup>
+
+	<!--
+	  A dotnet tool is packed platform-agnostically (tools/<tfm>/any/), so it carries the native assets
+	  of every runtime its dependencies ship. ONNX Runtime includes an Android .aar and an iOS
+	  .xcframework, which together are ~95 MB and can never execute in a command-line tool — dropping
+	  them takes the package from ~157 MB to something a user can reasonably install.
+	-->
+	<Target Name="TrimMobileNativesFromTool" AfterTargets="ComputeResolvedFilesToPublishList">
+		<ItemGroup>
+			<ResolvedFileToPublish
+				Remove="@(ResolvedFileToPublish)"
+				Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Replace('\','/').StartsWith('runtimes/android/'))
+				        OR $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Replace('\','/').StartsWith('runtimes/ios/'))" />
+		</ItemGroup>
+	</Target>
+
+	<ItemGroup>
+		<None Include="../../README.md" Pack="true" PackagePath="" />
+		<None Include="../../LICENSE" Pack="true" PackagePath="" />
+		<None Include="../EasyOcrSharp/Assets/icon.png" Pack="true" PackagePath="icon.png" />
+	</ItemGroup>
+
+</Project>

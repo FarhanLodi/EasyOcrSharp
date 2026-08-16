@@ -1,6 +1,7 @@
 using System.Text;
 using EasyOcrSharp.Export;
 using EasyOcrSharp.Models;
+using EasyOcrSharp.Pdf;
 using EasyOcrSharp.Pdf.Internal;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -10,9 +11,10 @@ namespace EasyOcrSharp.Tests;
 
 /// <summary>
 /// Unicode behaviour across the output layers. The OCR data model and all text exporters are fully
-/// Unicode; the searchable-PDF <i>invisible text layer</i> is deliberately Latin-1 (WinAnsi base-14
-/// font), so non-Latin glyphs collapse to '?' there only. These tests lock in both facts so a future
-/// Identity-H/ToUnicode upgrade has to consciously update them.
+/// Unicode; the searchable-PDF <i>invisible text layer</i> is Latin-1 (WinAnsi base-14 font) only while
+/// the text fits Latin-1 — beyond that it switches to an embedded Identity-H font, and collapses to '?'
+/// solely when font embedding is off or no font is installed. These tests lock in the Latin-1 path;
+/// <see cref="SearchablePdfFontTests"/> covers the Unicode one.
 /// </summary>
 public class SearchablePdfUnicodeTests
 {
@@ -27,10 +29,10 @@ public class SearchablePdfUnicodeTests
         };
     }
 
-    private static string BuildPdfText(OcrResult ocr)
+    private static string BuildPdfText(OcrResult ocr, PdfTextLayerFontMode mode = PdfTextLayerFontMode.Auto)
     {
         using var page = new Image<Rgb24>(200, 60, new Rgb24(255, 255, 255));
-        var builder = new SearchablePdfBuilder();
+        var builder = new SearchablePdfBuilder(new PdfOcrOptions { TextLayerFont = mode });
         builder.AddPage(page, ocr, 150, 80);
         return Encoding.Latin1.GetString(builder.Build());
     }
@@ -65,9 +67,11 @@ public class SearchablePdfUnicodeTests
     }
 
     [Fact]
-    public void NonLatin_text_collapses_to_placeholder_in_pdf_layer_only()
+    public void NonLatin_text_collapses_to_placeholder_when_font_embedding_is_off()
     {
-        var pdf = BuildPdfText(OneLine("Привет 世界"));
+        // With PdfTextLayerFontMode.Never (or when no system font can be resolved) the layer stays
+        // WinAnsi and everything outside Latin-1 becomes '?'. Deterministic on every machine.
+        var pdf = BuildPdfText(OneLine("Привет 世界"), PdfTextLayerFontMode.Never);
 
         int tj = pdf.IndexOf(") Tj", StringComparison.Ordinal);
         Assert.True(tj > 0, "expected a Tj text-show operator");

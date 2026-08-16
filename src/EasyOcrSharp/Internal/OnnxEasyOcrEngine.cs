@@ -243,10 +243,74 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
             if (best is not null && best.Confidence >= options.MinConfidence) merged.Add(best);
         }
 
-        return options.Grouping == TextGrouping.Paragraph
-            ? ParagraphGrouper.Merge(merged, options.GroupingOptions)
-            : merged;
+        if (options.Grouping != TextGrouping.Paragraph) return merged;
+
+        var paragraphs = ParagraphGrouper.Merge(merged, options.GroupingOptions);
+        return options.WordLevelDetail == WordLevelDetail.None
+            ? paragraphs
+            : ReattachWords(paragraphs, merged);
     }
+
+    /// <summary>
+    /// Paragraph merging concatenates whole lines, which would otherwise drop the per-line word geometry.
+    /// This stitches it back on: each merged paragraph's newline-separated segments are matched — by text,
+    /// by containment in the paragraph's box, and each source line claimed at most once — back to the lines
+    /// they came from, and their words are concatenated in reading order. Characters are concatenated the
+    /// same way, with a geometry-less newline entry standing in for each join so that concatenating
+    /// <see cref="OcrChar.Value"/> still reproduces the paragraph text. Paragraphs that are a single line
+    /// already carry their words and are returned untouched; anything that fails to match is left as-is.
+    /// </summary>
+    private static IReadOnlyList<OcrLine> ReattachWords(List<OcrLine> paragraphs, List<OcrLine> sourceLines)
+    {
+        var claimed = new bool[sourceLines.Count];
+        for (int p = 0; p < paragraphs.Count; p++)
+        {
+            var paragraph = paragraphs[p];
+            if (paragraph.Words.Count > 0 || !paragraph.Text.Contains('\n')) continue;
+
+            var segments = paragraph.Text.Split('\n');
+            var parts = new List<OcrLine>(segments.Length);
+            foreach (var segment in segments)
+            {
+                int match = -1;
+                for (int i = 0; i < sourceLines.Count; i++)
+                {
+                    if (claimed[i] || !string.Equals(sourceLines[i].Text, segment, StringComparison.Ordinal)) continue;
+                    if (!Contains(paragraph.BoundingBox, sourceLines[i].BoundingBox)) continue;
+                    match = i;
+                    break;
+                }
+                if (match < 0) { parts.Clear(); break; }
+                claimed[match] = true;
+                parts.Add(sourceLines[match]);
+            }
+            if (parts.Count != segments.Length) continue;
+
+            var words = new List<OcrWord>();
+            var characters = new List<OcrChar>();
+            bool anyCharacters = false;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                if (i > 0) characters.Add(NewlineChar);
+                words.AddRange(parts[i].Words);
+                characters.AddRange(parts[i].Characters);
+                anyCharacters |= parts[i].Characters.Count > 0;
+            }
+
+            IReadOnlyList<OcrChar> mergedCharacters = Array.Empty<OcrChar>();
+            if (anyCharacters) mergedCharacters = characters;
+
+            paragraphs[p] = paragraph with { Words = words, Characters = mergedCharacters };
+        }
+        return paragraphs;
+    }
+
+    /// <summary>The line break inserted between two merged lines' characters; it occupies no pixels.</summary>
+    private static readonly OcrChar NewlineChar = new() { Value = "\n", Confidence = 0 };
+
+    private static bool Contains(OcrBoundingBox outer, OcrBoundingBox inner)
+        => inner.MinX >= outer.MinX - 0.5 && inner.MinY >= outer.MinY - 0.5
+        && inner.MaxX <= outer.MaxX + 0.5 && inner.MaxY <= outer.MaxY + 0.5;
 
     /// <summary>Resolves the distinct recognizer packs (custom first, then built-in) for the languages.</summary>
     private Dictionary<string, RecognizerSpec> ResolvePacks(IReadOnlyList<string> languages)

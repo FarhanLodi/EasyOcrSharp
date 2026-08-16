@@ -31,6 +31,13 @@ public static class OcrExportExtensions
     /// understood by DMS tooling and convertible to searchable PDF. Pass the source image size for
     /// correct page bounds (defaults to the result's own extents when omitted).
     /// </summary>
+    /// <remarks>
+    /// Word boxes come from <see cref="OcrLine.Words"/> when the recognizer was asked for them (see
+    /// <see cref="RecognitionOptions.WordLevelDetail"/>), in which case each word also carries its own
+    /// <c>x_wconf</c>; otherwise the line box is split proportionally to word length as before. When
+    /// <see cref="OcrLine.Characters"/> is populated, each word additionally gets Tesseract's
+    /// <c>x_bboxes</c> / <c>x_confs</c> properties listing its glyphs.
+    /// </remarks>
     public static string ToHocr(this OcrResult result, int pageWidth = 0, int pageHeight = 0, string? imageName = null)
     {
         ArgumentNullException.ThrowIfNull(result);
@@ -58,12 +65,13 @@ public static class OcrExportExtensions
               .Append(BboxTitle(b)).AppendLine("'>");
 
             int wordNo = 0;
-            foreach (var (text, wb) in SplitWords(line))
+            foreach (var word in EnumerateWords(line))
             {
                 wordNo++;
                 sb.Append("      <span class='ocrx_word' id='word_").Append(lineNo).Append('_').Append(wordNo)
-                  .Append("' title='").Append(BboxTitle(wb)).Append("; x_wconf ").Append(Conf100(line.Confidence))
-                  .Append("'>").Append(Xml(text)).AppendLine("</span>");
+                  .Append("' title='").Append(BboxTitle(word.Box)).Append("; x_wconf ").Append(Conf100(word.Confidence));
+                AppendCharacterProperties(sb, word.Characters);
+                sb.Append("'>").Append(Xml(word.Text)).AppendLine("</span>");
             }
             sb.AppendLine("    </span>");
         }
@@ -78,6 +86,12 @@ public static class OcrExportExtensions
     /// Renders the result as <a href="https://www.loc.gov/standards/alto/">ALTO XML v4</a>, the
     /// layout format used by libraries and digitization workflows.
     /// </summary>
+    /// <remarks>
+    /// <c>String</c> geometry and <c>WC</c> come from <see cref="OcrLine.Words"/> when the recognizer was
+    /// asked for them (see <see cref="RecognitionOptions.WordLevelDetail"/>), otherwise from the same
+    /// proportional split of the line box used before. Populated <see cref="OcrLine.Characters"/> are
+    /// emitted as ALTO <c>Glyph</c> children.
+    /// </remarks>
     public static string ToAlto(this OcrResult result, int pageWidth = 0, int pageHeight = 0, string? imageName = null)
     {
         ArgumentNullException.ThrowIfNull(result);
@@ -104,12 +118,30 @@ public static class OcrExportExtensions
             var b = line.BoundingBox;
             sb.Append("          <TextLine ID=\"line_").Append(lineNo).Append("\" ").Append(AltoBox(b)).AppendLine(">");
             int wordNo = 0;
-            foreach (var (text, wb) in SplitWords(line))
+            foreach (var word in EnumerateWords(line))
             {
                 wordNo++;
                 sb.Append("            <String ID=\"string_").Append(lineNo).Append('_').Append(wordNo).Append("\" ")
-                  .Append(AltoBox(wb)).Append(" WC=\"").Append(line.Confidence.ToString("0.###", CultureInfo.InvariantCulture))
-                  .Append("\" CONTENT=\"").Append(Xml(text)).AppendLine("\"/>");
+                  .Append(AltoBox(word.Box)).Append(" WC=\"").Append(word.Confidence.ToString("0.###", CultureInfo.InvariantCulture))
+                  .Append("\" CONTENT=\"").Append(Xml(word.Text));
+
+                if (word.Characters.Count == 0)
+                {
+                    sb.AppendLine("\"/>");
+                    continue;
+                }
+
+                sb.AppendLine("\">");
+                int glyphNo = 0;
+                foreach (var glyph in word.Characters)
+                {
+                    glyphNo++;
+                    sb.Append("              <Glyph ID=\"glyph_").Append(lineNo).Append('_').Append(wordNo).Append('_').Append(glyphNo)
+                      .Append("\" ").Append(AltoBox(glyph.BoundingBox))
+                      .Append(" GC=\"").Append(glyph.Confidence.ToString("0.###", CultureInfo.InvariantCulture))
+                      .Append("\" CONTENT=\"").Append(Xml(glyph.Value)).AppendLine("\"/>");
+                }
+                sb.AppendLine("            </String>");
             }
             sb.AppendLine("          </TextLine>");
         }
@@ -126,6 +158,12 @@ public static class OcrExportExtensions
     /// Renders the result as Tesseract-style tab-separated values (one row per word), handy for
     /// spreadsheets and downstream parsing.
     /// </summary>
+    /// <remarks>
+    /// Rows use <see cref="OcrLine.Words"/> geometry and confidence when the recognizer was asked for
+    /// them (see <see cref="RecognitionOptions.WordLevelDetail"/>), otherwise the previous proportional
+    /// split of the line box. The format's <c>level</c> column stops at 5 (word), so per-character detail
+    /// is not representable here — use hOCR or ALTO for glyphs.
+    /// </remarks>
     public static string ToTsv(this OcrResult result)
     {
         ArgumentNullException.ThrowIfNull(result);
@@ -137,13 +175,14 @@ public static class OcrExportExtensions
         {
             lineNo++;
             int wordNo = 0;
-            foreach (var (text, wb) in SplitWords(line))
+            foreach (var word in EnumerateWords(line))
             {
                 wordNo++;
+                var wb = word.Box;
                 sb.Append("5\t1\t1\t1\t").Append(lineNo).Append('\t').Append(wordNo).Append('\t')
                   .Append((int)Math.Round(wb.MinX)).Append('\t').Append((int)Math.Round(wb.MinY)).Append('\t')
                   .Append((int)Math.Round(wb.Width)).Append('\t').Append((int)Math.Round(wb.Height)).Append('\t')
-                  .Append(Conf100(line.Confidence)).Append('\t').Append(text.Replace('\t', ' ')).Append('\n');
+                  .Append(Conf100(word.Confidence)).Append('\t').Append(word.Text.Replace('\t', ' ')).Append('\n');
             }
         }
         return sb.ToString();
@@ -163,9 +202,99 @@ public static class OcrExportExtensions
         return (w > 0 ? w : (int)Math.Ceiling(maxX), h > 0 ? h : (int)Math.Ceiling(maxY));
     }
 
+    /// <summary>One word as the exporters need it: text, box, confidence and (optionally) its glyphs.</summary>
+    private readonly record struct ExportWord(
+        string Text,
+        OcrBoundingBox Box,
+        double Confidence,
+        IReadOnlyList<OcrChar> Characters);
+
+    /// <summary>
+    /// The words of a line. Prefers the recognizer's true per-word geometry and confidence; falls back to
+    /// the historical proportional split — including its line-level confidence and no glyphs — whenever
+    /// <see cref="OcrLine.Words"/> is empty, so output for callers who never opted in is unchanged.
+    /// </summary>
+    private static IEnumerable<ExportWord> EnumerateWords(OcrLine line)
+    {
+        if (line.Words.Count == 0)
+        {
+            foreach (var (text, box) in SplitWords(line))
+            {
+                yield return new ExportWord(text, box, line.Confidence, Array.Empty<OcrChar>());
+            }
+            yield break;
+        }
+
+        var glyphs = GroupCharactersByWord(line);
+        for (int i = 0; i < line.Words.Count; i++)
+        {
+            var word = line.Words[i];
+            yield return new ExportWord(
+                word.Text,
+                word.BoundingBox,
+                word.Confidence,
+                glyphs is null ? Array.Empty<OcrChar>() : glyphs[i]);
+        }
+    }
+
+    /// <summary>
+    /// Partitions <see cref="OcrLine.Characters"/> into one group per word by splitting on whitespace
+    /// (the separators belong to no word). Returns null unless the groups line up exactly with
+    /// <see cref="OcrLine.Words"/> — both in count and in text — so a mismatch degrades to "no glyphs"
+    /// rather than to wrong glyphs.
+    /// </summary>
+    private static IReadOnlyList<OcrChar>[]? GroupCharactersByWord(OcrLine line)
+    {
+        if (line.Characters.Count == 0) return null;
+
+        var groups = new List<IReadOnlyList<OcrChar>>(line.Words.Count);
+        var current = new List<OcrChar>();
+        foreach (var ch in line.Characters)
+        {
+            if (ch.Value.Length == 1 && char.IsWhiteSpace(ch.Value[0]))
+            {
+                if (current.Count > 0) { groups.Add(current); current = new List<OcrChar>(); }
+                continue;
+            }
+            current.Add(ch);
+        }
+        if (current.Count > 0) groups.Add(current);
+
+        if (groups.Count != line.Words.Count) return null;
+        for (int i = 0; i < groups.Count; i++)
+        {
+            var text = string.Concat(groups[i].Select(c => c.Value));
+            if (!string.Equals(text, line.Words[i].Text, StringComparison.Ordinal)) return null;
+        }
+        return groups.ToArray();
+    }
+
+    /// <summary>
+    /// Appends Tesseract's per-glyph hOCR properties (<c>x_bboxes</c>, <c>x_confs</c>) to a word title,
+    /// or nothing at all when the line carries no character detail.
+    /// </summary>
+    private static void AppendCharacterProperties(StringBuilder sb, IReadOnlyList<OcrChar> characters)
+    {
+        if (characters.Count == 0) return;
+
+        sb.Append("; x_bboxes");
+        foreach (var ch in characters)
+        {
+            var b = ch.BoundingBox;
+            sb.Append(' ').Append((int)Math.Round(b.MinX)).Append(' ').Append((int)Math.Round(b.MinY))
+              .Append(' ').Append((int)Math.Round(b.MaxX)).Append(' ').Append((int)Math.Round(b.MaxY));
+        }
+        sb.Append("; x_confs");
+        foreach (var ch in characters)
+        {
+            sb.Append(' ').Append(Conf100(ch.Confidence));
+        }
+    }
+
     /// <summary>
     /// Splits a line into whitespace-separated words, approximating each word's box by allocating the
-    /// line width proportionally to character count (we only have line-level geometry from the model).
+    /// line width proportionally to character count. Used when the recognizer produced no word geometry
+    /// (<see cref="RecognitionOptions.WordLevelDetail"/> left at its default).
     /// </summary>
     private static IEnumerable<(string Text, OcrBoundingBox Box)> SplitWords(OcrLine line)
     {

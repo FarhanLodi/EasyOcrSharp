@@ -9,6 +9,13 @@ namespace EasyOcrSharp.Internal;
 /// match EasyOCR's <c>readtext()</c> structure (one box per text line, not per word). The
 /// merge thresholds are exposed via <see cref="GroupingOptions"/>.
 /// </summary>
+/// <remarks>
+/// Grouping happens <em>before</em> recognition: a merged run of detection boxes is rectified and decoded
+/// as one patch, so a merged line's CTC alignment already covers all of its words in reading order and
+/// <see cref="OcrLine.Words"/> spans the whole line without any post-hoc concatenation. The one place
+/// that does need stitching is paragraph merging, which happens after recognition — see
+/// <c>OnnxEasyOcrEngine.ReattachWords</c>.
+/// </remarks>
 internal static class TextBoxGrouper
 {
     public static IReadOnlyList<OcrPoint[]> Group(

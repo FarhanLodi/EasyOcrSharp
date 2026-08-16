@@ -13,6 +13,7 @@ namespace EasyOcrSharp.Tests;
 /// preprocessing features recover text from hard inputs.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class SyntheticComplexTests
 {
     private static readonly Rgb24 White = new(255, 255, 255);

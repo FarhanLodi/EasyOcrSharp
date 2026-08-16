@@ -43,6 +43,20 @@ internal static class CtcDecoder
             _ => GreedyDecode(logits, steps, classes, characters, allowed),
         };
 
+    /// <summary>
+    /// Same decode as <see cref="Decode"/>, additionally reporting which CTC timesteps produced each
+    /// emitted character. The text and confidence are bit-for-bit what <see cref="Decode"/> returns —
+    /// the alignment is a by-product, never an influence.
+    /// </summary>
+    public static CtcDecodeResult DecodeWithAlignment(
+        float[,] logits, int steps, int classes, string characters, bool[]? allowed, DecoderType decoder, int beamWidth, WordTrie? trie)
+        => decoder switch
+        {
+            DecoderType.BeamSearch => BeamSearchDecodeWithAlignment(logits, steps, classes, characters, allowed, beamWidth, trie: null),
+            DecoderType.WordBeamSearch => BeamSearchDecodeWithAlignment(logits, steps, classes, characters, allowed, beamWidth, trie),
+            _ => GreedyDecodeWithAlignment(logits, steps, classes, characters, allowed),
+        };
+
     private static bool IsSelectable(int cc, bool[]? allowed) => cc == 0 || allowed is null || allowed[cc - 1];
 
     private static bool IsSeparator(string characters, int charIdx)
@@ -56,10 +70,37 @@ internal static class CtcDecoder
     /// </summary>
     public static (string Text, double Confidence) GreedyDecode(float[,] logits, int steps, int classes, string characters, bool[]? allowed)
     {
+        var result = GreedyCore(logits, steps, classes, characters, allowed, alignment: null);
+        return (result.Text, result.Confidence);
+    }
+
+    /// <summary>
+    /// <see cref="GreedyDecode"/> plus the exact CTC alignment: every emitted character carries the
+    /// contiguous timestep run whose argmax produced it, and a confidence that is the mean softmax
+    /// probability over that run. Text and confidence are computed by the same code path as
+    /// <see cref="GreedyDecode"/>, so they are identical.
+    /// </summary>
+    public static CtcDecodeResult GreedyDecodeWithAlignment(float[,] logits, int steps, int classes, string characters, bool[]? allowed)
+        => GreedyCore(logits, steps, classes, characters, allowed, new List<CtcCharAlignment>());
+
+    /// <summary>
+    /// The single greedy implementation. When <paramref name="alignment"/> is supplied it is filled with
+    /// one entry per emitted character; when it is null the method behaves — and costs — exactly as the
+    /// original alignment-free decode.
+    /// </summary>
+    private static CtcDecodeResult GreedyCore(
+        float[,] logits, int steps, int classes, string characters, bool[]? allowed, List<CtcCharAlignment>? alignment)
+    {
         var sb = new System.Text.StringBuilder();
         double logProbSum = 0;   // Σ ln(maxProb) over non-blank timesteps
         int probCount = 0;
         int lastIdx = -1;
+
+        // Index in `alignment` of the character the current repeat-run keeps emitting (-1 = no run open),
+        // plus the running mean of that run's per-timestep probabilities.
+        int runEntry = -1;
+        double runProbSum = 0;
+        int runProbCount = 0;
 
         for (int t = 0; t < steps; t++)
         {
@@ -79,6 +120,7 @@ internal static class CtcDecoder
             }
             double prob = 1.0 / sumExp; // exp(max-max)=1 over sumExp == softmax of the argmax class
 
+            bool runContinues = false;
             if (argmax != 0)
             {
                 int charIdx = argmax - 1;
@@ -90,16 +132,44 @@ internal static class CtcDecoder
 
                     // CTC collapse: emit only when the class changes from the previous step.
                     if (argmax != lastIdx && charIdx >= 0 && charIdx < characters.Length)
+                    {
                         sb.Append(characters[charIdx]);
+                        if (alignment is not null)
+                        {
+                            alignment.Add(new CtcCharAlignment(characters[charIdx], prob, t, t));
+                            runEntry = alignment.Count - 1;
+                            runProbSum = prob;
+                            runProbCount = 1;
+                            runContinues = true;
+                        }
+                    }
+                    else if (argmax == lastIdx && runEntry >= 0 && alignment is not null)
+                    {
+                        // Same class repeated: the glyph is still being emitted, so widen its span.
+                        runProbSum += prob;
+                        runProbCount++;
+                        alignment[runEntry] = alignment[runEntry] with
+                        {
+                            Confidence = runProbSum / runProbCount,
+                            EndStep = t,
+                        };
+                        runContinues = true;
+                    }
                 }
             }
+            // A blank, a separator or an unmapped class closes the current glyph's timestep run.
+            if (!runContinues) runEntry = -1;
             lastIdx = argmax;
         }
 
         double confidence = probCount > 0
             ? Math.Exp(2.0 / Math.Sqrt(probCount) * logProbSum)
             : 0.0;
-        return (sb.ToString(), confidence);
+        return new CtcDecodeResult(
+            sb.ToString(),
+            confidence,
+            alignment is null ? Array.Empty<CtcCharAlignment>() : alignment,
+            steps);
     }
 
     /// <summary>
@@ -219,7 +289,57 @@ internal static class CtcDecoder
             else map[key] = (pb, pnb);
         }
     }
+
+    /// <summary>
+    /// <see cref="BeamSearchDecode"/> with an alignment attached. The prefix beam sums over <em>all</em>
+    /// alignments of a hypothesis rather than tracking a single winning path, so there is no exact
+    /// timestep span to report: the returned spans divide the timesteps uniformly across the decoded
+    /// characters, i.e. the same proportional approximation the exporters used to make, only now applied
+    /// in timestep space. Text and confidence are unaffected. Use
+    /// <see cref="DecoderType.Greedy"/> when character geometry has to be exact.
+    /// </summary>
+    public static CtcDecodeResult BeamSearchDecodeWithAlignment(
+        float[,] logits, int steps, int classes, string characters, bool[]? allowed, int beamWidth, WordTrie? trie)
+    {
+        var (text, confidence) = BeamSearchDecode(logits, steps, classes, characters, allowed, beamWidth, trie);
+        return new CtcDecodeResult(text, confidence, UniformAlignment(text, confidence, steps), steps);
+    }
+
+    /// <summary>Spreads <paramref name="text"/> evenly over <paramref name="steps"/> timesteps.</summary>
+    private static IReadOnlyList<CtcCharAlignment> UniformAlignment(string text, double confidence, int steps)
+    {
+        if (text.Length == 0 || steps <= 0) return Array.Empty<CtcCharAlignment>();
+
+        var alignment = new CtcCharAlignment[text.Length];
+        for (int i = 0; i < text.Length; i++)
+        {
+            int start = (int)(i * (long)steps / text.Length);
+            int end = (int)((i + 1) * (long)steps / text.Length) - 1;
+            if (end < start) end = start;
+            if (end > steps - 1) end = steps - 1;
+            alignment[i] = new CtcCharAlignment(text[i], confidence, start, end);
+        }
+        return alignment;
+    }
 }
+
+/// <summary>
+/// One decoded character together with the inclusive CTC timestep span <c>[StartStep, EndStep]</c> that
+/// produced it, and the mean probability of the winning class over that span. Timesteps are the
+/// recognizer's horizontal feature columns, so the span converts directly into a horizontal extent
+/// across the recognized patch.
+/// </summary>
+internal readonly record struct CtcCharAlignment(char Value, double Confidence, int StartStep, int EndStep);
+
+/// <summary>
+/// A decode result carrying the per-character alignment alongside the text and confidence, plus the
+/// total number of timesteps the spans are relative to.
+/// </summary>
+internal readonly record struct CtcDecodeResult(
+    string Text,
+    double Confidence,
+    IReadOnlyList<CtcCharAlignment> Alignment,
+    int Steps);
 
 /// <summary>
 /// Prefix index over a lexicon used by word beam search: answers "can the current in-progress word,

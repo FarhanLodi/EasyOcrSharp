@@ -15,6 +15,7 @@ namespace EasyOcrSharp.Tests;
 /// also covers a real scanned PDF you drop into <c>test/assets/pdf/</c>.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class ScannedPdfTests
 {
     private static string Sample()

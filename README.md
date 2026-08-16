@@ -39,7 +39,13 @@ Console.WriteLine(result.FullText);
 | 🧩 **Flexible input** | File / `Stream` / `byte[]` / `Image` / **PDF**, region-of-interest, recognize-from-boxes, word/line/paragraph grouping, auto language detection |
 | 🧱 **Document structure** | **`AnalyzeDocumentAsync`**: layout regions, **tables as HTML**, formulas, seals & reading order (PP-StructureV3 via PaddleOcrNet), with Markdown / JSON export |
 | 📄 **Document-ready** | **Searchable-PDF** output, plus hOCR / ALTO / TSV / JSON exporters |
-| 🎯 **Accurate fields** | Allow/block-lists, **beam / word-beam decoders**, per-box **rotation**, custom recognizers, exposed detection/grouping/contrast thresholds |
+| ✍️ **Handwriting** | **TrOCR** encoder/decoder recognition for handwritten text — something Python EasyOCR cannot do at all |
+| 🔳 **Barcodes & QR** | Read barcodes and QR codes alongside text in a single pass |
+| 🖍️ **Redaction** | Find by regex/keyword and **permanently** paint over it — Luhn-checked cards, mod-97 IBANs, emails, SSNs |
+| 🧾 **Fields & tables** | Anchor-based **key/value extraction** with invoice presets, plus recovered tables as `DataTable` / CSV |
+| 🎯 **Accurate fields** | Allow/block-lists, **beam / word-beam decoders**, per-box **rotation**, custom recognizers, exposed detection/grouping/contrast thresholds, **post-OCR correction** & CER/WER metrics |
+| 📐 **Word geometry** | True per-**word** and per-**character** boxes from CTC alignment — not width estimates |
+| 🖥️ **CLI + web sample** | `dotnet tool install -g EasyOcrSharp.Cli`, plus a Dockerized ASP.NET Core service sample |
 | 🩺 **Scan-ready** | Deskew, orientation correction, adaptive binarize, denoise & **sharpen**, plus model-based **document orientation** & **page unwarp** |
 | 📊 **Production-grade** | OpenTelemetry metrics & tracing, health checks, resilient resumable downloads, batch API |
 | 🛠️ **Modern .NET** | AOT- & single-file-friendly, DI-ready, .NET 10 |
@@ -208,6 +214,120 @@ var opts = new RecognitionOptions
 };
 ```
 
+### Word & character geometry
+
+Each line normally carries one polygon. Ask for `WordLevelDetail` and every line also reports its
+**words** and, optionally, its **characters** — with real boxes derived from the recognizer's CTC
+alignment (which timestep emitted which glyph), not estimated by splitting the line width.
+
+```csharp
+var result = await ocr.ExtractTextFromImage("receipt.png", new[] { "en" }, new RecognitionOptions
+{
+    WordLevelDetail = WordLevelDetail.Words,   // or .Characters for per-glyph boxes
+});
+
+foreach (var word in result.Lines.SelectMany(l => l.Words))
+    Console.WriteLine($"{word.Text,-20} {word.Confidence:P0}  {word.BoundingBox}");
+```
+
+Defaults to `WordLevelDetail.None`, so nothing changes — and costs nothing — unless you ask.
+Rotated lines produce genuinely rotated word quads, and the hOCR / ALTO / TSV exporters and the
+searchable-PDF text layer all sharpen automatically when word detail is present.
+
+### Streaming results
+
+For multi-page documents or a responsive UI, take lines as they are recognized instead of waiting for
+the whole page:
+
+```csharp
+await foreach (var line in ocr.ExtractTextStreamAsync("poster.png", new[] { "en" }))
+    Console.WriteLine(line.Text);   // arrives as each region finishes
+```
+
+### ✍️ Handwriting (TrOCR)
+
+Handwritten text needs a different model than printed text — EasyOCR's CRNN recognizers are trained on
+printed glyphs and cannot read cursive at all. Switch it on and call `RecognizeHandwritingAsync`:
+
+```csharp
+var service = new EasyOcrService(new EasyOcrServiceOptions
+{
+    Handwriting = HandwritingOptions.Default,   // that's it
+});
+
+var notes = await service.RecognizeHandwritingAsync("handwritten-note.png");
+```
+
+The TrOCR models download into the same model cache as everything else on the first handwriting call,
+checksum-verified like the rest. `Handwriting` is **null by default**, so a service that doesn't ask
+for it never downloads a byte and behaves exactly as before.
+
+```csharp
+Handwriting = new HandwritingOptions
+{
+    Quantize  = false,   // full precision (~1.5 GB) instead of the int8 default (~520 MB)
+    BeamWidth = 4,       // 1 = greedy (default)
+},
+```
+
+`Quantize` defaults to **true**: int8 weights are a third of the size and roughly twice as fast, at a
+small accuracy cost on unusual words. Full precision is the more accurate of the two — worth the extra
+download for archival work.
+
+The hosted weights are an ONNX export of Microsoft's MIT-licensed
+[`trocr-base-handwritten`](https://huggingface.co/microsoft/trocr-base-handwritten), produced by
+`tools/export_trocr_onnx.py`.
+
+**Using your own export instead.** Any standard [Optimum](https://huggingface.co/docs/optimum) TrOCR
+export works — an encoder taking `pixel_values`, a decoder taking `input_ids` + `encoder_hidden_states`
+(with or without `past_key_values` caching), and a byte-level BPE vocabulary — so you can swap in
+`trocr-base-printed`, a larger checkpoint, or your own fine-tune. Point the three paths at it and
+nothing is ever downloaded:
+
+```csharp
+// Explicit paths…
+Handwriting = new HandwritingOptions
+{
+    EncoderModelPath = "models/trocr/encoder_model.onnx",
+    DecoderModelPath = "models/trocr/decoder_model.onnx",
+    TokenizerPath    = "models/trocr/vocab.json",
+};
+
+// …or a folder holding those three conventional file names.
+Handwriting = HandwritingOptions.FromDirectory("models/trocr"),
+```
+
+Setting only some paths is fine: whatever you leave null is fetched from the hosted set, so you can
+override just the decoder and keep the rest.
+
+For long lines you can point `DecoderModelPath` at a `decoder_model_merged.onnx` — the runtime detects
+the `past_key_values` inputs and uses KV caching automatically. Do **not** use
+`decoder_with_past_model.onnx` on its own; it is the second half of a two-file pipeline and consumes
+caches it never produces.
+
+Note the checkpoint is fine-tuned on **handwriting**: it reads printed text too, but the dedicated
+printed recognizers are better at that.
+
+### 🔳 Barcodes & QR codes
+
+Documents that need OCR usually carry codes too. Read them from the same image, with no OCR model
+involved:
+
+```csharp
+foreach (var code in await BarcodeScanner.ReadBarcodesAsync("label.png",
+             new BarcodeOptions { MultipleCodes = true }))
+{
+    Console.WriteLine($"{code.Format}: {code.Text}");
+}
+
+// …or both in one pass
+var page = await ocr.ExtractTextAndBarcodesAsync("label.png", new[] { "en" });
+Console.WriteLine($"{page.Ocr.Lines.Count} lines, {page.Barcodes.Count} codes");
+```
+
+`BarcodeOptions` covers `Formats`, `TryHarder`, `MultipleCodes`, `TryInverted`, `AutoRotate` and a
+`Region` restriction.
+
 <br>
 
 # 📄 Documents, scans & PDF
@@ -317,7 +437,63 @@ await ocr.CreateSearchablePdfAsync("scan.pdf", "scan.searchable.pdf", new[] { "e
 ```
 
 `PdfOcrOptions` controls render `Dpi`, searchable-PDF `JpegQuality`, and a per-page `Progress`
-callback. The searchable text layer is best for Latin scripts (base-14 font, WinAnsi encoding).
+callback.
+
+#### Unicode text layers
+
+The invisible text layer uses the base-14 Helvetica font for Latin-1 text, and automatically switches
+to an **embedded, subsetted Type0 / `Identity-H` font** (with a `ToUnicode` CMap) when the recognized
+text needs it — so Chinese, Japanese, Korean, Arabic, Devanagari, Thai and Greek PDFs are genuinely
+searchable and copy-pasteable.
+
+```csharp
+var (result, pdf) = await ocr.CreateSearchablePdfAsync(bytes, new[] { "ch_sim" }, pdfOptions: new()
+{
+    TextLayerFont     = PdfTextLayerFontMode.Auto,   // Auto | Never | Always
+    TextLayerFontPath = "/usr/share/fonts/noto/NotoSansCJK-Regular.ttc",  // optional
+});
+
+if (result.TextLayerFontStatus == PdfTextLayerFontStatus.Unavailable)
+    logger.LogWarning("No font covered this script — the text layer fell back to Latin-1.");
+```
+
+> **No font is bundled** — a CJK font alone is tens of megabytes. Either point `TextLayerFontPath` at
+> one, or let the built-in probe find an installed system font. If nothing suitable exists the output
+> falls back to the old Helvetica layer rather than failing, and `TextLayerFontStatus` tells you so.
+
+### 🖼️ Multi-frame TIFF
+
+Scanners emit multi-page TIFFs. Read every frame, not just the first:
+
+```csharp
+var doc = await ocr.ExtractTextFromFramesAsync("scan.tif", new[] { "en" });
+Console.WriteLine($"{doc.Frames.Count} frames in {doc.Duration.TotalSeconds:0.0}s");
+
+// or stream them, so a 200-page TIFF starts producing results immediately
+await foreach (var frame in ocr.StreamTextFromFramesAsync("scan.tif", new[] { "en" }))
+    Console.WriteLine($"page {frame.FrameIndex}: {frame.Ocr.FullText}");
+```
+
+The pixel-flood guard applies per frame, `MaxFrames` bounds the document, and a single-frame image
+flows through the same call and returns exactly one result.
+
+### 📊 Tables as data
+
+`AnalyzeDocumentAsync` recovers tables as HTML. Turn them into something .NET can use:
+
+```csharp
+var structure = await ocr.AnalyzeDocumentAsync("invoice.png");
+
+foreach (var table in structure.Tables())
+{
+    IReadOnlyList<IReadOnlyList<string>> rows = table.ToRows();
+    DataTable dt = table.ToDataTable();      // header row detected from <th>
+    string csv  = table.ToCsv();             // RFC 4180 quoting
+}
+```
+
+Merged cells are expanded into repeated values, HTML entities are decoded, and malformed markup is
+tolerated rather than thrown on.
 
 <br>
 
@@ -392,6 +568,60 @@ await foreach (var item in ocr.ExtractTextFromImagesAsync(files, new[] { "en" },
     else                Console.Error.WriteLine($"{item.Source} failed: {item.Error!.Message}");
 }
 ```
+
+### 🖍️ Redaction
+
+Find sensitive text and **permanently** destroy those pixels — the region is painted over, not covered
+by an annotation someone can remove:
+
+```csharp
+var redacted = await ocr.RedactAsync("statement.png", new[] { "en" }, new RedactionOptions
+{
+    Rules    = RedactionPatterns.Common,     // email, phone, card, IBAN, SSN, long digit runs
+    Keywords = new[] { "Account Holder" },
+    Style    = RedactionStyle.FilledBox,     // or Blur / Pixelate
+    Scope    = RedactionScope.MatchedWords,  // only the matched words, not the whole line
+});
+
+await redacted.Image.SaveAsPngAsync("statement.redacted.png");
+Console.WriteLine($"{redacted.RedactedRegionCount} regions removed");
+Console.WriteLine(redacted.SanitizedText);   // the text with matches masked out
+
+// PDFs too
+var safe = await ocr.RedactPdfAsync(pdfBytes, new[] { "en" }, options);
+```
+
+The card and IBAN presets are **validated, not just matched**: `CreditCard` applies a Luhn check and
+`Iban` a mod-97 check, so a random 16-digit order number is not mistaken for a card number.
+
+### 🧾 Field extraction
+
+Pull structured values out of invoices, receipts and forms using the label positions OCR already
+produced — no LLM involved:
+
+```csharp
+var result = await ocr.ExtractTextFromImage("invoice.png", new[] { "en" });
+
+var fields = result.ExtractFields(new[]
+{
+    FieldPresets.InvoiceNumber,
+    FieldPresets.InvoiceDate,
+    FieldPresets.Total,
+    new FieldDefinition
+    {
+        Name      = "Customer PO",
+        Anchors   = new[] { "Customer PO", "PO Number" },
+        Direction = FieldDirection.Right | FieldDirection.Below,
+    },
+});
+
+foreach (var f in fields)
+    Console.WriteLine($"{f.Name}: {f.Value}  ({f.Confidence:P0})");
+```
+
+Anchor matching is fuzzy, so OCR damage like `Totai` still resolves; distances are expressed as
+multiples of the anchor's line height, so the same definition works at any resolution; and a plain
+`"Total: 42.00"` on one line is extracted without any geometry at all.
 
 <br>
 
@@ -512,6 +742,42 @@ output is effectively unchanged. The win is **vocabulary-dependent**: ONNX Runti
 the matmul/linear layers but not the BiLSTM/convolutions, so large-vocabulary packs shrink most
 (e.g. `zh_sim` ~22 → ~16 MB) while small-vocabulary packs change little. The detector stays float (as
 in EasyOCR). Opt-in; the float models are the default.
+
+### Post-OCR correction
+
+Fix the recognizer's mistakes with a domain lexicon — while leaving text it was confident about
+completely alone:
+
+```csharp
+var corrected = result.Correct(new CorrectionOptions
+{
+    Dictionary             = File.ReadLines("part-numbers.txt").ToArray(),
+    MaxEditDistance        = 2,
+    MinConfidenceToCorrect = 0.85,   // only touch tokens the model itself flagged as shaky
+    Normalizers            = new[] { FieldNormalizers.Iban(), FieldNormalizers.Date() },
+});
+```
+
+Candidate ranking is weighted by the confusions OCR actually makes (`0`/`O`, `1`/`l`/`I`, `5`/`S`,
+`8`/`B`, `rn`/`m`). The normalizers go further than validation: where a checksum identifies the wrong
+character — IBAN mod-97, ICAO 9303 MRZ check digits — they repair it. `Correct` never mutates the
+input; it returns a new `OcrResult`.
+
+### Measuring accuracy (CER / WER)
+
+```csharp
+double cer = result.CharacterErrorRate(expectedText);
+double wer = result.WordErrorRate(expectedText);
+
+var report = result.Compare(expectedText, TextComparisonOptions.Relaxed);
+Console.WriteLine($"CER {report.CharacterErrorRate:P2} — " +
+                  $"{report.Characters.Substitutions} sub, " +
+                  $"{report.Characters.Insertions} ins, " +
+                  $"{report.Characters.Deletions} del");
+```
+
+Useful for benchmarking a preprocessing change or a decoder setting against your own documents rather
+than trusting a generic accuracy claim.
 
 <br>
 
@@ -672,6 +938,45 @@ await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
 For **air-gapped** deployments, pre-seed the cache and set `Offline = true` — a missing model then
 throws a clear error instead of attempting a download.
 
+### 🖥️ Command-line tool
+
+```bash
+dotnet tool install -g EasyOcrSharp.Cli
+```
+
+```bash
+# recognize an image, a folder, or a glob
+easyocrsharp scan receipt.png
+easyocrsharp scan scans/ -r -l en,de --format json -o out/
+
+# make a scanned PDF searchable
+easyocrsharp pdf scan.pdf -o searchable.pdf
+
+# pre-download models for an air-gapped host, then check what's there
+easyocrsharp models pull en,fr
+easyocrsharp models list
+easyocrsharp models path
+
+# versions, active execution provider, GPU status, cache location
+easyocrsharp info
+```
+
+`scan` writes results to stdout and errors to stderr so it pipes cleanly, exits non-zero on failure,
+and accepts the same tuning as the library (`--allowlist`, `--min-confidence`, `--paragraph`,
+`--preprocess deskew,binarize,sharpen`, `--gpu`, `--jobs`). Add `--help` to any command.
+
+### 🌐 Web service sample
+
+[`samples/EasyOcrSharp.WebApi`](samples/EasyOcrSharp.WebApi) is a runnable ASP.NET Core service —
+`POST /ocr`, `POST /ocr/pdf`, `GET /health` and a browser upload page — with bounded concurrency,
+upload limits, problem-details errors and a Dockerfile that already includes the native prerequisites
+PDFium and ONNX Runtime need.
+
+```bash
+dotnet run --project samples/EasyOcrSharp.WebApi
+curl -X POST "http://localhost:5000/ocr?lang=en&format=text" -F "file=@receipt.png"
+```
+
 <br>
 
 # 📚 Reference
@@ -782,6 +1087,8 @@ for the exact one-page and three-page PDFs to drop in.
 |---|---|
 | `src/EasyOcrSharp` | the core library (includes PDF input + searchable-PDF output) |
 | `src/EasyOcrSharp.Gpu` | CUDA execution-provider package |
+| `src/EasyOcrSharp.Cli` | the `easyocrsharp` command-line tool (`dotnet tool`) |
+| `samples/EasyOcrSharp.WebApi` | ASP.NET Core service sample + Dockerfile |
 | `test/EasyOcrSharp.Tests` | xUnit unit + integration tests |
 | `test/EasyOcrSharp.Demo` | interactive console demo |
 | `test/assets` | sample images |

@@ -14,6 +14,7 @@ namespace EasyOcrSharp.Tests;
 /// models are downloaded once and cached.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class CancellationConcurrencyTests
 {
     private static string Sample() => TestAssets.Image("sample.png")

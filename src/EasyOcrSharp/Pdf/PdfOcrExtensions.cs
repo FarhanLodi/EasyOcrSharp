@@ -83,6 +83,13 @@ public static class PdfOcrExtensions
     /// <summary>
     /// OCRs an in-memory PDF and returns both the per-page results and the searchable PDF bytes.
     /// </summary>
+    /// <remarks>
+    /// The invisible text layer uses the base-14 Helvetica font while the recognized text is Latin-1, and
+    /// switches to an embedded <c>/Identity-H</c> composite font when it is not, so non-Latin scripts stay
+    /// searchable. See <see cref="PdfOcrOptions.TextLayerFont"/> and
+    /// <see cref="PdfOcrOptions.TextLayerFontPath"/> for control over that, and
+    /// <see cref="PdfOcrResult.TextLayerFontStatus"/> for what actually happened.
+    /// </remarks>
     public static async Task<(PdfOcrResult Result, byte[] Pdf)> CreateSearchablePdfAsync(
         this IEasyOcrService service,
         byte[] pdfBytes,
@@ -98,7 +105,7 @@ public static class PdfOcrExtensions
         pdfOptions.Validate();
         var langs = languages as string[] ?? languages.ToArray();
 
-        var builder = new SearchablePdfBuilder();
+        var builder = new SearchablePdfBuilder(pdfOptions);
         var pages = new List<PdfPageResult>();
 
         await PdfRasterizer.ForEachPageAsync(pdfBytes, pdfOptions.Dpi, pdfOptions.MaxPages, pdfOptions.MaxPagePixels, async (index, count, image) =>
@@ -115,6 +122,15 @@ public static class PdfOcrExtensions
             pdfOptions.Progress?.Report(new PdfPageProgress(index + 1, count));
         }, cancellationToken).ConfigureAwait(false);
 
-        return (new PdfOcrResult { Pages = pages }, builder.Build());
+        // Build() picks the text-layer font from the whole document's text, so it has to run first.
+        var pdf = builder.Build();
+        var result = new PdfOcrResult
+        {
+            Pages = pages,
+            TextLayerFontStatus = builder.TextLayerFontStatus,
+            TextLayerFontPath = builder.TextLayerFontPath,
+        };
+
+        return (result, pdf);
     }
 }

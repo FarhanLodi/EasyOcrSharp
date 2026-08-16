@@ -147,6 +147,7 @@ internal static class ModelDownloadManager
         {
             var buffer = new byte[81920];
             var lastReport = DateTime.UtcNow;
+            long lastReportedBytes = -1;
             int read;
             while ((read = await source.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
             {
@@ -157,12 +158,20 @@ internal static class ModelDownloadManager
                 if ((DateTime.UtcNow - lastReport).TotalSeconds >= 1)
                 {
                     Report(logger, options, asset.FileName, downloaded, total);
+                    lastReportedBytes = downloaded;
                     lastReport = DateTime.UtcNow;
                 }
             }
-        }
 
-        Report(logger, options, asset.FileName, downloaded, total);
+            // The chunk that completes the file can itself land on a reporting tick, in which case the
+            // loop has already announced the finished download. Repeating it here would make a consumer
+            // that sums progress double-count the tail, and a progress bar redraw its completed state
+            // twice, so the final report is only sent when it says something new.
+            if (downloaded != lastReportedBytes)
+            {
+                Report(logger, options, asset.FileName, downloaded, total);
+            }
+        }
     }
 
     private static async Task VerifyChecksumAsync(ModelAsset asset, string tempPath, ModelDownloadOptions options, CancellationToken ct)

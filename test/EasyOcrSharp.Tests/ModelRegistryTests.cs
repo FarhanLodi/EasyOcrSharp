@@ -80,4 +80,37 @@ public class ModelRegistryTests
             Assert.EndsWith(".vocab.json", pack.Vocab.FileName);
         }
     }
+
+    [Fact]
+    public void Trocr_handwriting_assets_have_sha256_checksums_in_both_precisions()
+    {
+        // Downloads are fail-closed on an unknown hash, so a TrOCR asset without one would make hosted
+        // handwriting fail at runtime rather than at build time. This is the build-time guard.
+        var assets = new[]
+        {
+            ModelRegistry.TrOcrVocab,
+            ModelRegistry.TrOcrEncoder(quantize: false),
+            ModelRegistry.TrOcrDecoder(quantize: false),
+            ModelRegistry.TrOcrEncoder(quantize: true),
+            ModelRegistry.TrOcrDecoder(quantize: true),
+        };
+
+        foreach (var asset in assets)
+        {
+            Assert.False(string.IsNullOrEmpty(asset.Sha256), $"{asset.FileName} is missing its checksum");
+            Assert.Equal(64, asset.Sha256!.Length);
+            Assert.StartsWith("https://", asset.Url, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void The_quantized_trocr_weights_are_distinct_files_sharing_one_vocabulary()
+    {
+        // The weights quantize; the tokenizer does not, so both precisions point at the same sidecar.
+        Assert.NotEqual(ModelRegistry.TrOcrEncoder(false).FileName, ModelRegistry.TrOcrEncoder(true).FileName);
+        Assert.NotEqual(ModelRegistry.TrOcrDecoder(false).FileName, ModelRegistry.TrOcrDecoder(true).FileName);
+        Assert.Contains(".int8.", ModelRegistry.TrOcrEncoder(true).FileName, StringComparison.Ordinal);
+        Assert.Contains(".int8.", ModelRegistry.TrOcrDecoder(true).FileName, StringComparison.Ordinal);
+        Assert.EndsWith(".vocab.json", ModelRegistry.TrOcrVocab.FileName, StringComparison.Ordinal);
+    }
 }

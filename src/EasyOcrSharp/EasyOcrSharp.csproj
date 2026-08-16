@@ -7,11 +7,11 @@
 		<LangVersion>latest</LangVersion>
 		<IsAotCompatible>true</IsAotCompatible>
 		<PackageId>EasyOcrSharp</PackageId>
-		<Version>2.2.4</Version>
-		<PackageReleaseNotes>2.2.4: document-structure analysis and document preprocessing. New AnalyzeDocumentAsync (all input overloads) recovers layout regions, tables as HTML, formulas as LaTeX, seals and reading order via PP-StructureV3 (PaddleOcrNet engine), with ToMarkdown()/ToJson() export and DocumentAnalysisOptions (table model choice, per-feature toggles, languages, page orientation/unwarp). New PreprocessingOptions.Sharpen/SharpenAmount (unsharp mask), DocumentOrientation (PP-LCNet single-pass 90/180/270° page fix) and DocumentUnwarp (UVDoc page dewarp) — all default-off. All additive and opt-in; no public method or default changed. 2.2.3: dependency updates (ONNX Runtime 1.27.0, Microsoft.Extensions 10.0.9) plus the hardening + performance + accuracy pass. Security: image decompression-bomb guard (MaxImagePixels), PDF page/size guards (MaxPages, MaxPageMegapixels), HTTPS-only model source + fail-closed checksum verification, model file-name traversal check. Thread-safety: recognizer cache no longer poisoned by a cancelled/failed load; DisposeAsync drains in-flight OCR before releasing sessions. Performance: contiguous Buffer.Span tensor reads, PerspectiveWarp sub-rect copy, CPU intra-op=1 under box-level parallelism, pooled scratch buffers, new WarmUp() to remove cold-start latency. Accuracy: column/font-aware reading order, IoU NMS box de-dup, dominant-script bias on multi-language requests. Added typed exceptions (ModelDownload/Checksum/OfflineModelMissing/PdfProcessing/ImageTooLarge) and OcrResult.SourceWidth/Height. No public method renamed; all additive or safer defaults. See CHANGELOG.md. 2.2.1: clearer typed errors for bad PDFs. 2.2.0: PDF I/O, exporters, telemetry, resilient downloads, auto-GPU, EasyOCR parity.</PackageReleaseNotes>
+		<Version>2.3.0</Version>
+		<PackageReleaseNotes>2.3.0: thirteen additive capabilities. Recognition detail: RecognitionOptions.WordLevelDetail (default None) populates OcrLine.Words/Characters with true per-word and per-character geometry from the recognizer's CTC alignment, and hOCR/ALTO/TSV emit real word boxes when present. Documents: Unicode searchable PDF via an embedded Type0/CIDFontType2 Identity-H subset font with ToUnicode CMap (PdfOcrOptions.TextLayerFont/TextLayerFontPath, PdfOcrResult.TextLayerFontStatus; no font is bundled — supply one or rely on the system font probe, with graceful Latin-1 fallback); multi-frame TIFF input (ExtractTextFromFramesAsync/StreamTextFromFramesAsync); recovered tables as data (TableHtmlParser, ToRows/ToDataTable/ToCsv). New modes: handwriting recognition via TrOCR (EasyOcrServiceOptions.Handwriting + RecognizeHandwritingAsync; hosted models download on first use, int8 by default, or point at your own export) and barcode/QR reading via ZXing.Net (BarcodeScanner.ReadBarcodesAsync, combined text+barcode pass). Post-processing: redaction that permanently paints over matched text with Luhn-checked card and mod-97 IBAN presets; SymSpell-style post-OCR correction gated on confidence with IBAN/MRZ checksum repair; anchor-based field extraction with invoice presets; CER/WER accuracy metrics. Integration: streaming ExtractTextStreamAsync (IAsyncEnumerable), an easyocrsharp dotnet-tool CLI, and a Dockerized ASP.NET Core sample. All additive and opt-in; no public method renamed and no existing default changed. New dependency: ZXing.Net. 2.2.4: document-structure analysis and document preprocessing. New AnalyzeDocumentAsync (all input overloads) recovers layout regions, tables as HTML, formulas as LaTeX, seals and reading order via PP-StructureV3 (PaddleOcrNet engine), with ToMarkdown()/ToJson() export and DocumentAnalysisOptions (table model choice, per-feature toggles, languages, page orientation/unwarp). New PreprocessingOptions.Sharpen/SharpenAmount (unsharp mask), DocumentOrientation (PP-LCNet single-pass 90/180/270° page fix) and DocumentUnwarp (UVDoc page dewarp) — all default-off. All additive and opt-in; no public method or default changed. 2.2.3: dependency updates (ONNX Runtime 1.27.0, Microsoft.Extensions 10.0.9) plus the hardening + performance + accuracy pass. Security: image decompression-bomb guard (MaxImagePixels), PDF page/size guards (MaxPages, MaxPageMegapixels), HTTPS-only model source + fail-closed checksum verification, model file-name traversal check. Thread-safety: recognizer cache no longer poisoned by a cancelled/failed load; DisposeAsync drains in-flight OCR before releasing sessions. Performance: contiguous Buffer.Span tensor reads, PerspectiveWarp sub-rect copy, CPU intra-op=1 under box-level parallelism, pooled scratch buffers, new WarmUp() to remove cold-start latency. Accuracy: column/font-aware reading order, IoU NMS box de-dup, dominant-script bias on multi-language requests. Added typed exceptions (ModelDownload/Checksum/OfflineModelMissing/PdfProcessing/ImageTooLarge) and OcrResult.SourceWidth/Height. No public method renamed; all additive or safer defaults. See CHANGELOG.md. 2.2.1: clearer typed errors for bad PDFs. 2.2.0: PDF I/O, exporters, telemetry, resilient downloads, auto-GPU, EasyOCR parity.</PackageReleaseNotes>
 		<Authors>Farhan Lodi</Authors>
 		<Description>High-accuracy native .NET OCR powered by EasyOCR's neural models running on ONNX Runtime. No Python required.</Description>
-		<PackageTags>OCR;EasyOCR;ONNX;TextRecognition;CRAFT;CRNN;Tables;Layout;DocumentAnalysis;PP-Structure;.NET10;AOT</PackageTags>
+		<PackageTags>OCR;EasyOCR;ONNX;TextRecognition;CRAFT;CRNN;Handwriting;TrOCR;Barcode;QR;Redaction;FieldExtraction;Tables;Layout;DocumentAnalysis;PP-Structure;SearchablePDF;Unicode;CLI;.NET10;AOT</PackageTags>
 		<RepositoryUrl>https://github.com/easyocrsharp/EasyOcrSharp</RepositoryUrl>
 		<PackageProjectUrl>https://github.com/easyocrsharp/EasyOcrSharp</PackageProjectUrl>
 		<PackageReadmeFile>README.md</PackageReadmeFile>
@@ -30,15 +30,22 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.9" />
-		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.9" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
-		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.27.0" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
+		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.11" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
 		<PackageReference Include="SixLabors.ImageSharp" Version="3.1.12" />
 		<!-- Document-structure analysis (layout, tables, formulas, seals) behind AnalyzeDocumentAsync. -->
 		<PackageReference Include="PaddleOcrNet" Version="1.0.0" />
 		<!-- PDFium-based PDF rasterization for the built-in PDF input / searchable-PDF output. -->
 		<PackageReference Include="Docnet.Core" Version="2.6.0" />
+		<!--
+		  1D/2D barcode + QR decoding behind ReadBarcodesAsync / ExtractTextAndBarcodesAsync.
+		  The core (binding-free) package only: EasyOcrSharp supplies its own ImageSharp-backed
+		  LuminanceSource, so no System.Drawing / platform binding package is pulled in and ZXing
+		  types never surface in the public API.
+		-->
+		<PackageReference Include="ZXing.Net" Version="0.16.11" />
 	</ItemGroup>
 
 	<ItemGroup>

@@ -14,6 +14,7 @@ namespace EasyOcrSharp.Tests;
 ///   dotnet test --filter Category=Integration
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class OcrIntegrationTests
 {
     private static string? FindAsset(string name)

@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "EasyOcrSharp.WebApi": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "https://localhost:50741;http://localhost:50742"
+    }
+  }
+}

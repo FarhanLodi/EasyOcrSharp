@@ -21,6 +21,12 @@ internal sealed record CrnnRunOptions
     public double ContrastThreshold { get; init; } = 0.1;
     public double AdjustContrastTarget { get; init; } = 0.5;
 
+    /// <summary>
+    /// How much sub-line geometry to report. <see cref="WordLevelDetail.None"/> (the default) takes the
+    /// alignment-free decode path, so nothing about recognition changes and no geometry is computed.
+    /// </summary>
+    public WordLevelDetail WordLevelDetail { get; init; } = WordLevelDetail.None;
+
     /// <summary>Plain defaults — used by internal probes (language detection) that don't need tuning.</summary>
     public static readonly CrnnRunOptions Defaults = new();
 
@@ -38,5 +44,6 @@ internal sealed record CrnnRunOptions
         BatchSize = Math.Max(1, o.BatchSize),
         ContrastThreshold = o.ContrastThreshold,
         AdjustContrastTarget = o.AdjustContrastTarget,
+        WordLevelDetail = o.WordLevelDetail,
     };
 }

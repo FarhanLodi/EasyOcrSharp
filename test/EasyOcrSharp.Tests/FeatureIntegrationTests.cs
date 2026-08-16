@@ -18,6 +18,7 @@ namespace EasyOcrSharp.Tests;
 /// ("Hello World" over "EasyOcrSharp 2024").
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class FeatureIntegrationTests
 {
     private static string Sample()

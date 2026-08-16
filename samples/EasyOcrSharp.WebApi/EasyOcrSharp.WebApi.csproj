@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+	<PropertyGroup>
+		<TargetFramework>net10.0</TargetFramework>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<LangVersion>latest</LangVersion>
+		<RootNamespace>EasyOcrSharp.WebApi</RootNamespace>
+		<AssemblyName>EasyOcrSharp.WebApi</AssemblyName>
+		<!-- A sample: never published to NuGet. -->
+		<IsPackable>false</IsPackable>
+		<!--
+		  ICU is required: the aspnet base image ships libicu, and the exporters format numbers with
+		  InvariantCulture explicitly, so there is no reason to run globalization-invariant.
+		-->
+		<InvariantGlobalization>false</InvariantGlobalization>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<!--
+		  In your own app replace this with:
+		    <PackageReference Include="EasyOcrSharp" Version="2.2.4" />
+		  (and EasyOcrSharp.Gpu alongside it when you have a CUDA host).
+		-->
+		<ProjectReference Include="..\..\src\EasyOcrSharp\EasyOcrSharp.csproj" />
+	</ItemGroup>
+
+</Project>

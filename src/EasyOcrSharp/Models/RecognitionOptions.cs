@@ -34,6 +34,29 @@ public enum DecoderType
 }
 
 /// <summary>
+/// How much sub-line geometry the recognizer reports. Word and character boxes are read off the CTC
+/// alignment — the recognizer already knows which timestep emitted which glyph — so they are true
+/// extents rather than the line width split proportionally to character count.
+/// </summary>
+public enum WordLevelDetail
+{
+    /// <summary>
+    /// Line geometry only (the default): <see cref="OcrLine.Words"/> and
+    /// <see cref="OcrLine.Characters"/> stay empty and results are exactly what they have always been.
+    /// </summary>
+    None,
+
+    /// <summary>Also report <see cref="OcrLine.Words"/> — one entry per whitespace-delimited word.</summary>
+    Words,
+
+    /// <summary>
+    /// Report <see cref="OcrLine.Words"/> and, in addition, the per-character
+    /// <see cref="OcrLine.Characters"/> they were built from.
+    /// </summary>
+    Characters,
+}
+
+/// <summary>
 /// Tunable options for a recognition call. Pass to
 /// <see cref="Services.EasyOcrService.ExtractTextFromImage(string, System.Collections.Generic.IEnumerable{string}, RecognitionOptions, System.Threading.CancellationToken)"/>.
 /// </summary>
@@ -145,6 +168,17 @@ public sealed record RecognitionOptions
     /// Ignored when <see cref="Allowlist"/> is set.
     /// </summary>
     public string? Blocklist { get; init; }
+
+    /// <summary>
+    /// Whether the recognizer also reports per-word (and optionally per-character) geometry on every
+    /// line, derived from the CTC alignment. Defaults to <see cref="WordLevelDetail.None"/>, which
+    /// leaves <see cref="OcrLine.Words"/>/<see cref="OcrLine.Characters"/> empty exactly as before.
+    /// Turning it on adds no extra model inference — only a little arithmetic per decoded character —
+    /// and makes the hOCR / ALTO / TSV exporters emit true word boxes instead of an approximation.
+    /// Character extents are exact for <see cref="DecoderType.Greedy"/>; the beam-search decoders do not
+    /// expose their winning alignment, so their spans are distributed uniformly across the line.
+    /// </summary>
+    public WordLevelDetail WordLevelDetail { get; init; } = WordLevelDetail.None;
 
     /// <summary>
     /// Low-level CRAFT detection thresholds. Defaults match EasyOCR; only tweak when text is missed

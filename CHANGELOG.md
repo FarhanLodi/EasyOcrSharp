@@ -2,6 +2,102 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## 2.3.0
+
+**Thirteen new capabilities: true word/character geometry, Unicode searchable PDF, handwriting, barcodes,
+redaction, field extraction, post-OCR correction, accuracy metrics, streaming, multi-frame TIFF, table
+export, a `dotnet tool` CLI, and an ASP.NET Core sample.** Everything is additive and opt-in: no public
+method was renamed or removed, and no existing default changed — a service configured exactly as before
+behaves exactly as before, byte for byte.
+
+### Added — recognition detail
+- **Real word- and character-level geometry** derived from the recognizer's CTC alignment rather than
+  estimated from character counts. `RecognitionOptions.WordLevelDetail` (`None` | `Words` |
+  `Characters`, **default `None`**) populates `OcrLine.Words` and `OcrLine.Characters` with `OcrWord` /
+  `OcrChar` records carrying their own polygon, box and confidence. Rotated and skewed lines produce
+  genuinely rotated character quads, not axis-aligned approximations.
+- **hOCR, ALTO and TSV now emit true word boxes** when word detail is present, falling back to the
+  previous proportional-width approximation when it is not. Output is byte-identical to 2.2.4 whenever
+  `Words` is empty, which is the default.
+
+### Added — documents
+- **Unicode searchable PDF.** The invisible text layer now switches to an embedded Type0 /
+  CIDFontType2 font with `Identity-H` encoding, a subsetted `FontFile2` and a `ToUnicode` CMap, so
+  Chinese, Japanese, Korean, Arabic, Devanagari, Thai and Greek PDFs are genuinely searchable and
+  copy-pasteable. Previously anything outside Latin-1 was written as `?`.
+  - `PdfOcrOptions.TextLayerFont` (`Auto` | `Never` | `Always`) and `PdfOcrOptions.TextLayerFontPath`.
+  - **No font is bundled** — a CJK font is tens of megabytes. Supply one with `TextLayerFontPath`, or
+    let the built-in probe find an installed system font. When no suitable font exists the output
+    falls back to the previous Helvetica/WinAnsi layer instead of failing.
+  - `PdfOcrResult.TextLayerFontStatus` (`Standard` | `Embedded` | `Unavailable`) reports what actually
+    happened, so a pipeline can detect a document that silently lost searchability.
+- **Multi-frame TIFF and image sequences.** `ExtractTextFromFramesAsync` returns a
+  `MultiFrameOcrResult` (per-frame `FrameOcrResult` with its frame index), and
+  `StreamTextFromFramesAsync` yields each frame as it completes. The `MaxImagePixels` guard applies
+  per frame, `MaxFrames` bounds the document, and the caller's image is never disposed or mutated.
+- **Structure tables as data.** `TableHtmlParser` turns the HTML tables recovered by
+  `AnalyzeDocumentAsync` into a rectangular `TableGrid`, and `StructureExportExtensions` adds
+  `Tables()`, `ToRows()`, `ToGrid()`, `ToDataTable()`, `ToDataTables()` and RFC 4180 `ToCsv()`.
+  `rowspan`/`colspan` are expanded into repeated values; entities are decoded and malformed markup is
+  tolerated rather than thrown on.
+
+### Added — new recognition modes
+- **Handwriting recognition via TrOCR** — a ViT encoder + autoregressive decoder running on ONNX
+  Runtime, with greedy and beam decoding, a byte-level BPE tokenizer, and `MaxTokens` runaway
+  protection. Configured through `EasyOcrServiceOptions.Handwriting` (`HandwritingOptions`, null =
+  off) and used via `RecognizeHandwritingAsync`. The models are **hosted alongside the printed-text
+  packs and download on first use**, checksum-verified like the rest — `HandwritingOptions.Default` is
+  all that is needed. `Quantize` (default `true`) selects the int8 weights (~520 MB) over full
+  precision (~1.5 GB). Setting `EncoderModelPath` / `DecoderModelPath` / `TokenizerPath` uses your own
+  export instead and downloads nothing; `tools/export_trocr_onnx.py` produces a compatible set from any
+  HuggingFace TrOCR checkpoint. Weights are an ONNX export of the MIT-licensed
+  `microsoft/trocr-base-handwritten`.
+- **Barcode and QR reading** (ZXing.Net) via `BarcodeScanner.ReadBarcodesAsync` and matching
+  `IEasyOcrService` extensions, plus a combined text-and-barcode pass. `BarcodeOptions` controls
+  formats, `TryHarder`, `MultipleCodes`, `TryInverted`, `AutoRotate` and a region restriction. ZXing
+  types never appear in the public surface — `BarcodeFormat` is the library's own enum.
+
+### Added — post-processing
+- **Redaction.** `RedactAsync` / `RedactPdfAsync` find text by regex, keyword or predicate and
+  permanently paint over it — the pixels are destroyed, not merely covered by an annotation — filling
+  the rotated quad rather than an axis-aligned box. `RedactionStyle` offers `FilledBox`, `Blur` and
+  `Pixelate`; `RedactionScope` redacts a whole line or only the matched words. `RedactionPatterns`
+  ships validated presets: `Email`, `Phone`, `CreditCard` (**Luhn-checked**), `Iban` (**mod-97**),
+  `UsSocialSecurityNumber` and `LongDigitRun`.
+- **Post-OCR correction.** `OcrResult.Correct(...)` applies SymSpell-style lexicon correction weighted
+  by common OCR confusions (0/O, 1/l/I, 5/S, 8/B, rn/m). Crucially it is gated on
+  `MinConfidenceToCorrect`, so confident text is never rewritten. `FieldNormalizers` validate and,
+  where a checksum permits, repair dates, currency, IBANs and ICAO 9303 MRZ lines.
+- **Anchor-based field extraction.** `ExtractFields` / `ExtractFieldValues` locate a label and read its
+  value from the surrounding geometry — `Right`, `Below`, `Left`, `Above`, `SameLine` — with
+  resolution-independent distances, fuzzy anchor matching that survives OCR damage, and a geometry-free
+  `"Total: 42.00"` fallback. `FieldPresets` covers invoice and receipt fields.
+- **Accuracy metrics.** `EasyOcrSharp.Evaluation.TextAccuracyMetrics` provides `CharacterErrorRate`,
+  `WordErrorRate` and a full `Compare` breakdown, over raw strings or an `OcrResult`, with opt-in
+  normalization and a configurable `CharacterUnit`.
+
+### Added — integration surfaces
+- **Streaming results.** `IEasyOcrService.ExtractTextStreamAsync` returns `IAsyncEnumerable<OcrLine>`,
+  yielding lines as regions finish instead of buffering the whole page. Declared with a
+  default interface implementation, so existing mocks and custom implementations keep compiling.
+- **`easyocrsharp` CLI** (`src/EasyOcrSharp.Cli`, packaged as a `dotnet tool`): `scan` (images, PDFs,
+  globs and folders, to text/JSON/hOCR/ALTO/TSV), `pdf` (searchable PDF), `models pull|list|path` for
+  air-gapped deployment, and `info`. No third-party argument-parsing dependency.
+- **ASP.NET Core sample + Dockerfile** under `samples/EasyOcrSharp.WebApi`: `POST /ocr`,
+  `POST /ocr/pdf`, `GET /health` and a browser upload page, with bounded concurrency, upload limits,
+  problem-details errors and a model-cache volume.
+
+### Fixed
+- **PDF rasterization is now thread-safe.** Docnet exposes PDFium through a process-wide
+  `DocLib.Instance` singleton and PDFium is not thread-safe, but the rasterizer called into it without
+  any synchronization — so OCR-ing two PDFs at once (a batch, or one web request per document) could
+  return a corrupted page or tear down the native library. Every PDFium call is now serialized behind
+  a process-wide gate. The OCR itself stays outside the gate, so documents still overlap and
+  throughput is essentially unchanged.
+
+### Dependencies
+- Added **ZXing.Net** (barcode and QR decoding).
+
 ## 2.2.4
 
 **Document-structure analysis (layout, tables, formulas, seals) + document sharpen/orientation/unwarp

@@ -31,6 +31,7 @@ public class TextMetricsTests
 /// fixtures + ground-truth files to grow the gate; it skips cleanly when none are present.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class AccuracyRegressionTests
 {
     private const double MaxCer = 0.15;

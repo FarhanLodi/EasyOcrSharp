@@ -12,7 +12,10 @@ namespace EasyOcrSharp.Internal;
 /// CRNN ONNX model, and CTC-decodes the output (via <see cref="CtcDecoder"/>) to text + confidence.
 /// The preprocessing, decoding, confidence formula and low-confidence contrast retry all mirror
 /// upstream EasyOCR so accuracy matches the reference implementation. Supports greedy and beam-search
-/// decoding, per-box rotation, and optional batched inference.
+/// decoding, per-box rotation, and optional batched inference. When
+/// <see cref="CrnnRunOptions.WordLevelDetail"/> asks for it, the winning pass's CTC alignment is also
+/// projected back onto the source image by <see cref="WordGeometry"/> to give per-word and per-character
+/// polygons; otherwise no alignment is ever materialized.
 /// </summary>
 internal sealed class CrnnRecognizer : IDisposable
 {
@@ -85,18 +88,43 @@ internal sealed class CrnnRecognizer : IDisposable
             return new OcrLine { Text = string.Empty, Confidence = 0, BoundingPolygon = poly, BoundingBox = box };
         }
 
-        var (text, conf) = RecognizeCropAllRotations(crop, run, allowed, trie);
-        return new OcrLine { Text = text, Confidence = conf, BoundingPolygon = poly, BoundingBox = box };
+        var reading = RecognizeCropAllRotations(crop, run, allowed, trie);
+        return BuildLine(poly, box, reading, run);
+    }
+
+    /// <summary>
+    /// Turns a reading into an <see cref="OcrLine"/>, attaching word/character geometry when the caller
+    /// asked for it. With <see cref="WordLevelDetail.None"/> the reading carries no alignment and this is
+    /// the same object construction as before.
+    /// </summary>
+    private static OcrLine BuildLine(OcrPoint[] poly, OcrBoundingBox box, in Reading reading, CrnnRunOptions run)
+    {
+        if (reading.Geometry is not { } geometry)
+        {
+            return new OcrLine { Text = reading.Text, Confidence = reading.Confidence, BoundingPolygon = poly, BoundingBox = box };
+        }
+
+        var (words, characters) = WordGeometry.Build(poly, geometry, run.WordLevelDetail);
+        return new OcrLine
+        {
+            Text = reading.Text,
+            Confidence = reading.Confidence,
+            BoundingPolygon = poly,
+            BoundingBox = box,
+            Words = words,
+            Characters = characters,
+        };
     }
 
     /// <summary>
     /// Recognizes an already-rectified crop upright, then (if <see cref="CrnnRunOptions.RotationInfo"/>
     /// is set) at each requested angle, keeping the highest-confidence reading — EasyOCR's
-    /// <c>rotation_info</c>.
+    /// <c>rotation_info</c>. The winning orientation's alignment travels with it, together with the
+    /// transform that maps its patch back onto the upright crop.
     /// </summary>
-    private (string Text, double Confidence) RecognizeCropAllRotations(Image<Rgb24> crop, CrnnRunOptions run, bool[]? allowed, WordTrie? trie)
+    private Reading RecognizeCropAllRotations(Image<Rgb24> crop, CrnnRunOptions run, bool[]? allowed, WordTrie? trie)
     {
-        var (bestText, bestConf) = RecognizeCrop(crop, run, allowed, trie);
+        var best = RecognizeCrop(crop, run, allowed, trie, PatchTransform.Upright(crop.Width, crop.Height));
 
         if (run.RotationInfo is { Count: > 0 } angles)
         {
@@ -104,45 +132,76 @@ internal sealed class CrnnRecognizer : IDisposable
             {
                 if (((angle % 360) + 360) % 360 == 0) continue;
                 using var rotated = crop.Clone(ctx => ctx.Rotate(angle));
-                var (text, conf) = RecognizeCrop(rotated, run, allowed, trie);
-                if (conf > bestConf)
+                var candidate = RecognizeCrop(rotated, run, allowed, trie,
+                    PatchTransform.Rotated(crop.Width, crop.Height, rotated.Width, rotated.Height, angle));
+                if (candidate.Confidence > best.Confidence)
                 {
-                    bestConf = conf;
-                    bestText = text;
+                    best = candidate;
                 }
             }
         }
-        return (bestText, bestConf);
+        return best;
     }
 
     /// <summary>One crop, EasyOCR's two-pass scheme: plain pass, then a contrast-stretched retry when
-    /// the confidence falls below <see cref="CrnnRunOptions.ContrastThreshold"/>.</summary>
-    private (string Text, double Confidence) RecognizeCrop(Image<Rgb24> crop, CrnnRunOptions run, bool[]? allowed, WordTrie? trie)
+    /// the confidence falls below <see cref="CrnnRunOptions.ContrastThreshold"/>. Whichever pass wins
+    /// contributes both the text and the alignment, so geometry always describes the reported reading.</summary>
+    private Reading RecognizeCrop(Image<Rgb24> crop, CrnnRunOptions run, bool[]? allowed, WordTrie? trie, in PatchTransform patch)
     {
         var first = RunInference(crop, adjustContrast: false, run.AdjustContrastTarget);
-        if (first is not { } r1) return (string.Empty, 0.0);
-        var (text, conf) = Decode(r1.Logits, r1.T, r1.C, run, allowed, trie);
+        if (first is not { } r1) return new Reading(string.Empty, 0.0, null);
 
-        if (run.AdjustContrast && conf < run.ContrastThreshold)
+        int contentWidth = WordGeometry.ContentWidth(crop.Width, crop.Height, TargetHeight, MaxWidth);
+        var reading = Decode(r1.Logits, r1.T, r1.C, r1.Width, run, allowed, trie, patch, contentWidth);
+
+        if (run.AdjustContrast && reading.Confidence < run.ContrastThreshold)
         {
             var second = RunInference(crop, adjustContrast: true, run.AdjustContrastTarget);
             if (second is { } r2)
             {
-                var (text2, conf2) = Decode(r2.Logits, r2.T, r2.C, run, allowed, trie);
-                if (conf2 > conf)
+                var retry = Decode(r2.Logits, r2.T, r2.C, r2.Width, run, allowed, trie, patch, contentWidth);
+                if (retry.Confidence > reading.Confidence)
                 {
-                    text = text2;
-                    conf = conf2;
+                    reading = retry;
                 }
             }
         }
-        return (text, conf);
+        return reading;
     }
 
-    private (string Text, double Confidence) Decode(float[,] logits, int t, int c, CrnnRunOptions run, bool[]? allowed, WordTrie? trie)
-        => CtcDecoder.Decode(logits, t, c, _characters, allowed, run.Decoder, run.BeamWidth, trie);
+    /// <summary>
+    /// CTC-decodes one inference result. With <see cref="WordLevelDetail.None"/> this is literally the
+    /// old call — <see cref="CtcDecoder.Decode"/>, no alignment list, no geometry state; the alignment
+    /// path is entered only when the caller opted in.
+    /// </summary>
+    private Reading Decode(
+        float[,] logits, int t, int c, int paddedWidth, CrnnRunOptions run, bool[]? allowed, WordTrie? trie,
+        in PatchTransform patch, int contentWidth)
+    {
+        if (run.WordLevelDetail == WordLevelDetail.None)
+        {
+            var (text, confidence) = CtcDecoder.Decode(logits, t, c, _characters, allowed, run.Decoder, run.BeamWidth, trie);
+            return new Reading(text, confidence, null);
+        }
 
-    private readonly record struct InferenceResult(float[,] Logits, int T, int C);
+        var decoded = CtcDecoder.DecodeWithAlignment(logits, t, c, _characters, allowed, run.Decoder, run.BeamWidth, trie);
+        return new Reading(
+            decoded.Text,
+            decoded.Confidence,
+            new PatchAlignment(decoded.Alignment, decoded.Steps, contentWidth, paddedWidth, patch));
+    }
+
+    /// <summary>
+    /// One recognized patch: the text and confidence exactly as before, plus — only when word-level
+    /// detail was requested — everything needed to place its characters back on the source image.
+    /// </summary>
+    private readonly record struct Reading(string Text, double Confidence, PatchAlignment? Geometry);
+
+    /// <summary>
+    /// A recognizer output, with <c>Width</c> recording the padded input width the timesteps span
+    /// (which exceeds the real content width for narrow crops and for batched runs).
+    /// </summary>
+    private readonly record struct InferenceResult(float[,] Logits, int T, int C, int Width);
 
     private InferenceResult? RunInference(Image<Rgb24> crop, bool adjustContrast, double contrastTarget)
     {
@@ -164,7 +223,7 @@ internal sealed class CrnnRecognizer : IDisposable
         {
             using var runDisp = _session.Run(feeds);
             var output = runDisp.First(o => o.Name == _outputName).AsTensor<float>();
-            return ExtractSingle(output);
+            return ExtractSingle(output, width);
         }
         catch (Microsoft.ML.OnnxRuntime.OnnxRuntimeException)
         {
@@ -175,7 +234,7 @@ internal sealed class CrnnRecognizer : IDisposable
     }
 
     /// <summary>Normalises a single-sample recognizer output (shape (T,1,C) or (1,T,C)) to (T, C).</summary>
-    private static InferenceResult ExtractSingle(Tensor<float> output)
+    private static InferenceResult ExtractSingle(Tensor<float> output, int inputWidth)
     {
         var dims = output.Dimensions;
         int t, c;
@@ -197,7 +256,7 @@ internal sealed class CrnnRecognizer : IDisposable
         for (int i = 0; i < t; i++)
             for (int j = 0; j < c; j++)
                 logits[i, j] = data[k++];
-        return new InferenceResult(logits, t, c);
+        return new InferenceResult(logits, t, c, inputWidth);
     }
 
     /// <summary>Zero-copy view over an ORT output's contiguous buffer (falls back to a copy if not dense).</summary>
@@ -248,21 +307,26 @@ internal sealed class CrnnRecognizer : IDisposable
                 for (int k = 0; k < idxs.Count; k++)
                 {
                     int i = idxs[k];
-                    var (logits, t, c) = perItem[k];
-                    var (text, conf) = Decode(logits, t, c, run, allowed, trie);
+                    var item = perItem[k];
+                    var crop = crops[i]!;
+
+                    // Batching never rotates (see the useBatch guard), so the patch is the crop itself.
+                    var patch = PatchTransform.Upright(crop.Width, crop.Height);
+                    int contentWidth = WordGeometry.ContentWidth(crop.Width, crop.Height, TargetHeight, MaxWidth);
+                    var reading = Decode(item.Logits, item.T, item.C, item.Width, run, allowed, trie, patch, contentWidth);
 
                     // Contrast retry stays per-item (only the few low-confidence boxes pay for it).
-                    if (run.AdjustContrast && conf < run.ContrastThreshold)
+                    if (run.AdjustContrast && reading.Confidence < run.ContrastThreshold)
                     {
-                        var second = RunInference(crops[i]!, adjustContrast: true, run.AdjustContrastTarget);
+                        var second = RunInference(crop, adjustContrast: true, run.AdjustContrastTarget);
                         if (second is { } r2)
                         {
-                            var (text2, conf2) = Decode(r2.Logits, r2.T, r2.C, run, allowed, trie);
-                            if (conf2 > conf) { text = text2; conf = conf2; }
+                            var retry = Decode(r2.Logits, r2.T, r2.C, r2.Width, run, allowed, trie, patch, contentWidth);
+                            if (retry.Confidence > reading.Confidence) reading = retry;
                         }
                     }
 
-                    results[i] = new OcrLine { Text = text, Confidence = conf, BoundingPolygon = polygons[i], BoundingBox = boxes[i] };
+                    results[i] = BuildLine(polygons[i], boxes[i], reading, run);
                 }
             }
         }
@@ -279,8 +343,8 @@ internal sealed class CrnnRecognizer : IDisposable
                     results[i] = new OcrLine { Text = string.Empty, Confidence = 0, BoundingPolygon = polygons[i], BoundingBox = boxes[i] };
                     return;
                 }
-                var (text, conf) = RecognizeCropAllRotations(crop, run, allowed, trie);
-                results[i] = new OcrLine { Text = text, Confidence = conf, BoundingPolygon = polygons[i], BoundingBox = boxes[i] };
+                var reading = RecognizeCropAllRotations(crop, run, allowed, trie);
+                results[i] = BuildLine(polygons[i], boxes[i], reading, run);
             });
         }
         finally
@@ -321,11 +385,15 @@ internal sealed class CrnnRecognizer : IDisposable
 
         using var runDisp = _session.Run(feeds);
         var output = runDisp.First(o => o.Name == _outputName).AsTensor<float>();
-        return ExtractBatch(output, n);
+        return ExtractBatch(output, n, maxW);
     }
 
-    /// <summary>Splits a batched recognizer output (shape (T,N,C) or (N,T,C)) into per-sample (T,C).</summary>
-    private static InferenceResult[] ExtractBatch(Tensor<float> output, int n)
+    /// <summary>
+    /// Splits a batched recognizer output (shape (T,N,C) or (N,T,C)) into per-sample (T,C). Every sample
+    /// in the batch was padded out to <paramref name="inputWidth"/>, so that is the width its timesteps
+    /// span regardless of its own content width.
+    /// </summary>
+    private static InferenceResult[] ExtractBatch(Tensor<float> output, int n, int inputWidth)
     {
         if (output.Dimensions.Length != 3)
         {
@@ -357,7 +425,7 @@ internal sealed class CrnnRecognizer : IDisposable
                 for (int i = 0; i < t; i++)
                     for (int j = 0; j < c; j++)
                         logits[i, j] = data[k++];
-                results[b] = new InferenceResult(logits, t, c);
+                results[b] = new InferenceResult(logits, t, c, inputWidth);
             }
         }
         else
@@ -373,7 +441,7 @@ internal sealed class CrnnRecognizer : IDisposable
                     for (int j = 0; j < c; j++)
                         logits[i, j] = data[rowBase + j];
                 }
-                results[b] = new InferenceResult(logits, t, c);
+                results[b] = new InferenceResult(logits, t, c, inputWidth);
             }
         }
         return results;

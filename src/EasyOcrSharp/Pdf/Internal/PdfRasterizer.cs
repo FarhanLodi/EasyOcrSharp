@@ -15,6 +15,19 @@ namespace EasyOcrSharp.Pdf.Internal;
 internal static class PdfRasterizer
 {
     /// <summary>
+    /// Serializes every call into PDFium. Docnet exposes it through the process-wide
+    /// <see cref="DocLib.Instance"/> singleton, and PDFium itself is <b>not</b> thread-safe: two
+    /// threads rasterizing at once can return a corrupted page or tear down the native library. Two
+    /// concurrent OCR calls on different PDFs is an entirely ordinary thing for a caller to do (a
+    /// batch, or a web request per document), so the guard belongs here rather than in the caller.
+    /// </summary>
+    /// <remarks>
+    /// The gate is held only across the native calls. The OCR handler — by far the expensive part —
+    /// runs outside it, so documents still overlap and throughput is barely affected.
+    /// </remarks>
+    private static readonly Lock PdfiumGate = new();
+
+    /// <summary>
     /// Renders each page at <paramref name="dpi"/> and invokes <paramref name="handler"/> with the
     /// 0-based index, total page count, and the rendered image (disposed automatically after the
     /// handler completes — do not keep a reference to it).
@@ -44,7 +57,10 @@ internal static class PdfRasterizer
         IDocReader docReader;
         try
         {
-            docReader = DocLib.Instance.GetDocReader(pdfBytes, new PageDimensions(scale));
+            lock (PdfiumGate)
+            {
+                docReader = DocLib.Instance.GetDocReader(pdfBytes, new PageDimensions(scale));
+            }
         }
         catch (Exception ex) when (ex is DocnetException or ArgumentException)
         {
@@ -52,12 +68,15 @@ internal static class PdfRasterizer
                 "The PDF could not be opened. It may be corrupt, not a PDF, or password-protected/encrypted.", ex);
         }
 
-        using (docReader)
+        try
         {
             int count;
             try
             {
-                count = docReader.GetPageCount();
+                lock (PdfiumGate)
+                {
+                    count = docReader.GetPageCount();
+                }
             }
             catch (DocnetException ex)
             {
@@ -80,20 +99,29 @@ internal static class PdfRasterizer
                 Image<Rgb24> image;
                 try
                 {
-                    using var pageReader = docReader.GetPageReader(i);
-                    int width = pageReader.GetPageWidth();
-                    int height = pageReader.GetPageHeight();
+                    byte[] bgra;
+                    int width, height;
 
-                    if (maxPagePixels > 0 && (long)width * height > maxPagePixels)
+                    // Only the native work is serialized; the BGRA->RGB conversion below is pure
+                    // managed code and stays outside the gate to keep the critical section short.
+                    lock (PdfiumGate)
                     {
-                        throw new PdfProcessingException(
-                            $"Page {i + 1} renders to {width}x{height} ({(long)width * height:N0} px) at {dpi} DPI, " +
-                            $"exceeding the per-page limit of {maxPagePixels:N0} px (PdfOcrOptions.MaxPageMegapixels). " +
-                            "Lower the DPI or raise the limit.");
+                        using var pageReader = docReader.GetPageReader(i);
+                        width = pageReader.GetPageWidth();
+                        height = pageReader.GetPageHeight();
+
+                        if (maxPagePixels > 0 && (long)width * height > maxPagePixels)
+                        {
+                            throw new PdfProcessingException(
+                                $"Page {i + 1} renders to {width}x{height} ({(long)width * height:N0} px) at {dpi} DPI, " +
+                                $"exceeding the per-page limit of {maxPagePixels:N0} px (PdfOcrOptions.MaxPageMegapixels). " +
+                                "Lower the DPI or raise the limit.");
+                        }
+
+                        // PDFium emits BGRA with a transparent background; flatten onto white so OCR sees a clean page.
+                        bgra = pageReader.GetImage(new NaiveTransparencyRemover());
                     }
 
-                    // PDFium emits BGRA with a transparent background; flatten onto white so OCR sees a clean page.
-                    byte[] bgra = pageReader.GetImage(new NaiveTransparencyRemover());
                     image = ConvertToRgb24(bgra, width, height);
                 }
                 catch (Exception ex) when (ex is DocnetException or ArgumentException or InvalidOperationException)
@@ -105,6 +133,14 @@ internal static class PdfRasterizer
                 {
                     await handler(i, count, image).ConfigureAwait(false);
                 }
+            }
+        }
+        finally
+        {
+            // Tearing the document down is a native call too, so it takes the gate like the rest.
+            lock (PdfiumGate)
+            {
+                docReader.Dispose();
             }
         }
     }

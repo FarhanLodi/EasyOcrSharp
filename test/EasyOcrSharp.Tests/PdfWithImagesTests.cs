@@ -15,6 +15,7 @@ namespace EasyOcrSharp.Tests;
 /// recognized. Proven here with a synthesized image+text page, plus a skippable real fixture.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class PdfWithImagesTests
 {
     private static readonly Rgb24 White = new(255, 255, 255);

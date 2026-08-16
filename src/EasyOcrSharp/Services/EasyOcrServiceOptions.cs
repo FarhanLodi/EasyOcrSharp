@@ -1,4 +1,5 @@
 using EasyOcrSharp.Internal;
+using EasyOcrSharp.Models;
 
 namespace EasyOcrSharp.Services;
 
@@ -71,6 +72,15 @@ public sealed class EasyOcrServiceOptions
     /// </summary>
     public bool LogGpuHint { get; set; }
 
+    /// <summary>
+    /// Enables handwriting recognition with a locally exported TrOCR model, unlocking
+    /// <see cref="EasyOcrService.RecognizeHandwritingAsync(SixLabors.ImageSharp.Image{SixLabors.ImageSharp.PixelFormats.Rgb24}, Models.RecognitionOptions?, CancellationToken)"/>.
+    /// Null (the default) leaves the feature off: no extra model is loaded, no session is created, and
+    /// printed-text OCR behaves exactly as before. The weights are yours — they are read from the paths
+    /// in <see cref="HandwritingOptions"/> and never downloaded — so this is opt-in twice over.
+    /// </summary>
+    public HandwritingOptions? Handwriting { get; set; }
+
     /// <summary>Maps the public options to the engine's internal configuration record.</summary>
     internal EngineOptions ToEngineOptions()
     {
@@ -82,7 +92,7 @@ public sealed class EasyOcrServiceOptions
             provider = OcrExecutionProvider.Cuda;
         }
 
-        return new EngineOptions
+        var engineOptions = new EngineOptions
         {
             ModelCachePath = string.IsNullOrWhiteSpace(ModelCachePath) ? null : Path.GetFullPath(ModelCachePath),
             ExecutionProvider = provider,
@@ -93,5 +103,10 @@ public sealed class EasyOcrServiceOptions
             Quantize = Quantize,
             LogGpuHint = LogGpuHint,
         };
+
+        // Handwriting settings travel beside the engine options rather than inside them; see
+        // HandwritingRegistry for why. No entry is created when the feature is off.
+        HandwritingRegistry.Attach(engineOptions, Handwriting);
+        return engineOptions;
     }
 }

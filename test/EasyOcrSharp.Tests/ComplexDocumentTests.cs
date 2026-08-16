@@ -11,6 +11,7 @@ namespace EasyOcrSharp.Tests;
 /// skips cleanly until the fixture is dropped into <c>test/assets/pdf/</c>.
 /// </summary>
 [Trait("Category", "Integration")]
+[Collection(OcrIntegrationCollection.Name)]
 public class ComplexDocumentTests
 {
     // ---- The converted README: a real, long, multi-section document ----

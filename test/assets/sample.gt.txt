@@ -1,0 +1,2 @@
+Hello World
+EasyOcrSharp 2024

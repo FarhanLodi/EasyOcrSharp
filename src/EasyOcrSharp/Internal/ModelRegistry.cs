@@ -83,7 +83,32 @@ internal static class ModelRegistry
         ["thai_g1.int8.onnx"]       = "0489D01351BDF912C09409CA1FF58CE8CFEC8E1F5A5FE68AFCD57D155C73B3D2",
         ["zh_sim_g2.int8.onnx"]     = "E321B59FE43A22444E6AEED9B3E23EB50049E4F842C7285649FA2EB676DE6AC3",
         ["zh_tra_g1.int8.onnx"]     = "F2A543425A360F80EB9E1973ECFC2CBB05D7C1F38173A67BD5FFE70E85C82E7C",
+
+        // TrOCR handwriting assets (HandwritingOptions). Exported from the MIT-licensed
+        // microsoft/trocr-base-handwritten checkpoint by tools/export_trocr_onnx.py and hosted in the
+        // same model repo. Both precisions are published; the int8 pair is the default because it is a
+        // quarter of the size and reads ordinary text just as well.
+        //
+        ["trocr_base_handwritten_encoder.onnx"]       = "DBF9DD740617483716C80296B9BD7354D9B745BF249AF27E07C70473B9B16E08",
+        ["trocr_base_handwritten_decoder.onnx"]       = "2513064DF67A070037ACBFA19BB8729C0F0C9CA221BC073C57F06B12D1BB199A",
+        ["trocr_base_handwritten_encoder.int8.onnx"]  = "698575B5D3D7EACBA762E1968A4B9DE131752A12BAD586FFB4BA80CE353FA204",
+        ["trocr_base_handwritten_decoder.int8.onnx"]  = "11F1042977DCA85325D45EA8B8FD637C24F8C89AEB062BC7E739793DFBA25F8C",
+        ["trocr_base_handwritten.vocab.json"]         = "06B4D46C8E752D410213D9548EB27A54DB70FDA0319B6271FB8D59DEAD5E1CAB",
     }.ToFrozenDictionary();
+
+    /// <summary>
+    /// Byte-level BPE vocabulary shared by both TrOCR precisions (the weights are quantized, the
+    /// tokenizer is not).
+    /// </summary>
+    public static ModelAsset TrOcrVocab { get; } = Asset("trocr_base_handwritten.vocab.json");
+
+    /// <summary>The TrOCR ViT encoder, int8 when <paramref name="quantize"/> is set.</summary>
+    public static ModelAsset TrOcrEncoder(bool quantize)
+        => Asset(quantize ? "trocr_base_handwritten_encoder.int8.onnx" : "trocr_base_handwritten_encoder.onnx");
+
+    /// <summary>The TrOCR autoregressive decoder, int8 when <paramref name="quantize"/> is set.</summary>
+    public static ModelAsset TrOcrDecoder(bool quantize)
+        => Asset(quantize ? "trocr_base_handwritten_decoder.int8.onnx" : "trocr_base_handwritten_decoder.onnx");
 
     private static ModelAsset Asset(string fileName) =>
         new(fileName, $"{DefaultBaseUrl}/{fileName}", Checksums.GetValueOrDefault(fileName));
