@@ -35,21 +35,6 @@
 		<InternalsVisibleTo Include="EasyOcrSharp.Tests" />
 	</ItemGroup>
 
-	<!--
-	  A dotnet tool is packed platform-agnostically (tools/<tfm>/any/), so it carries the native assets
-	  of every runtime its dependencies ship. ONNX Runtime includes an Android .aar and an iOS
-	  .xcframework, which together are ~95 MB and can never execute in a command-line tool — dropping
-	  them takes the package from ~157 MB to something a user can reasonably install.
-	-->
-	<Target Name="TrimMobileNativesFromTool" AfterTargets="ComputeResolvedFilesToPublishList">
-		<ItemGroup>
-			<ResolvedFileToPublish
-				Remove="@(ResolvedFileToPublish)"
-				Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Replace('\','/').StartsWith('runtimes/android/'))
-				        OR $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Replace('\','/').StartsWith('runtimes/ios/'))" />
-		</ItemGroup>
-	</Target>
-
 	<ItemGroup>
 		<None Include="../../README.md" Pack="true" PackagePath="" />
 		<None Include="../../LICENSE" Pack="true" PackagePath="" />
