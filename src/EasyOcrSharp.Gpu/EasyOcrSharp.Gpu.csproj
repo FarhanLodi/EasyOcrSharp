@@ -22,7 +22,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="EasyOcrSharp" Version="2.3.0" />
+		<PackageReference Include="EasyOcrSharp" Version="2.3.2" />
 		<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.29.0" />
 	</ItemGroup>
 
