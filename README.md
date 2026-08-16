@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="src/EasyOcrSharp/Assets/icon.gif" alt="EasyOcrSharp" width="120" height="120">
+<img src="https://raw.githubusercontent.com/easyocrsharp/EasyOcrSharp/main/src/EasyOcrSharp/Assets/icon.png" alt="EasyOcrSharp" width="120" height="120">
 
 # EasyOcrSharp
 
@@ -8,7 +8,7 @@
 
 [![NuGet](https://img.shields.io/nuget/v/EasyOcrSharp.svg?label=NuGet&color=004880&logo=nuget)](https://www.nuget.org/packages/EasyOcrSharp)
 [![Downloads](https://img.shields.io/nuget/dt/EasyOcrSharp.svg?label=Downloads&color=success)](https://www.nuget.org/packages/EasyOcrSharp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/LICENSE)
 [![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4.svg?logo=dotnet)](https://dotnet.microsoft.com/)
 [![AOT ready](https://img.shields.io/badge/Native%20AOT-ready-6f42c1.svg)](#gpu--execution-providers)
 
@@ -967,7 +967,7 @@ and accepts the same tuning as the library (`--allowlist`, `--min-confidence`, `
 
 ### 🌐 Web service sample
 
-[`samples/EasyOcrSharp.WebApi`](samples/EasyOcrSharp.WebApi) is a runnable ASP.NET Core service —
+[`samples/EasyOcrSharp.WebApi`](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/samples/EasyOcrSharp.WebApi) is a runnable ASP.NET Core service —
 `POST /ocr`, `POST /ocr/pdf`, `GET /health` and a browser upload page — with bounded concurrency,
 upload limits, problem-details errors and a Dockerfile that already includes the native prerequisites
 PDFium and ONNX Runtime need.
@@ -1080,7 +1080,7 @@ dotnet run --project test/EasyOcrSharp.Demo
 The integration tests exercise every feature against the **real** engine (allow/block-lists,
 detection-only, exporters, batch, metrics/tracing, health check, execution-provider fallback, and the
 full PDF pipeline) — no mocks. The **PDF** tests need two small fixtures you generate yourself; they're
-**skipped** (never failed) until present. See [test/assets/pdf/README.md](test/assets/pdf/README.md)
+**skipped** (never failed) until present. See [test/assets/pdf/README.md](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/test/assets/pdf/README.md)
 for the exact one-page and three-page PDFs to drop in.
 
 | Path | Purpose |
@@ -1095,7 +1095,7 @@ for the exact one-page and three-page PDFs to drop in.
 | `tools/` | maintainer-only ONNX export + quantization scripts |
 
 CI (GitHub Actions) builds and runs the unit tests on Linux and Windows for every push and PR.
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+See [CHANGELOG.md](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/CHANGELOG.md) for release history.
 
 <br>
 
@@ -1113,6 +1113,39 @@ additional language/model coverage, documentation, and tests are all appreciated
 If you're working on something larger, or want to collaborate on a feature, feel free to reach out
 before starting so we can align on the approach.
 
+## 💖 Support
+
+If EasyOcrSharp saves you time, consider supporting development:
+
+- 💳 **PayPal** — [paypal.me/FarhanLodi](https://paypal.me/FarhanLodi)
+- 📱 **UPI (India)** — `farhanlodi5@oksbi`
+- 🏦 **Bank transfer (USD)** — details below
+
+<details>
+<summary><b>USD bank transfer details (Wise)</b></summary>
+
+<br>
+
+USD account details for Farhan Lodi on Wise. Sending from a bank in the US? Use these details for a
+domestic transfer. Sending from anywhere else? Make an international SWIFT transfer.
+
+| Field | Value |
+|---|---|
+| Name | Farhan Lodi |
+| Account type | Deposit |
+| Routing number (wire and ACH) | `084009519` |
+| Account number | `420927686563885` |
+| SWIFT/BIC | `TRWIUS35XXX` |
+| Bank address | Wise US Inc, 108 W 13th St, Wilmington, DE, 19801, United States |
+
+Use the routing and account numbers when sending from the US, and the SWIFT/BIC when sending from
+outside the US.
+
+</details>
+
+📧 Need more details, a different payment method, or have a question? Email
+[farhanlodi31@gmail.com](mailto:farhanlodi31@gmail.com).
+
 ## 📬 Contact
 
 For work inquiries, collaboration, feature requests, or any questions, reach out to:
@@ -1121,7 +1154,7 @@ For work inquiries, collaboration, feature requests, or any questions, reach out
 
 ## 📄 License
 
-MIT — see [LICENSE](LICENSE). EasyOCR (the upstream model authors) is also MIT-licensed.
+MIT — see [LICENSE](https://github.com/easyocrsharp/EasyOcrSharp/blob/main/LICENSE). EasyOCR (the upstream model authors) is also MIT-licensed.
 
 ## 🙏 Acknowledgments
 
