@@ -1,20 +1,21 @@
 using EasyOcrSharp.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.Formats;
-using SixLabors.ImageSharp.Formats.Bmp;
-using SixLabors.ImageSharp.Formats.Jpeg;
-using SixLabors.ImageSharp.Formats.Tiff;
-using SixLabors.ImageSharp.Formats.Webp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using EasyImageSharp;
+using EasyImageSharp.Formats;
+using EasyImageSharp.Formats.Bmp;
+using EasyImageSharp.Formats.Jpeg;
+using EasyImageSharp.Formats.Tiff;
+using EasyImageSharp.Formats.Qoi;
+using EasyImageSharp.Formats.Tga;
+using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;
 
 /// <summary>
 /// Edge-case image inputs: degenerate sizes, blank pages, and non-PNG encodings. These prove the
-/// pipeline never crashes on pathological input and that any format ImageSharp can decode is accepted
-/// (the public API takes a decoded image/stream, so format support is whatever ImageSharp provides).
+/// pipeline never crashes on pathological input and that any format EasyImageSharp can decode is accepted
+/// (the public API takes a decoded image/stream, so format support is whatever EasyImageSharp provides).
 /// </summary>
 [Trait("Category", "Integration")]
 [Collection(OcrIntegrationCollection.Name)]
@@ -79,7 +80,10 @@ public class ImageEdgeCaseTests
         yield return new object[] { "bmp", new BmpEncoder() };
         yield return new object[] { "tiff", new TiffEncoder() };
         yield return new object[] { "jpeg", new JpegEncoder { Quality = 95 } };
-        yield return new object[] { "webp-lossless", new WebpEncoder { FileFormat = WebpFileFormatType.Lossless } };
+        // WebP is decode-only in EasyImageSharp, so there is no encoder to round-trip through here;
+        // the two lossless codecs below keep the non-PNG decode path covered in its place.
+        yield return new object[] { "qoi", new QoiEncoder() };
+        yield return new object[] { "tga", new TgaEncoder() };
     }
 
     [Theory]

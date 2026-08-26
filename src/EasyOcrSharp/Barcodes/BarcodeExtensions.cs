@@ -3,10 +3,11 @@ using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using ZXing;
 
 namespace EasyOcrSharp.Barcodes;
@@ -47,7 +48,7 @@ public static class BarcodeScanner
 
         // Read the pixels here, on the caller's thread, so the decode that follows owns a private buffer
         // and the source image is free the moment this method returns.
-        var source = ImageSharpLuminanceSource.Create(image, x, y, width, height);
+        var source = EasyImageLuminanceSource.Create(image, x, y, width, height);
         return Task.Run(() => BarcodeDecoder.Decode(source, x, y, opts, cancellationToken), cancellationToken);
     }
 
@@ -70,7 +71,8 @@ public static class BarcodeScanner
             GuardPixels(info.Width, info.Height, opts.MaxImagePixels);
         }
 
-        using var image = await Image.LoadAsync<Rgb24>(imagePath, cancellationToken).ConfigureAwait(false);
+        using var image = await DecodeLimits
+            .LoadAsync(imagePath, opts.MaxImagePixels, MaxPixelsOption, cancellationToken).ConfigureAwait(false);
         return await ReadBarcodesAsync(image, opts, cancellationToken).ConfigureAwait(false);
     }
 
@@ -135,13 +137,13 @@ public static class BarcodeScanner
             GuardPixels(info.Width, info.Height, maxImagePixels);
         }
 
-        return Image.Load<Rgb24>(bytes.Span);
+        return DecodeLimits.Load(bytes.Span, maxImagePixels, MaxPixelsOption);
     }
 
     internal static async Task<Image<Rgb24>> LoadGuardedAsync(Stream stream, long maxImagePixels, CancellationToken ct)
     {
         if (maxImagePixels <= 0)
-            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+            return await DecodeLimits.LoadAsync(stream, maxImagePixels, MaxPixelsOption, ct).ConfigureAwait(false);
 
         if (stream.CanSeek)
         {
@@ -149,7 +151,7 @@ public static class BarcodeScanner
             var info = await Image.IdentifyAsync(stream, ct).ConfigureAwait(false);
             GuardPixels(info.Width, info.Height, maxImagePixels);
             stream.Seek(position, SeekOrigin.Begin);
-            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+            return await DecodeLimits.LoadAsync(stream, maxImagePixels, MaxPixelsOption, ct).ConfigureAwait(false);
         }
 
         // Non-seekable: buffer the (small) compressed bytes so the header can be inspected before the
@@ -158,6 +160,9 @@ public static class BarcodeScanner
         await stream.CopyToAsync(buffer, ct).ConfigureAwait(false);
         return LoadGuarded(buffer.GetBuffer().AsMemory(0, (int)buffer.Length), maxImagePixels);
     }
+
+    /// <summary>The option a caller raises when a scan is rejected for being too large.</summary>
+    internal const string MaxPixelsOption = "BarcodeOptions.MaxImagePixels";
 
     internal static void GuardPixels(int width, int height, long maxImagePixels)
     {
@@ -327,7 +332,8 @@ public static class BarcodeExtensions
             BarcodeScanner.GuardPixels(info.Width, info.Height, opts.MaxImagePixels);
         }
 
-        using var image = await Image.LoadAsync<Rgb24>(imagePath, cancellationToken).ConfigureAwait(false);
+        using var image = await DecodeLimits
+            .LoadAsync(imagePath, opts.MaxImagePixels, BarcodeScanner.MaxPixelsOption, cancellationToken).ConfigureAwait(false);
         return await service.ExtractTextAndBarcodesAsync(image, languages, recognitionOptions, opts, cancellationToken)
             .ConfigureAwait(false);
     }
@@ -418,7 +424,7 @@ internal static class BarcodeDecoder
     /// the original image. Runs synchronously; callers put it on the thread pool.
     /// </summary>
     internal static IReadOnlyList<BarcodeResult> Decode(
-        ImageSharpLuminanceSource source, int offsetX, int offsetY, BarcodeOptions options, CancellationToken ct)
+        EasyImageLuminanceSource source, int offsetX, int offsetY, BarcodeOptions options, CancellationToken ct)
     {
         var reader = CreateReader(options);
 
@@ -504,7 +510,7 @@ internal static class BarcodeDecoder
         foreach (var point in points)
         {
             if (point is null) continue;
-            var mapped = ImageSharpLuminanceSource.Unrotate(point.X, point.Y, rotation, sourceWidth, sourceHeight);
+            var mapped = EasyImageLuminanceSource.Unrotate(point.X, point.Y, rotation, sourceWidth, sourceHeight);
             polygon.Add(new OcrPoint(mapped.X + offsetX, mapped.Y + offsetY));
         }
 

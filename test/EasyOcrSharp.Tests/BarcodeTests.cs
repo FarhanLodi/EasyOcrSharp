@@ -1,8 +1,8 @@
 using EasyOcrSharp.Barcodes;
 using EasyOcrSharp.Models;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 using Xunit;
 using ZXing.Common;
 
@@ -330,7 +330,7 @@ public class BarcodeTests
 
         try
         {
-            await image.SaveAsPngAsync(path);
+            await image.SaveAsync(path);
 
             Assert.Equal("from-disk", Assert.Single(await BarcodeScanner.ReadBarcodesAsync(path)).Text);
         }
@@ -392,7 +392,7 @@ public class BarcodeTests
     {
         using var image = new Image<Rgb24>(37, 19);
 
-        var source = ImageSharpLuminanceSource.Create(image, 0, 0, image.Width, image.Height);
+        var source = EasyImageLuminanceSource.Create(image, 0, 0, image.Width, image.Height);
 
         Assert.Equal(37, source.Width);
         Assert.Equal(19, source.Height);
@@ -406,7 +406,7 @@ public class BarcodeTests
         image[0, 0] = new Rgb24(0, 0, 0);
         image[1, 0] = new Rgb24(255, 255, 255);
 
-        var row = ImageSharpLuminanceSource.Create(image, 0, 0, image.Width, image.Height).getRow(0, null);
+        var row = EasyImageLuminanceSource.Create(image, 0, 0, image.Width, image.Height).getRow(0, null);
 
         Assert.Equal(0, row[0]);
         Assert.Equal(255, row[1]);
@@ -416,7 +416,7 @@ public class BarcodeTests
     public void The_luminance_source_supports_the_transforms_the_scanner_relies_on()
     {
         using var image = new Image<Rgb24>(8, 4);
-        var source = ImageSharpLuminanceSource.Create(image, 0, 0, image.Width, image.Height);
+        var source = EasyImageLuminanceSource.Create(image, 0, 0, image.Width, image.Height);
 
         Assert.True(source.CropSupported);
         Assert.True(source.InversionSupported);

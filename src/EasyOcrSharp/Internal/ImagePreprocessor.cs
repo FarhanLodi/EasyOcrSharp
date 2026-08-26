@@ -1,7 +1,7 @@
 using EasyOcrSharp.Models;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 
 namespace EasyOcrSharp.Internal;
 
@@ -14,6 +14,17 @@ namespace EasyOcrSharp.Internal;
 /// </summary>
 internal static class ImagePreprocessor
 {
+    /// <summary>Largest absolute page skew corrected, in degrees. Beyond this the page is a rotation, not a skew.</summary>
+    private const float MaxSkewDegrees = 15f;
+
+    /// <summary>
+    /// Skews below this are left alone, so an already-straight page is never resampled. This is the
+    /// threshold the hand-rolled estimator used; the deskew has a stricter gate of its own (it also
+    /// declines when the best angle is not meaningfully sharper than no rotation), so this is a floor,
+    /// not the exact cut-off.
+    /// </summary>
+    private const float MinSkewDegrees = 0.1f;
+
     /// <summary>
     /// Applies denoise → deskew → sharpen → binarize (in that order) per <paramref name="options"/>.
     /// Sharpening runs after denoise/deskew so speckle noise isn't amplified, and before binarize so
@@ -32,19 +43,24 @@ internal static class ImagePreprocessor
 
             if (options.Deskew)
             {
-                double angle = EstimateSkewAngle(img);
-                if (Math.Abs(angle) > 0.1)
+                // Projection-profile deskew: the rotation that sharpens the horizontal projection of the
+                // ink straightens the text lines. Same estimator this used to hand-roll, but it scores
+                // candidate angles on the ink coordinates instead of rotating the whole page once per
+                // candidate, and it fills the corners exposed by the rotation with white in the same pass
+                // (so binarization and detection never see black triangles).
+                img.Mutate(c => c.Deskew(new DeskewOptions
                 {
-                    var rotated = RotateWithWhiteBackground(img, (float)angle);
-                    img.Dispose();
-                    img = rotated;
-                }
+                    Method = DeskewMethod.Projection,
+                    MaxAngle = MaxSkewDegrees,
+                    MinAngle = MinSkewDegrees,
+                    FillColor = Color.White,
+                }));
             }
 
             if (options.Sharpen)
             {
                 // Unsharp mask; clamp the caller-supplied strength into a range that can't destroy
-                // the glyphs (0 disables sharpening entirely inside ImageSharp, huge sigmas ring).
+                // the glyphs (0 disables sharpening entirely inside EasyImageSharp, huge sigmas ring).
                 float sigma = Math.Clamp(options.SharpenAmount, 0.1f, 10f);
                 img.Mutate(c => c.GaussianSharpen(sigma));
             }
@@ -66,79 +82,4 @@ internal static class ImagePreprocessor
     /// <summary>Rotates by an exact multiple of 90° (lossless, no fill needed). Returns a new image.</summary>
     public static Image<Rgb24> RotateRightAngle(Image<Rgb24> source, int degrees)
         => source.Clone(c => c.Rotate(degrees));
-
-    /// <summary>
-    /// Estimates the correction angle (degrees) that best straightens the text using a
-    /// projection-profile search: the rotation that maximizes the variance of per-row ink counts
-    /// aligns text lines horizontally. Coarse pass then a fine refinement around the best coarse angle.
-    /// </summary>
-    private static double EstimateSkewAngle(Image<Rgb24> source)
-    {
-        // Downscale + binarize a working copy for speed.
-        using var work = source.Clone(c =>
-        {
-            if (source.Width > 800) c.Resize(800, 0);
-            c.Grayscale().BinaryThreshold(0.5f);
-        });
-
-        double best = SearchSkew(work, -15, 15, 1.0, out _);
-        best = SearchSkew(work, best - 1.0, best + 1.0, 0.2, out _);
-        return best;
-    }
-
-    private static double SearchSkew(Image<Rgb24> binary, double from, double to, double step, out double bestScore)
-    {
-        double best = 0;
-        bestScore = -1;
-        for (double a = from; a <= to + 1e-9; a += step)
-        {
-            using var rot = RotateWithWhiteBackground(binary, (float)a);
-            double score = RowInkVariance(rot);
-            if (score > bestScore)
-            {
-                bestScore = score;
-                best = a;
-            }
-        }
-        return best;
-    }
-
-    /// <summary>Variance across rows of the dark-pixel count per row (higher ⇒ text lines aligned).</summary>
-    private static double RowInkVariance(Image<Rgb24> binary)
-    {
-        int h = binary.Height, w = binary.Width;
-        var rowCounts = new double[h];
-        binary.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < h; y++)
-            {
-                var row = accessor.GetRowSpan(y);
-                int dark = 0;
-                for (int x = 0; x < w; x++)
-                    if (row[x].R < 128) dark++;
-                rowCounts[y] = dark;
-            }
-        });
-
-        double mean = 0;
-        for (int i = 0; i < h; i++) mean += rowCounts[i];
-        mean /= h;
-        double var = 0;
-        for (int i = 0; i < h; i++) { double d = rowCounts[i] - mean; var += d * d; }
-        return var / h;
-    }
-
-    /// <summary>
-    /// Rotates by an arbitrary angle, filling the exposed corners with white (so binarization and
-    /// detection don't see black triangles). Composites the transparent-corner rotation over a white
-    /// canvas.
-    /// </summary>
-    private static Image<Rgb24> RotateWithWhiteBackground(Image<Rgb24> source, float degrees)
-    {
-        using var rgba = source.CloneAs<Rgba32>();
-        rgba.Mutate(c => c.Rotate(degrees)); // exposed area is transparent
-        var result = new Image<Rgb24>(rgba.Width, rgba.Height, new Rgb24(255, 255, 255));
-        result.Mutate(c => c.DrawImage(rgba, 1f));
-        return result;
-    }
 }

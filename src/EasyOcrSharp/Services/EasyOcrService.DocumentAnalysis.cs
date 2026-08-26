@@ -1,21 +1,21 @@
 using EasyOcrSharp.Models;
 using Microsoft.Extensions.Logging;
-using PaddleOcrNet.Structure;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyOcrSharp.Structure;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Services;
 
 /// <summary>
 /// Document-structure analysis (PP-StructureV3: layout regions, tables recovered as HTML, formulas,
-/// seals, reading order), delegated to the <c>PaddleOcrNet</c> engine. The analyzer — and every model
+/// seals, reading order), run by the in-repo structure engine. The analyzer — and every model
 /// behind it — is created lazily on the first <c>AnalyzeDocumentAsync</c> call, so services that never
 /// analyze documents pay nothing. It shares this service's execution provider, thread limits, cache
 /// path (when one is set) and download resilience, and is disposed with the service.
 /// </summary>
 public sealed partial class EasyOcrService
 {
-    private volatile PaddleOcrNet.Services.PaddleOcrService? _documentAnalyzer;
+    private volatile EasyOcrSharp.Structure.Engine.Services.StructureService? _documentAnalyzer;
     private readonly object _documentAnalyzerLock = new();
 
     /// <inheritdoc cref="IEasyOcrService.AnalyzeDocumentAsync(string, DocumentAnalysisOptions?, CancellationToken)" />
@@ -71,23 +71,27 @@ public sealed partial class EasyOcrService
         using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
         var analyzer = GetOrCreateDocumentAnalyzer();
+
+        // The structure engine is part of this library now and shares its pixel types, so the decoded
+        // image goes straight in — no PNG round-trip. The engine treats the image as caller-owned: it
+        // clones before pre-processing rather than mutating, and never disposes it.
         return await analyzer.AnalyzeDocumentAsync(image, ToStructureOptions(options, _logger), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Creates the underlying PaddleOcrNet service on first use (double-checked lock). Creation is
+    /// Creates the underlying structure service on first use (double-checked lock). Creation is
     /// cheap — its models load lazily inside <c>AnalyzeDocumentAsync</c> — but the instance carries
     /// ONNX sessions once used, so exactly one is kept and disposed with this service. Callers hold an
     /// operation scope, and <see cref="DisposeAsync"/> drains scopes before disposing, so the analyzer
     /// can never be created after (or disposed under) an in-flight call.
     /// </summary>
-    private PaddleOcrNet.Services.PaddleOcrService GetOrCreateDocumentAnalyzer()
+    private EasyOcrSharp.Structure.Engine.Services.StructureService GetOrCreateDocumentAnalyzer()
     {
         if (_documentAnalyzer is { } existing) return existing;
 
         lock (_documentAnalyzerLock)
         {
-            return _documentAnalyzer ??= new PaddleOcrNet.Services.PaddleOcrService(BuildAnalyzerOptions());
+            return _documentAnalyzer ??= new EasyOcrSharp.Structure.Engine.Services.StructureService(BuildAnalyzerOptions());
         }
     }
 
@@ -95,9 +99,9 @@ public sealed partial class EasyOcrService
     /// Maps this service's configuration onto the analyzer's. The cache path is shared only when the
     /// caller set one explicitly (otherwise each library keeps its own default cache); the model-source
     /// mirror override is intentionally NOT propagated because it points at a mirror of the EasyOCR
-    /// models — mirror the structure models via PaddleOcrNet's own override instead.
+    /// models — mirror the structure models via the structure engine's own override instead.
     /// </summary>
-    private PaddleOcrNet.Services.PaddleOcrServiceOptions BuildAnalyzerOptions() => new()
+    private EasyOcrSharp.Structure.Engine.Services.StructureServiceOptions BuildAnalyzerOptions() => new()
     {
         ModelCachePath = _engineOptions.ModelCachePath,
         MaxImagePixels = _maxImagePixels,
@@ -107,16 +111,16 @@ public sealed partial class EasyOcrService
         Download = MapDownload(_engineOptions.Download),
     };
 
-    private static PaddleOcrNet.Services.OcrExecutionProvider MapProvider(OcrExecutionProvider provider) => provider switch
+    private static EasyOcrSharp.Structure.Engine.Services.OcrExecutionProvider MapProvider(OcrExecutionProvider provider) => provider switch
     {
-        OcrExecutionProvider.Cpu => PaddleOcrNet.Services.OcrExecutionProvider.Cpu,
-        OcrExecutionProvider.Cuda => PaddleOcrNet.Services.OcrExecutionProvider.Cuda,
-        OcrExecutionProvider.DirectMl => PaddleOcrNet.Services.OcrExecutionProvider.DirectMl,
-        OcrExecutionProvider.CoreMl => PaddleOcrNet.Services.OcrExecutionProvider.CoreMl,
-        _ => PaddleOcrNet.Services.OcrExecutionProvider.Auto,
+        OcrExecutionProvider.Cpu => EasyOcrSharp.Structure.Engine.Services.OcrExecutionProvider.Cpu,
+        OcrExecutionProvider.Cuda => EasyOcrSharp.Structure.Engine.Services.OcrExecutionProvider.Cuda,
+        OcrExecutionProvider.DirectMl => EasyOcrSharp.Structure.Engine.Services.OcrExecutionProvider.DirectMl,
+        OcrExecutionProvider.CoreMl => EasyOcrSharp.Structure.Engine.Services.OcrExecutionProvider.CoreMl,
+        _ => EasyOcrSharp.Structure.Engine.Services.OcrExecutionProvider.Auto,
     };
 
-    private static PaddleOcrNet.Services.ModelDownloadOptions MapDownload(ModelDownloadOptions download) => new()
+    private static EasyOcrSharp.Structure.Engine.Services.ModelDownloadOptions MapDownload(ModelDownloadOptions download) => new()
     {
         MaxRetries = download.MaxRetries,
         RetryBaseDelay = download.RetryBaseDelay,
@@ -129,14 +133,14 @@ public sealed partial class EasyOcrService
 
     /// <summary>Forwards the analyzer's download progress into the caller's EasyOcrSharp-typed sink.</summary>
     private sealed class ProgressAdapter(IProgress<ModelDownloadProgress> inner)
-        : IProgress<PaddleOcrNet.Services.ModelDownloadProgress>
+        : IProgress<EasyOcrSharp.Structure.Engine.Services.ModelDownloadProgress>
     {
-        public void Report(PaddleOcrNet.Services.ModelDownloadProgress value)
+        public void Report(EasyOcrSharp.Structure.Engine.Services.ModelDownloadProgress value)
             => inner.Report(new ModelDownloadProgress(value.FileName, value.BytesDownloaded, value.TotalBytes));
     }
 
     /// <summary>
-    /// Maps the public per-call options onto PaddleOcrNet's <see cref="StructureOptions"/>. Language
+    /// Maps the public per-call options onto the engine's <see cref="StructureOptions"/>. Language
     /// codes that don't map to a known recognizer pack are skipped with a warning (mirroring how
     /// unsupported OCR languages are handled elsewhere in the service).
     /// </summary>
@@ -157,10 +161,10 @@ public sealed partial class EasyOcrService
 
         if (options.Languages is { Count: > 0 })
         {
-            var languages = new List<PaddleOcrNet.Models.OcrLanguage>(options.Languages.Count);
+            var languages = new List<EasyOcrSharp.Structure.Engine.Models.OcrLanguage>(options.Languages.Count);
             foreach (var code in options.Languages)
             {
-                if (PaddleOcrNet.Models.OcrLanguageExtensions.TryFromCode(code, out var language))
+                if (EasyOcrSharp.Structure.Engine.Models.OcrLanguageExtensions.TryFromCode(code, out var language))
                 {
                     languages.Add(language);
                 }

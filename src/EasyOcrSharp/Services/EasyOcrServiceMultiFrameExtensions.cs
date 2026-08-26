@@ -1,8 +1,9 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Services;
 
@@ -297,8 +298,9 @@ public static class EasyOcrServiceMultiFrameExtensions
             throw new FileNotFoundException($"The image file '{fullPath}' could not be found.", fullPath);
 
         var info = await Image.IdentifyAsync(fullPath, ct).ConfigureAwait(false);
-        GuardHeader(info.FrameMetadataCollection.Count, info.Width, info.Height, opts);
-        return new LoadedImage(await Image.LoadAsync<Rgb24>(fullPath, ct).ConfigureAwait(false), true);
+        GuardHeader(info.FrameCount, info.Width, info.Height, opts);
+        return new LoadedImage(
+            await DecodeLimits.LoadAsync(fullPath, opts.MaxFramePixels, MaxPixelsOption, ct).ConfigureAwait(false), true);
     }
 
     private static async ValueTask<LoadedImage> LoadFromStreamAsync(Stream stream, MultiFrameOcrOptions opts, CancellationToken ct)
@@ -307,9 +309,10 @@ public static class EasyOcrServiceMultiFrameExtensions
         {
             long position = stream.Position;
             var info = await Image.IdentifyAsync(stream, ct).ConfigureAwait(false);
-            GuardHeader(info.FrameMetadataCollection.Count, info.Width, info.Height, opts);
+            GuardHeader(info.FrameCount, info.Width, info.Height, opts);
             stream.Seek(position, SeekOrigin.Begin);
-            return new LoadedImage(await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false), true);
+            return new LoadedImage(
+                await DecodeLimits.LoadAsync(stream, opts.MaxFramePixels, MaxPixelsOption, ct).ConfigureAwait(false), true);
         }
 
         // Non-seekable: buffer the (compressed) bytes once so the header can be inspected before the frames
@@ -322,11 +325,14 @@ public static class EasyOcrServiceMultiFrameExtensions
     private static LoadedImage LoadFromBytes(ReadOnlySpan<byte> bytes, MultiFrameOcrOptions opts)
     {
         var info = Image.Identify(bytes);
-        GuardHeader(info.FrameMetadataCollection.Count, info.Width, info.Height, opts);
-        return new LoadedImage(Image.Load<Rgb24>(bytes), true);
+        GuardHeader(info.FrameCount, info.Width, info.Height, opts);
+        return new LoadedImage(DecodeLimits.Load(bytes, opts.MaxFramePixels, MaxPixelsOption), true);
     }
 
     // ---- guards ----
+
+    /// <summary>The option a caller raises when a frame is rejected for being too large.</summary>
+    private const string MaxPixelsOption = "MultiFrameOcrOptions.MaxFrameMegapixels";
 
     /// <summary>
     /// Rejects an oversized container from its header, before any pixel buffer is allocated. The same

@@ -75,11 +75,12 @@ internal sealed class OcrExceptionHandler : IExceptionHandler
         BadHttpRequestException bad when bad.StatusCode == StatusCodes.Status413PayloadTooLarge
             => (StatusCodes.Status413PayloadTooLarge, "Request body too large"),
 
-        // Well-formed request, unusable document. These come before the ArgumentException arm because
-        // ImageSharp has derived UnknownImageFormatException from ArgumentException in the past.
-        SixLabors.ImageSharp.UnknownImageFormatException
+        // Well-formed request, unusable document. EasyImageSharp raises these from ImageFormatException,
+        // which does not derive from ArgumentException — but they stay above the ArgumentException arm so
+        // the mapping survives an imaging library that classifies them differently.
+        EasyImageSharp.UnknownImageFormatException
             => (StatusCodes.Status415UnsupportedMediaType, "Unsupported image format"),
-        SixLabors.ImageSharp.InvalidImageContentException
+        EasyImageSharp.InvalidImageContentException
             => (StatusCodes.Status422UnprocessableEntity, "Image could not be decoded"),
         PdfProcessingException => (StatusCodes.Status422UnprocessableEntity, "PDF could not be processed"),
 

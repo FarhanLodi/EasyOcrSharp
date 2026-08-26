@@ -1,8 +1,8 @@
 using EasyOcrSharp.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Internal;
 

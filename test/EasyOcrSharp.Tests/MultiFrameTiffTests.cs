@@ -1,14 +1,14 @@
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;
 
 /// <summary>
 /// Multi-frame (multi-page TIFF / animated GIF) OCR. Every test builds a genuine multi-frame image in
-/// memory with ImageSharp and drives the extensions against a stub <see cref="IEasyOcrService"/>, so the
+/// memory with EasyImageSharp and drives the extensions against a stub <see cref="IEasyOcrService"/>, so the
 /// suite needs no models, no network and no fixtures — it verifies frame walking, the guards, progress,
 /// cancellation and ownership, not recognition quality.
 /// </summary>
@@ -291,7 +291,7 @@ public class MultiFrameTiffTests
         var result = await stub.ExtractTextFromFramesAsync(image, English);
 
         Assert.Equal(3, result.Frames.Count);
-        // Still usable: a disposed ImageSharp image throws on any pixel/frame access.
+        // Still usable: a disposed EasyImageSharp image throws on any pixel/frame access.
         Assert.Equal(3, image.Frames.Count);
         Assert.Equal(FrameWidth, image.Width);
         Assert.Equal(new Rgb24(0, 0, 0), image[0, 0]);

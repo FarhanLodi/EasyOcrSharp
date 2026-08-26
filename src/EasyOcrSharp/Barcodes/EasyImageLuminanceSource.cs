@@ -1,13 +1,13 @@
 using System;
 using EasyOcrSharp.Models;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using ZXing;
 
 namespace EasyOcrSharp.Barcodes;
 
 /// <summary>
-/// Bridges an ImageSharp <see cref="Image{TPixel}"/> to the barcode decoder's greyscale input, without a
+/// Bridges an EasyImageSharp <see cref="Image{TPixel}"/> to the barcode decoder's greyscale input, without a
 /// binding package and without ever touching <c>System.Drawing</c>. Pixels are read once, row-span at a
 /// time, into a private luminance buffer; nothing afterwards holds a reference to the source image, so the
 /// caller may dispose or mutate it while a scan is in flight.
@@ -18,7 +18,7 @@ namespace EasyOcrSharp.Barcodes;
 /// (<c>getRow</c>, <c>crop</c>, <c>invert</c>) are overrides of that base class's Java-derived naming and
 /// cannot be renamed.
 /// </remarks>
-internal sealed class ImageSharpLuminanceSource : LuminanceSource
+internal sealed class EasyImageLuminanceSource : LuminanceSource
 {
     // Integer luminance weights matching the decoder's own RGB->grey conversion, so a symbol that the
     // library would have read through its stock sources reads identically through this one.
@@ -29,7 +29,7 @@ internal sealed class ImageSharpLuminanceSource : LuminanceSource
 
     private readonly byte[] _luminances;
 
-    private ImageSharpLuminanceSource(byte[] luminances, int width, int height)
+    private EasyImageLuminanceSource(byte[] luminances, int width, int height)
         : base(width, height)
         => _luminances = luminances;
 
@@ -37,7 +37,7 @@ internal sealed class ImageSharpLuminanceSource : LuminanceSource
     /// Reads a rectangular window of an image into a luminance source. The rectangle is assumed to have
     /// already been clamped to the image bounds (see <see cref="OcrRegion.Resolve"/>).
     /// </summary>
-    internal static ImageSharpLuminanceSource Create(Image<Rgb24> image, int left, int top, int width, int height)
+    internal static EasyImageLuminanceSource Create(Image<Rgb24> image, int left, int top, int width, int height)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(width);
@@ -64,7 +64,7 @@ internal sealed class ImageSharpLuminanceSource : LuminanceSource
             }
         });
 
-        return new ImageSharpLuminanceSource(luminances, width, height);
+        return new EasyImageLuminanceSource(luminances, width, height);
     }
 
     /// <inheritdoc/>
@@ -100,7 +100,7 @@ internal sealed class ImageSharpLuminanceSource : LuminanceSource
         for (int y = 0; y < height; y++)
             Array.Copy(_luminances, ((top + y) * Width) + left, cropped, y * width, width);
 
-        return new ImageSharpLuminanceSource(cropped, width, height);
+        return new EasyImageLuminanceSource(cropped, width, height);
     }
 
     /// <inheritdoc/>
@@ -113,7 +113,7 @@ internal sealed class ImageSharpLuminanceSource : LuminanceSource
         for (int i = 0; i < _luminances.Length; i++)
             inverted[i] = (byte)(255 - _luminances[i]);
 
-        return new ImageSharpLuminanceSource(inverted, Width, Height);
+        return new EasyImageLuminanceSource(inverted, Width, Height);
     }
 
     /// <inheritdoc/>
@@ -136,7 +136,7 @@ internal sealed class ImageSharpLuminanceSource : LuminanceSource
             }
         }
 
-        return new ImageSharpLuminanceSource(rotated, newWidth, newHeight);
+        return new EasyImageLuminanceSource(rotated, newWidth, newHeight);
     }
 
     /// <summary>

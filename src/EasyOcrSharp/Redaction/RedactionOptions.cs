@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 using EasyOcrSharp.Models;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Redaction;
 
@@ -186,7 +186,7 @@ public sealed record RedactionOptions
     /// Gets the pixel-count ceiling (width × height) for images loaded from a path, stream, or byte
     /// buffer by the redaction overloads, checked from the image header before the pixels are decoded.
     /// Default 100,000,000 (100 MP), matching <c>EasyOcrServiceOptions.MaxImagePixels</c>; set to 0 to
-    /// disable. Already-decoded <see cref="SixLabors.ImageSharp.Image{TPixel}"/> inputs are the caller's
+    /// disable. Already-decoded <see cref="EasyImageSharp.Image{TPixel}"/> inputs are the caller's
     /// own allocation and are never checked.
     /// </summary>
     public long MaxSourcePixels { get; init; } = 100_000_000;

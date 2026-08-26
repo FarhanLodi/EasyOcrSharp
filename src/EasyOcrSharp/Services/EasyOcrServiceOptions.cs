@@ -18,7 +18,7 @@ public sealed class EasyOcrServiceOptions
     /// image header <b>before</b> the pixels are decoded into memory when loading from a file, stream, or
     /// byte buffer. Guards against decompression-bomb / pixel-flood denial of service when OCR-ing
     /// untrusted input. Default 100,000,000 (100 MP). Set to 0 to disable. Already-decoded
-    /// <see cref="SixLabors.ImageSharp.Image{TPixel}"/> inputs (the caller's own allocation) are not checked.
+    /// <see cref="EasyImageSharp.Image{TPixel}"/> inputs (the caller's own allocation) are not checked.
     /// </summary>
     public long MaxImagePixels { get; set; } = 100_000_000;
 
@@ -74,7 +74,7 @@ public sealed class EasyOcrServiceOptions
 
     /// <summary>
     /// Enables handwriting recognition with a locally exported TrOCR model, unlocking
-    /// <see cref="EasyOcrService.RecognizeHandwritingAsync(SixLabors.ImageSharp.Image{SixLabors.ImageSharp.PixelFormats.Rgb24}, Models.RecognitionOptions?, CancellationToken)"/>.
+    /// <see cref="EasyOcrService.RecognizeHandwritingAsync(EasyImageSharp.Image{EasyImageSharp.PixelFormats.Rgb24}, Models.RecognitionOptions?, CancellationToken)"/>.
     /// Null (the default) leaves the feature off: no extra model is loaded, no session is created, and
     /// printed-text OCR behaves exactly as before. The weights are yours — they are read from the paths
     /// in <see cref="HandwritingOptions"/> and never downloaded — so this is opt-in twice over.

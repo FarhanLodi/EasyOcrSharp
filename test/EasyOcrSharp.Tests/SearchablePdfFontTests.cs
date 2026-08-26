@@ -2,8 +2,8 @@ using System.Text;
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Pdf;
 using EasyOcrSharp.Pdf.Internal;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;

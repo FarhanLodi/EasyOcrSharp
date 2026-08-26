@@ -2,8 +2,8 @@ using System.Text.RegularExpressions;
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Redaction;
 using EasyOcrSharp.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;

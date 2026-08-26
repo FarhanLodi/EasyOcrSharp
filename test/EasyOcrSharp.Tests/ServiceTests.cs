@@ -43,7 +43,7 @@ public class ServiceTests
     public async Task ExtractTextFromImage_throws_on_empty_languages_without_autodetect()
     {
         await using var ocr = new EasyOcrService();
-        using var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(10, 10);
+        using var image = new EasyImageSharp.Image<EasyImageSharp.PixelFormats.Rgb24>(10, 10);
         // Empty languages and no auto-detect must be rejected (before any model download).
         await Assert.ThrowsAsync<ArgumentException>(
             () => ocr.ExtractTextFromImage(image, Array.Empty<string>()));

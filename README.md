@@ -37,7 +37,7 @@ Console.WriteLine(result.FullText);
 | 🔒 **Verified & private** | Every model download is SHA256-checked; OCR runs fully offline |
 | ⚡ **Fast** | Concurrent multi-region recognition; automatic CUDA GPU with CPU fallback; tunable threads |
 | 🧩 **Flexible input** | File / `Stream` / `byte[]` / `Image` / **PDF**, region-of-interest, recognize-from-boxes, word/line/paragraph grouping, auto language detection |
-| 🧱 **Document structure** | **`AnalyzeDocumentAsync`**: layout regions, **tables as HTML**, formulas, seals & reading order (PP-StructureV3 via PaddleOcrNet), with Markdown / JSON export |
+| 🧱 **Document structure** | **`AnalyzeDocumentAsync`**: layout regions, **tables as HTML**, formulas, seals & reading order (PP-StructureV3, built in), with Markdown / JSON export |
 | 📄 **Document-ready** | **Searchable-PDF** output, plus hOCR / ALTO / TSV / JSON exporters |
 | ✍️ **Handwriting** | **TrOCR** encoder/decoder recognition for handwritten text — something Python EasyOCR cannot do at all |
 | 🔳 **Barcodes & QR** | Read barcodes and QR codes alongside text in a single pass |
@@ -49,6 +49,7 @@ Console.WriteLine(result.FullText);
 | 🩺 **Scan-ready** | Deskew, orientation correction, adaptive binarize, denoise & **sharpen**, plus model-based **document orientation** & **page unwarp** |
 | 📊 **Production-grade** | OpenTelemetry metrics & tracing, health checks, resilient resumable downloads, batch API |
 | 🛠️ **Modern .NET** | AOT- & single-file-friendly, DI-ready, .NET 10 |
+| 🖼️ **MIT all the way down** | Imaging runs on [EasyImageSharp](https://github.com/FarhanLodi/EasyImageSharp) and the structure engine is built in — no build-time licence key, no commercial tier, no split-licensed package anywhere in the graph |
 
 ## 🆚 Why EasyOcrSharp?
 
@@ -83,6 +84,32 @@ dotnet add package EasyOcrSharp.Gpu
 
 > **Upgrading from 1.x?** v2 replaced the ~1.5 GB embedded Python + PyTorch runtime with native ONNX.
 > The public API (`EasyOcrService`, `OcrResult`, `OcrLine`, `OcrBoundingBox`) is unchanged.
+
+> **Upgrading from 2.x?** v3 changes the imaging library behind the pixel types on the public API —
+> see [Imaging](#imaging) below and the [changelog](CHANGELOG.md). Method names, parameters and results
+> are unchanged; what changes is the namespace the `Image<Rgb24>` in your `using` directives comes from.
+
+### Imaging
+
+Decoding, encoding and every pixel operation run on
+**[EasyImageSharp](https://github.com/FarhanLodi/EasyImageSharp)** — MIT-licensed, fully managed, AOT- and
+trimming-friendly, with no build-time licence key and no commercial tier for consumers to inherit. It is
+maintained by the same author as this library, so a fix OCR needs does not wait on a third party.
+
+It brings PNG, JPEG (baseline, progressive and CMYK), WebP (decode), GIF, BMP, TIFF (including CCITT G3/G4
+and JPEG-in-TIFF), TGA, Netpbm, QOI and ICO, so `Image.Load` accepts anything you are likely to scan or be
+sent. Pixel types (`Image<Rgb24>`, `Rgba32`, ...), geometry (`Point`, `Size`, `Rectangle`) and the
+`Mutate` / `Clone` processing pipeline live in the `EasyImageSharp`, `EasyImageSharp.PixelFormats` and
+`EasyImageSharp.Processing` namespaces:
+
+```csharp
+using EasyImageSharp;                 // Image, Image.Load, Color, Rectangle
+using EasyImageSharp.PixelFormats;    // Rgb24, Rgba32, L8
+using EasyImageSharp.Processing;      // Mutate/Clone: Resize, Rotate, Crop, Grayscale, Deskew, ...
+
+using var img = Image.Load<Rgb24>("page.png");
+var result = await ocr.ExtractTextFromImage(img, new[] { "en" });
+```
 
 ## 🚀 Quick start
 
@@ -131,7 +158,7 @@ public sealed record OcrLine
 
 ### Input sources
 
-OCR from a file path, a `Stream`, raw encoded bytes, or an already-decoded ImageSharp image:
+OCR from a file path, a `Stream`, raw encoded bytes, or an already-decoded `EasyImageSharp` image:
 
 ```csharp
 await ocr.ExtractTextFromImage("photo.jpg",            new[] { "en" });
@@ -377,8 +404,8 @@ var docOpts = new RecognitionOptions
 
 Beyond plain text OCR, `AnalyzeDocumentAsync` recovers a page's **structure** — layout regions,
 **tables (as HTML)**, formulas (as LaTeX), seals/stamps, and reading order — powered by PaddleOCR's
-PP-StructureV3 models through the [PaddleOcrNet](https://www.nuget.org/packages/PaddleOcrNet) engine
-(bundled as a dependency; nothing extra to install):
+PP-StructureV3 models, running on an engine built into this package (no extra dependency; the models
+download on first use):
 
 ```csharp
 using var ocr = new EasyOcrService();
@@ -551,7 +578,7 @@ using EasyOcrSharp.Export;
 using var img = Image.Load<Rgb24>("page.png");
 var result = await ocr.ExtractTextFromImage(img, new[] { "en" });
 using var annotated = img.DrawAnnotations(result, new Rgb24(255, 0, 0), thickness: 2);
-await annotated.SaveAsPngAsync("page.annotated.png");
+await annotated.SaveAsync("page.annotated.png");
 ```
 
 ### Batch processing
@@ -583,7 +610,7 @@ var redacted = await ocr.RedactAsync("statement.png", new[] { "en" }, new Redact
     Scope    = RedactionScope.MatchedWords,  // only the matched words, not the whole line
 });
 
-await redacted.Image.SaveAsPngAsync("statement.redacted.png");
+await redacted.Image.SaveAsync("statement.redacted.png");
 Console.WriteLine($"{redacted.RedactedRegionCount} regions removed");
 Console.WriteLine(redacted.SanitizedText);   // the text with matches masked out
 
@@ -1157,14 +1184,17 @@ For work inquiries, collaboration, feature requests, or any questions, reach out
 
 ## 📄 License
 
-MIT — see [LICENSE](https://github.com/FarhanLodi/EasyOcrSharp/blob/main/LICENSE). EasyOCR (the upstream model authors) is also MIT-licensed.
+MIT — see [LICENSE](https://github.com/FarhanLodi/EasyOcrSharp/blob/main/LICENSE). The code has no
+copyleft or commercially-tiered dependency at any depth. The neural weights downloaded at runtime keep
+their own upstream licences — EasyOCR and PaddleOCR models are Apache-2.0, TrOCR is MIT — and are
+attributed in [NOTICE](https://github.com/FarhanLodi/EasyOcrSharp/blob/main/NOTICE).
 
 ## 🙏 Acknowledgments
 
 - [EasyOCR](https://github.com/JaidedAI/EasyOCR) — the underlying CRAFT + CRNN models
 - [ONNX Runtime](https://onnxruntime.ai/) — neural network execution
-- [SixLabors.ImageSharp](https://github.com/SixLabors/ImageSharp) — image I/O and resizing
-- [PaddleOcrNet](https://www.nuget.org/packages/PaddleOcrNet) — PP-StructureV3 document-structure engine
+- [EasyImageSharp](https://github.com/FarhanLodi/EasyImageSharp) — image decoding, encoding and the processing pipeline
+- [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) — the PP-StructureV3 models behind `AnalyzeDocumentAsync`
 
 <div align="center">
 <br>

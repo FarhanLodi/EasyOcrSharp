@@ -1,8 +1,8 @@
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Services;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;

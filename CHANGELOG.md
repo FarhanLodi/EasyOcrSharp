@@ -2,6 +2,118 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## 3.0.0
+
+**Two dependencies leave: imaging moves to [EasyImageSharp](https://github.com/FarhanLodi/EasyImageSharp),
+and the document-structure engine moves in-tree.** Between them EasyOcrSharp no longer pulls a
+split-licensed imaging library at any depth of the graph. No method name, parameter, default or result
+shape changed; both are breaking only because types on the public API now come from different
+namespaces — `Image<Rgb24>` and friends from EasyImageSharp, and the `AnalyzeDocumentAsync` result
+types from `EasyOcrSharp.Structure`.
+
+### Why
+The previous imaging library ships under a split licence: free for some uses, chargeable for commercial
+ones above a revenue threshold, and from its 4.x line it enforces a build-time licence key that every
+downstream consumer inherits. A general-purpose OCR library cannot hand its users that obligation, and
+staying pinned to the last freely-licensed 3.1.x line was a dead end — no fixes, no new formats.
+EasyImageSharp is MIT, fully managed, AOT- and trimming-friendly, needs no licence key, and is
+maintained by the same author as this library.
+
+### Migration
+Migration is one find-and-replace across your `using` directives: every `SixLabors.ImageSharp` namespace
+— the root plus `.PixelFormats`, `.Processing` and `.Formats.*` — becomes the matching `EasyImageSharp`
+one, and nothing else in your code changes.
+
+```csharp
+using EasyImageSharp;                 // Image, Image.Load, Color, Rectangle, Size, Point
+using EasyImageSharp.PixelFormats;    // Rgb24, Rgba32, Bgr24, Bgra32, L8
+using EasyImageSharp.Processing;      // Mutate/Clone: Resize, Rotate, Crop, Grayscale, ...
+using EasyImageSharp.Formats.Jpeg;    // JpegEncoder and the other codec options
+```
+
+The public surface that carries these types: `IEasyOcrService` / `EasyOcrService`
+(`ExtractTextFromImage`, `ExtractTextFromRegionAsync`, `RecognizeFromBoxesAsync`,
+`DetectRegionsAsync`, `RecognizeHandwritingAsync`, `AnalyzeDocumentAsync`, the streaming and
+multi-frame overloads), `RedactionResult.Image`, `RedactionOptions.FillColor`,
+`OcrVisualizationExtensions.DrawAnnotations`, `BarcodeScanner`, and the `Image<Rgb24>` page handlers of
+the PDF APIs.
+
+Two API differences you may hit if you also used the old library directly:
+- `ImageInfo` exposes `FrameCount` rather than a frame-metadata collection to count.
+- WebP is **decode**-only, so there is no WebP encoder. Reading `.webp` input is unaffected.
+
+### Changed
+- All decoding, encoding, resizing, rotation, cropping, greyscaling, thresholding, blurring and
+  compositing now run on EasyImageSharp. Input format coverage is unchanged or wider: PNG, JPEG
+  (baseline, progressive and CMYK), WebP, GIF, BMP, TIFF (including CCITT G3/G4 and JPEG-in-TIFF),
+  TGA, Netpbm, QOI and ICO.
+- Deskew preprocessing (`PreprocessingOptions.Deskew`) now calls EasyImageSharp's projection-profile
+  deskew instead of a hand-rolled copy of the same idea. Same estimator — the rotation that sharpens
+  the horizontal projection of the ink — but it scores candidate angles on the ink coordinates instead
+  of rotating the whole page once per candidate, refines to 0.1 degrees instead of 0.2, and skips the
+  rotation altogether when the best angle is not meaningfully better than no rotation. Straightening
+  is equivalent and markedly faster; a straight page is now left untouched rather than resampled.
+- Arbitrary-angle rotation resamples bilinearly. Right-angle rotations, crops and the axis-aligned
+  region path stay pixel-exact, as before.
+
+### Added
+- `ImagingContractTests` pins the imaging behaviour the OCR pipeline depends on: clockwise
+  canvas-expanding rotation with a transparent-black fill (which `PatchTransform` and the page
+  orientation sweep invert analytically), aspect-preserving `Resize(w, 0)`, greyscale written to all
+  three colour channels, and header-only `Identify`. If any of those ever move, these fail before
+  accuracy does.
+
+### The structure engine is now part of this package
+`AnalyzeDocumentAsync` used to delegate to the third-party `PaddleOcrNet` package, which carried the old
+split-licensed imaging library as its own dependency — so it landed in your output folder even though
+nothing in EasyOcrSharp called it. That package is gone: the PP-StructureV3 pipeline (layout detection,
+table/formula/seal recognition, reading order, and the DB + SVTR text engine it runs on) now lives in
+this repository under `EasyOcrSharp.Structure`, built against EasyImageSharp like everything else.
+
+**Migration.** One `using`, and only if you call `AnalyzeDocumentAsync`:
+
+```csharp
+- using PaddleOcrNet.Structure;
++ using EasyOcrSharp.Structure;
+```
+
+`StructureResult`, `StructureBlock` and `StructureBlockType` keep their names, members and behaviour.
+Everything else the old package exposed was engine internals and is now `internal`, which also removes a
+second public `OcrResult` / `RecognitionOptions` / `ImageTooLargeException` from the graph — those names
+now resolve unambiguously to EasyOcrSharp's own. `StructureBlock.Lines` is now
+`IReadOnlyList<EasyOcrSharp.Models.OcrLine>`: the same line type the rest of the API returns, rather than
+a look-alike from another assembly.
+
+**Behaviour.** Verified against a golden report of `AnalyzeDocumentAsync` over six fixture pages: block
+counts, block types, bounding boxes and reading-order indices are identical, and the ported engine's
+output is byte-for-byte identical to running the original engine's own source. Recognized text shifts on
+a handful of degraded, low-confidence regions — that is the imaging change above, not the move, and it
+is what the same models produce on either code path.
+
+**Models and cache.** Unchanged: the same files from the same repository, in the same
+`%LOCALAPPDATA%/PaddleOcrNet/models` directory, so nothing re-downloads on upgrade. Mirror and cache
+overrides now answer to `EASYOCRSHARP_STRUCTURE_MODEL_BASE_URL` and `EASYOCRSHARP_STRUCTURE_CACHE`, with
+the previous `PADDLEOCRNET_*` names still honoured so existing air-gapped deployments keep working.
+
+**New dependency.** `Clipper2` (polygon offsetting for detection post-processing), previously pulled in
+transitively by the removed package.
+
+**Faster.** `AnalyzeDocumentAsync(Image<Rgb24>, ...)` no longer re-encodes the page to PNG in memory and
+decodes it again on the other side. That round-trip existed only to bridge two imaging stacks; the engine
+now shares this library's pixel types, so a decoded image is passed straight through.
+
+### Dependency
+`EasyImageSharp` is pinned at 1.0.1 — a stable release, so the package carries no prerelease dependency.
+It is a first-class dependency rather than an implementation detail, because its pixel types are on this
+library's public API; it is bumped deliberately, alongside a note here, rather than floated.
+
+### Companion package
+`EasyOcrSharp.Gpu` 3.0.0 ships alongside this release and resolves `EasyOcrSharp` 3.0.0. It now
+references the core project directly rather than pinning a published package version, so the two are
+built and released together instead of the GPU metapackage trailing the core by a version — which is how
+its 2.x releases ended up pinned to `EasyOcrSharp` 2.3.2, and therefore to the old imaging dependency.
+Upgrade both together.
+
 ## 2.3.0
 
 **Thirteen new capabilities: true word/character geometry, Unicode searchable PDF, handwriting, barcodes,
@@ -375,8 +487,9 @@ core `ExtractTextFromImage(path, languages)` call.
 - `ExtractTextFromImage` overloads gained an optional `RecognitionOptions options = null`
   parameter (before `CancellationToken`). Existing calls compile unchanged; callers that passed
   a `CancellationToken` positionally should switch to a named argument.
-- Pinned `SixLabors.ImageSharp` to the 3.1.x line: ImageSharp 4.x requires a paid, build-time
-  license that would be inherited by every consumer of this package.
+- Pinned the imaging dependency to its last freely-licensed line: its 4.x releases require a paid,
+  build-time licence that would be inherited by every consumer of this package. (Superseded in 3.0.0,
+  which drops that dependency entirely.)
 
 ## 2.0.0
 
