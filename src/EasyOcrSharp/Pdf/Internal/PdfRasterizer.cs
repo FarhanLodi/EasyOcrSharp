@@ -3,8 +3,8 @@ using Docnet.Core.Converters;
 using Docnet.Core.Exceptions;
 using Docnet.Core.Models;
 using Docnet.Core.Readers;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Pdf.Internal;
 

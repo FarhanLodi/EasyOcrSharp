@@ -2,8 +2,8 @@ using EasyOcrSharp;
 using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;

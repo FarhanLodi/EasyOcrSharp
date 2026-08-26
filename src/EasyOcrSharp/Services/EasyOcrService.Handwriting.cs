@@ -4,9 +4,9 @@ using EasyOcrSharp.Diagnostics;
 using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using Microsoft.Extensions.Logging;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 
 namespace EasyOcrSharp.Services;
 

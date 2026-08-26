@@ -1,11 +1,12 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Pdf;
 using EasyOcrSharp.Pdf.Internal;
 using EasyOcrSharp.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Redaction;
 
@@ -92,7 +93,8 @@ public static class OcrRedactionExtensions
             GuardPixels(info.Width, info.Height, options.MaxSourcePixels);
         }
 
-        using var image = await Image.LoadAsync<Rgb24>(full, cancellationToken).ConfigureAwait(false);
+        using var image = await DecodeLimits
+            .LoadAsync(full, options.MaxSourcePixels, MaxPixelsOption, cancellationToken).ConfigureAwait(false);
         return await service.RedactAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -137,7 +139,7 @@ public static class OcrRedactionExtensions
             GuardPixels(info.Width, info.Height, options.MaxSourcePixels);
         }
 
-        using var image = Image.Load<Rgb24>(imageBytes.Span);
+        using var image = DecodeLimits.Load(imageBytes.Span, options.MaxSourcePixels, MaxPixelsOption);
         return await service.RedactAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -178,7 +180,8 @@ public static class OcrRedactionExtensions
             imageStream.Seek(position, SeekOrigin.Begin);
         }
 
-        using var image = await Image.LoadAsync<Rgb24>(imageStream, cancellationToken).ConfigureAwait(false);
+        using var image = await DecodeLimits
+            .LoadAsync(imageStream, options.MaxSourcePixels, MaxPixelsOption, cancellationToken).ConfigureAwait(false);
         return await service.RedactAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -358,6 +361,9 @@ public static class OcrRedactionExtensions
             },
             cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>The option a caller raises when an image is rejected for being too large.</summary>
+    private const string MaxPixelsOption = "RedactionOptions.MaxSourcePixels";
 
     private static void GuardPixels(int width, int height, long maxPixels)
     {

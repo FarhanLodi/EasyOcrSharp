@@ -1,13 +1,13 @@
 using System.Buffers;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 
 namespace EasyOcrSharp.Internal;
 
 /// <summary>
 /// Image preprocessing helpers shared by the CRAFT detector and CRNN recognizer.
-/// All routines work on SixLabors.ImageSharp images and return CHW float tensors
+/// All routines work on EasyImageSharp images and return CHW float tensors
 /// directly consumable by ONNX Runtime.
 /// </summary>
 internal static class ImageProcessing

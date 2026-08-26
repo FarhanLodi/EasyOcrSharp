@@ -6,7 +6,7 @@ namespace EasyOcrSharp.Models;
 /// handwriting that EasyOCR's CRNN recognizers cannot. Assign an instance to
 /// <see cref="Services.EasyOcrServiceOptions.Handwriting"/> (null, the default, leaves the feature off
 /// and changes nothing) and then call
-/// <see cref="Services.EasyOcrService.RecognizeHandwritingAsync(SixLabors.ImageSharp.Image{SixLabors.ImageSharp.PixelFormats.Rgb24}, RecognitionOptions?, System.Threading.CancellationToken)"/>.
+/// <see cref="Services.EasyOcrService.RecognizeHandwritingAsync(EasyImageSharp.Image{EasyImageSharp.PixelFormats.Rgb24}, RecognitionOptions?, System.Threading.CancellationToken)"/>.
 /// <para>
 /// The TrOCR weights are <b>not</b> hosted alongside EasyOcrSharp's own models, so every path below is
 /// supplied by you and loaded straight from disk — nothing is downloaded, exactly like

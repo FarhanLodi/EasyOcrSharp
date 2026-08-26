@@ -1,6 +1,6 @@
 using EasyOcrSharp.Models;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Services;
 
@@ -39,7 +39,7 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// OCR an already-decoded ImageSharp image. The caller retains ownership of the image
+    /// OCR an already-decoded EasyImageSharp image. The caller retains ownership of the image
     /// (it is not disposed by this method).
     /// </summary>
     Task<OcrResult> ExtractTextFromImage(
@@ -193,12 +193,12 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
     /// <summary>
     /// Analyzes the full structure of a document image file — layout regions, <b>tables</b> (recovered
     /// as HTML), formulas, seals, and reading order — using PaddleOCR's PP-StructureV3 models (via the
-    /// PaddleOcrNet engine). The returned <see cref="PaddleOcrNet.Structure.StructureResult"/> exposes
+    /// built-in structure engine). The returned <see cref="EasyOcrSharp.Structure.StructureResult"/> exposes
     /// typed blocks plus <c>ToMarkdown()</c> / <c>ToJson()</c>. Implemented by
     /// <see cref="EasyOcrService"/>; a default-implementing stub throws so custom
     /// <see cref="IEasyOcrService"/> implementations and mocks keep compiling unchanged.
     /// </summary>
-    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+    Task<EasyOcrSharp.Structure.StructureResult> AnalyzeDocumentAsync(
         string imagePath,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -206,7 +206,7 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
             $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
 
     /// <summary>Analyzes the structure of a document image from a stream (format auto-detected).</summary>
-    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+    Task<EasyOcrSharp.Structure.StructureResult> AnalyzeDocumentAsync(
         Stream imageStream,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -214,7 +214,7 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
             $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
 
     /// <summary>Analyzes the structure of a document image from an encoded byte array (PNG/JPEG/etc.).</summary>
-    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+    Task<EasyOcrSharp.Structure.StructureResult> AnalyzeDocumentAsync(
         byte[] imageBytes,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -222,7 +222,7 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
             $"{GetType().Name} does not implement AnalyzeDocumentAsync. Use {nameof(EasyOcrService)}.");
 
     /// <summary>Analyzes the structure of a document image from encoded bytes.</summary>
-    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+    Task<EasyOcrSharp.Structure.StructureResult> AnalyzeDocumentAsync(
         ReadOnlyMemory<byte> imageBytes,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
@@ -233,7 +233,7 @@ public interface IEasyOcrService : IAsyncDisposable, IDisposable
     /// Analyzes the structure of an already-decoded document image. The caller retains ownership of
     /// the image (it is not disposed by this method).
     /// </summary>
-    Task<PaddleOcrNet.Structure.StructureResult> AnalyzeDocumentAsync(
+    Task<EasyOcrSharp.Structure.StructureResult> AnalyzeDocumentAsync(
         Image<Rgb24> image,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)

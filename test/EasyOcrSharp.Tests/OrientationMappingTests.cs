@@ -15,7 +15,7 @@ public class OrientationMappingTests
     private const int W = 100;
     private const int H = 200;
 
-    // Forward transform matching ImageSharp's clockwise Rotate(degrees): where a point in the ORIGINAL
+    // Forward transform matching EasyImageSharp's clockwise Rotate(degrees): where a point in the ORIGINAL
     // frame lands in the rotated copy. MapLinesToOriginalOrientation must invert exactly this.
     private static OcrPoint Forward(OcrPoint p, int degrees) => degrees switch
     {

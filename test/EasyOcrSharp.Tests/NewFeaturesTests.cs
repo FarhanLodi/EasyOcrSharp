@@ -5,8 +5,8 @@ using EasyOcrSharp.Pdf;
 using EasyOcrSharp.Pdf.Internal;
 using EasyOcrSharp.Services;
 using Microsoft.ML.OnnxRuntime;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;

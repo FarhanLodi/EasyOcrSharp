@@ -4,9 +4,9 @@ using EasyOcrSharp.Diagnostics;
 using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using Microsoft.Extensions.Logging;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 
 namespace EasyOcrSharp.Services;
 
@@ -422,7 +422,7 @@ public sealed partial class EasyOcrService : IEasyOcrService
             return lines;
         }
 
-        // Inverse of ImageSharp's clockwise Rotate(degrees): a point (x,y) detected in the rotated frame
+        // Inverse of EasyImageSharp's clockwise Rotate(degrees): a point (x,y) detected in the rotated frame
         // maps back to the un-rotated (width×height) frame as below. Coordinates are continuous, so the
         // extents width/height (not width-1/height-1) are used and results stay within [0,width]×[0,height].
         static OcrPoint MapBack(OcrPoint p, int degrees, int width, int height) => degrees switch
@@ -637,13 +637,13 @@ public sealed partial class EasyOcrService : IEasyOcrService
             var info = await Image.IdentifyAsync(path, ct).ConfigureAwait(false);
             GuardPixels(info.Width, info.Height);
         }
-        return await Image.LoadAsync<Rgb24>(path, ct).ConfigureAwait(false);
+        return await DecodeLimits.LoadAsync(path, _maxImagePixels, MaxPixelsOption, ct).ConfigureAwait(false);
     }
 
     private async Task<Image<Rgb24>> LoadGuarded(Stream stream, CancellationToken ct)
     {
         if (_maxImagePixels <= 0)
-            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+            return await DecodeLimits.LoadAsync(stream, _maxImagePixels, MaxPixelsOption, ct).ConfigureAwait(false);
 
         if (stream.CanSeek)
         {
@@ -651,7 +651,7 @@ public sealed partial class EasyOcrService : IEasyOcrService
             var info = await Image.IdentifyAsync(stream, ct).ConfigureAwait(false);
             GuardPixels(info.Width, info.Height);
             stream.Seek(pos, SeekOrigin.Begin);
-            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+            return await DecodeLimits.LoadAsync(stream, _maxImagePixels, MaxPixelsOption, ct).ConfigureAwait(false);
         }
 
         // Non-seekable: buffer the (small) compressed bytes once so we can inspect the header before
@@ -668,8 +668,11 @@ public sealed partial class EasyOcrService : IEasyOcrService
             var info = Image.Identify(bytes);
             GuardPixels(info.Width, info.Height);
         }
-        return Image.Load<Rgb24>(bytes);
+        return DecodeLimits.Load(bytes, _maxImagePixels, MaxPixelsOption);
     }
+
+    /// <summary>The option a caller raises when an image is rejected for being too large.</summary>
+    private const string MaxPixelsOption = "EasyOcrServiceOptions.MaxImagePixels";
 
     private void GuardPixels(int width, int height)
     {

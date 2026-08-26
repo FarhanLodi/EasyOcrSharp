@@ -1,8 +1,8 @@
 using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Services;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;
@@ -117,7 +117,7 @@ public class DocPreprocessingTests
         Assert.True(mapped.UseUnwarp);
         Assert.True(mapped.RecognizeTables);
         Assert.False(mapped.RecognizeFormulas);
-        Assert.Equal(PaddleOcrNet.Structure.TableRecognitionModel.SlaNeXt, mapped.TableModel);
+        Assert.Equal(EasyOcrSharp.Structure.TableRecognitionModel.SlaNeXt, mapped.TableModel);
         // "not-a-language" is skipped; the two valid codes survive in order.
         Assert.Equal(2, mapped.Languages.Count);
     }
@@ -128,8 +128,8 @@ public class DocPreprocessingTests
         var mapped = EasyOcrService.ToStructureOptions(null, logger: null);
         Assert.False(mapped.UseDocOrientation);
         Assert.True(mapped.RecognizeTables);
-        // No languages requested → PaddleOcrNet's own default pack applies (ch, covers en/ja).
-        Assert.Equal(PaddleOcrNet.Structure.StructureOptions.Default.Languages, mapped.Languages);
+        // No languages requested → the structure engine's own default pack applies (ch, covers en/ja).
+        Assert.Equal(EasyOcrSharp.Structure.StructureOptions.Default.Languages, mapped.Languages);
     }
 
     [Fact]

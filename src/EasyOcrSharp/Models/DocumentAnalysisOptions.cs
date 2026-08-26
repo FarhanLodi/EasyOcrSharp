@@ -20,7 +20,7 @@ public enum DocumentTableModel
 /// Per-call configuration for
 /// <see cref="Services.EasyOcrService.AnalyzeDocumentAsync(string, DocumentAnalysisOptions?, CancellationToken)"/> —
 /// document-structure analysis (layout regions, tables, formulas, seals, reading order), powered by
-/// PaddleOCR's PP-StructureV3 models via the PaddleOcrNet engine. All models download on demand and
+/// PaddleOCR's PP-StructureV3 models via the built-in structure engine. All models download on demand and
 /// are SHA256-verified.
 /// </summary>
 public sealed record DocumentAnalysisOptions

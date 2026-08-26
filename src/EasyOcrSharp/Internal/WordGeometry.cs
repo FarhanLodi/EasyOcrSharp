@@ -57,7 +57,7 @@ internal readonly record struct TextQuad(OcrPoint TopLeft, OcrPoint TopRight, Oc
 /// Undoes the per-box rotation of <see cref="CrnnRunOptions.RotationInfo"/>: converts a normalized
 /// coordinate of the patch that was actually fed to the recognizer back into a normalized coordinate of
 /// the rectified crop. For the upright pass this is the identity; for a rotated pass it inverts
-/// ImageSharp's expand-canvas rotation about the image centre, which is what
+/// EasyImageSharp's expand-canvas rotation about the image centre, which is what
 /// <c>Clone(ctx =&gt; ctx.Rotate(angle))</c> performs.
 /// </summary>
 internal readonly record struct PatchTransform(
@@ -87,7 +87,7 @@ internal readonly record struct PatchTransform(
         double angle = AngleDegrees % 360.0;
         if (angle == 0 || CropWidth <= 0 || CropHeight <= 0) return (u, v);
 
-        // Forward (what ImageSharp did): p' = R(θ)·(p − cropCentre) + patchCentre, with
+        // Forward (what EasyImageSharp did): p' = R(θ)·(p − cropCentre) + patchCentre, with
         // R(θ) = [[cos, −sin], [sin, cos]] which is a clockwise turn in y-down image space.
         // Inverse: p = R(−θ)·(p' − patchCentre) + cropCentre.
         double theta = angle * Math.PI / 180.0;

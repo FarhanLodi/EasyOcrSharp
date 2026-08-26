@@ -1,0 +1,52 @@
+EasyOcrSharp
+============
+
+The EasyOcrSharp source code is licensed under the MIT License (see LICENSE).
+
+------------------------------------------------------------------------------
+Third-party model assets
+------------------------------------------------------------------------------
+
+EasyOcrSharp downloads and runs neural network models at runtime. Those weights
+are not covered by this project's MIT license; they retain the terms of the
+projects they are derived from.
+
+Text detection and recognition (CRAFT, CRNN and the language recognizer packs)
+
+    EasyOCR
+    Copyright (c) Jaided AI
+    Licensed under the Apache License, Version 2.0.
+    https://github.com/JaidedAI/EasyOCR
+
+Document-structure analysis behind AnalyzeDocumentAsync (layout detection,
+table / formula / seal recognition, document orientation and unwarp), together
+with the text detection and recognition models that pipeline runs on, and the
+character dictionaries (ppocr keys) used for recognition
+
+    PaddleOCR
+    Copyright (c) PaddlePaddle Authors / Baidu, Inc.
+    Licensed under the Apache License, Version 2.0.
+    https://github.com/PaddlePaddle/PaddleOCR
+
+Handwriting recognition, when enabled
+
+    TrOCR
+    Copyright (c) Microsoft Corporation.
+    Licensed under the MIT License.
+    https://github.com/microsoft/unilm/tree/master/trocr
+
+A copy of the Apache License, Version 2.0 is available at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------------
+Third-party source code
+------------------------------------------------------------------------------
+
+The document-structure engine under src/EasyOcrSharp/Structure is derived from
+PaddleOcrNet (https://github.com/FarhanLodi/PaddleOcrNet), by the same author
+and likewise MIT-licensed. It implements the PP-StructureV3 pipeline described
+by the PaddleOCR project.
+
+This NOTICE file is provided for attribution and does not modify the MIT
+License that governs the EasyOcrSharp source code itself.

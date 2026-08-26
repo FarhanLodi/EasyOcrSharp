@@ -1,7 +1,7 @@
 using System.Data;
 using System.Globalization;
 using System.Text;
-using PaddleOcrNet.Structure;
+using EasyOcrSharp.Structure;
 
 namespace EasyOcrSharp.Export;
 

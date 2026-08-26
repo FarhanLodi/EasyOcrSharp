@@ -1,15 +1,15 @@
 using EasyOcrSharp.Models;
 using EasyOcrSharp.Services;
-using PaddleOcrNet.Structure;
-using SixLabors.ImageSharp;
-using SixLabors.ImageSharp.PixelFormats;
-using SixLabors.ImageSharp.Processing;
+using EasyOcrSharp.Structure;
+using EasyImageSharp;
+using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 using Xunit;
 
 namespace EasyOcrSharp.Tests;
 
 /// <summary>
-/// End-to-end tests for document-structure analysis (layout/tables via the PaddleOcrNet engine) and
+/// End-to-end tests for document-structure analysis (layout/tables via the built-in structure engine) and
 /// the model-based document preprocessing. They download models on first run, so they carry the same
 /// "Integration" trait (and CI exclusion) as <see cref="OcrIntegrationTests"/>.
 /// </summary>

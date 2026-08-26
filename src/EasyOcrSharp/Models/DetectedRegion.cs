@@ -2,7 +2,7 @@ namespace EasyOcrSharp.Models;
 
 /// <summary>
 /// A text region located by the detector <b>without</b> recognizing its contents. Returned by
-/// <see cref="Services.IEasyOcrService.DetectRegionsAsync(SixLabors.ImageSharp.Image{SixLabors.ImageSharp.PixelFormats.Rgb24}, RecognitionOptions?, System.Threading.CancellationToken)"/>
+/// <see cref="Services.IEasyOcrService.DetectRegionsAsync(EasyImageSharp.Image{EasyImageSharp.PixelFormats.Rgb24}, RecognitionOptions?, System.Threading.CancellationToken)"/>
 /// — useful for layout analysis, redaction, or cropping fields before a separate recognition pass.
 /// </summary>
 public sealed record DetectedRegion

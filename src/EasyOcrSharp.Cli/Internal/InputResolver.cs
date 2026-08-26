@@ -10,7 +10,7 @@ namespace EasyOcrSharp.Cli.Internal;
 /// </summary>
 internal static class InputResolver
 {
-    /// <summary>File types the tool will attempt: everything ImageSharp decodes, plus PDF.</summary>
+    /// <summary>File types the tool will attempt: everything EasyImageSharp decodes, plus PDF.</summary>
     private static readonly FrozenSet<string> SupportedExtensions = new[]
     {
         ".png", ".jpg", ".jpeg", ".jfif", ".bmp", ".gif", ".tif", ".tiff",

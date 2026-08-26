@@ -6,7 +6,7 @@ namespace EasyOcrSharp.Tests;
 /// <summary>
 /// Unit tests for <see cref="TableHtmlParser"/> and the CSV / <c>DataTable</c> conversions in
 /// <see cref="StructureExportExtensions"/>. All pure functions over HTML strings — no models, no
-/// network, no PaddleOcrNet session.
+/// network, no structure-engine session.
 /// </summary>
 public class StructureExportTests
 {
