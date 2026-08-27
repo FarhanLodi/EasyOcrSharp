@@ -40,13 +40,13 @@ internal sealed class ModelDownloadOptions
 
     /// <summary>
     /// Base URL to fetch models from, overriding the built-in Hugging Face host (and the
-    /// <c>PADDLEOCRNET_MODEL_BASE_URL</c> environment variable). Use for a private/offline mirror.
+    /// <c>EASYOCRSHARP_STRUCTURE_MODEL_BASE_URL</c> environment variable). Use for a private/offline mirror.
     /// </summary>
     public string? BaseUrlOverride { get; set; }
 
     /// <summary>
     /// Allow downloading models over a plain (non-HTTPS) URL. Default <c>false</c>: a <c>BaseUrlOverride</c>
-    /// or <c>PADDLEOCRNET_MODEL_BASE_URL</c> that is not <c>https://</c> is rejected, because the model
+    /// or <c>EASYOCRSHARP_STRUCTURE_MODEL_BASE_URL</c> that is not <c>https://</c> is rejected, because the model
     /// download is the supply-chain trust root (a downloaded <c>.onnx</c> is parsed by native ONNX Runtime).
     /// Enable only for a trusted on-host/offline mirror you control.
     /// </summary>

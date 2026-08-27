@@ -270,9 +270,7 @@ internal static class ModelDownloadManager
 
         return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            // Unchanged on purpose: same models, same source repo. Renaming this folder would
-            // force every existing install to re-download the full structure model set.
-            "PaddleOcrNet",
+            "EasyOcrSharp",
             "models");
     }
 

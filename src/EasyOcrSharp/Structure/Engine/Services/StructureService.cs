@@ -47,7 +47,7 @@ internal sealed class StructureService : IStructureService
     /// </summary>
     /// <param name="modelCachePath">
     /// Optional path where ONNX models should be cached. If null, uses LocalAppData\EasyOcrSharp.Structure.Engine\models
-    /// (or the PADDLEOCRNET_CACHE environment variable, if set).
+    /// (or the EASYOCRSHARP_STRUCTURE_CACHE environment variable, if set).
     /// </param>
     /// <param name="logger">Optional logger instance for diagnostic messages.</param>
     /// <param name="useGpu">

@@ -90,10 +90,20 @@ output is byte-for-byte identical to running the original engine's own source. R
 a handful of degraded, low-confidence regions — that is the imaging change above, not the move, and it
 is what the same models produce on either code path.
 
-**Models and cache.** Unchanged: the same files from the same repository, in the same
-`%LOCALAPPDATA%/PaddleOcrNet/models` directory, so nothing re-downloads on upgrade. Mirror and cache
-overrides now answer to `EASYOCRSHARP_STRUCTURE_MODEL_BASE_URL` and `EASYOCRSHARP_STRUCTURE_CACHE`, with
-the previous `PADDLEOCRNET_*` names still honoured so existing air-gapped deployments keep working.
+**Models and cache moved.** The structure models are now served from
+`huggingface.co/EasyOcrSharp/EasyOcrSharp-models`, the same repository as the OCR models, and are cached
+alongside them in `%LOCALAPPDATA%/EasyOcrSharp/models` instead of a separate `PaddleOcrNet` directory.
+The model files themselves are byte-identical — only where they are fetched from and stored changed.
+
+Two consequences. Structure models **re-download once** on first use after upgrading; the old
+`%LOCALAPPDATA%/PaddleOcrNet` directory is no longer read and can be deleted. And `PP-LCNet_x1_0_doc_ori.onnx`
+and `UVDoc.onnx`, which both the document-preprocessing and structure paths use, are now stored once
+rather than once per cache.
+
+Mirror and cache overrides answer to `EASYOCRSHARP_STRUCTURE_MODEL_BASE_URL` and
+`EASYOCRSHARP_STRUCTURE_CACHE`; the previous `PADDLEOCRNET_*` names are still honoured as a fallback, but
+a mirror of the old repository needs the new file set — `AnalyzeDocumentAsync` with seal recognition now
+resolves models that were never published before.
 
 **New dependency.** `Clipper2` (polygon offsetting for detection post-processing), previously pulled in
 transitively by the removed package.

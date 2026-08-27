@@ -20,7 +20,7 @@ namespace EasyOcrSharp.Structure.Engine;
 /// structure set — layout (<c>PP-DocLayoutV3</c> plus <c>PP-DocLayout-S/M/plus-L</c>), tables
 /// (<c>SLANet_plus</c>, <c>SLANeXt_wired/wireless</c>, the table classifier and the RT-DETR cell detectors)
 /// and the seal detector — are hosted at <see cref="DefaultBaseUrl"/> (the public
-/// <c>PaddleOcrNet/PaddleOcrNet-models</c> repo) and have real <see cref="Checksums"/> that
+/// <c>EasyOcrSharp/EasyOcrSharp-models</c> repo) and have real <see cref="Checksums"/> that
 /// <see cref="ModelDownloadManager"/> verifies after download. The only intentionally-unlisted entries are
 /// the optional <c>table_structure_dict.txt</c> (<c>SlanetTableRecognizer</c> embeds the canonical vocab as
 /// a fallback) and the unused <c>SLANet_plus_wired/wireless</c> aliases.
@@ -30,13 +30,13 @@ internal static class StructureModelRegistry
 {
     /// <summary>
     /// Base URL where the exported PP-OCRv5 ONNX assets and dictionaries are hosted: the public
-    /// <c>PaddleOcrNet/PaddleOcrNet-models</c> HuggingFace repo, which is live and serves the core working
+    /// <c>EasyOcrSharp/EasyOcrSharp-models</c> HuggingFace repo, which is live and serves the core working
     /// set anonymously. Override it at runtime via <see cref="Services.ModelDownloadOptions.BaseUrlOverride"/>
-    /// or the <c>PADDLEOCRNET_MODEL_BASE_URL</c> environment variable (both honored by
+    /// or the <c>EASYOCRSHARP_STRUCTURE_MODEL_BASE_URL</c> environment variable (both honored by
     /// <see cref="ModelDownloadManager"/>) to point at a private mirror.
     /// </summary>
     public const string DefaultBaseUrl =
-        "https://huggingface.co/PaddleOcrNet/PaddleOcrNet-models/resolve/main";
+        "https://huggingface.co/EasyOcrSharp/EasyOcrSharp-models/resolve/main";
 
     // -----------------------------------------------------------------------------------------------
     // Asset file names. These mirror PaddleOCR's PP-OCRv5 export / dict naming so that whoever exports
@@ -115,7 +115,7 @@ internal static class StructureModelRegistry
     private static readonly FrozenDictionary<string, string> Checksums =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            // SHA256 (upper-case hex) of every asset published to PaddleOcrNet/PaddleOcrNet-models.
+            // SHA256 (upper-case hex) of every asset published to EasyOcrSharp/EasyOcrSharp-models.
             ["PP-OCRv5_mobile_det.onnx"] = "D7FE3EA74652890722C0F4D02458B7261D9F5AE6C92904D05707C9EB155C7924",
             ["PP-OCRv5_server_det.onnx"] = "7C1A843C497972B9B470748E91A6D83C0F79C4B5B6459508AC533A88F418F33B",
             ["PP-OCRv5_mobile_rec.onnx"] = "D253C3CBEE6E507828A5271A30AB0EC8AE7C2A99D0CC8E6F844FE380809D22B3",

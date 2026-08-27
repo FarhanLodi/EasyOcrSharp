@@ -11,7 +11,7 @@ namespace EasyOcrSharp.Structure.Engine;
 internal sealed record StructureEngineOptions
 {
     /// <summary>
-    /// Optional model cache directory (defaults to LocalAppData or PADDLEOCRNET_CACHE).
+    /// Optional model cache directory (defaults to LocalAppData or EASYOCRSHARP_STRUCTURE_CACHE).
     /// </summary>
     public string? ModelCachePath { get; init; }
 

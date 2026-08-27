@@ -1057,6 +1057,11 @@ await using var ocr = new EasyOcrService(modelCachePath: @"D:\MyApp\Models");
 ```bash
 EASYOCRSHARP_CACHE=/var/cache/easyocr                          # cache directory
 EASYOCRSHARP_MODEL_BASE_URL=https://files.mycorp.example/ocr   # private/offline mirror
+
+# AnalyzeDocumentAsync's structure models are cached in the same directory but resolved
+# through their own pair, so a mirror can serve them separately:
+EASYOCRSHARP_STRUCTURE_CACHE=/var/cache/easyocr
+EASYOCRSHARP_STRUCTURE_MODEL_BASE_URL=https://files.mycorp.example/ocr
 ```
 
 > **Offline / air-gapped:** pre-seed your cache directory with the `.onnx` + `.vocab.json` files from

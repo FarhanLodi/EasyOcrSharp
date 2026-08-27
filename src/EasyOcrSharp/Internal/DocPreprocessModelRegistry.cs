@@ -4,7 +4,7 @@ namespace EasyOcrSharp.Internal;
 /// Catalogue of the two small neural models behind the model-based document preprocessing steps
 /// (<see cref="Models.PreprocessingOptions.DocumentOrientation"/> and
 /// <see cref="Models.PreprocessingOptions.DocumentUnwarp"/>). They originate from PaddleOCR/PaddleX
-/// and are hosted on the PaddleOcrNet model repo; downloads are SHA256-verified fail-closed by
+/// and are hosted on the EasyOcrSharp model repo; downloads are SHA256-verified fail-closed by
 /// <see cref="ModelDownloadManager"/> like every other model, and the
 /// <c>EASYOCRSHARP_MODEL_BASE_URL</c> mirror override applies to them too.
 /// </summary>
@@ -12,7 +12,7 @@ internal static class DocPreprocessModelRegistry
 {
     /// <summary>Base URL where the document-preprocessing ONNX models are hosted.</summary>
     public const string DefaultBaseUrl =
-        "https://huggingface.co/PaddleOcrNet/PaddleOcrNet-models/resolve/main";
+        "https://huggingface.co/EasyOcrSharp/EasyOcrSharp-models/resolve/main";
 
     /// <summary>
     /// PP-LCNet_x1_0 document-orientation classifier: input <c>[1,3,224,224]</c>, output <c>[1,4]</c>
