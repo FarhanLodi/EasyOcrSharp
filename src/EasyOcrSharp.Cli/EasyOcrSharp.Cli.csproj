@@ -43,4 +43,22 @@
 		<None Include="../EasyOcrSharp/Assets/icon.png" Pack="true" PackagePath="icon.png" />
 	</ItemGroup>
 
+	<!--
+	  A dotnet tool is installed with `dotnet tool install -g` and runs on a desktop or server. The
+	  ONNX Runtime package also ships iOS and Android native binaries (onnxruntime.xcframework.zip and
+	  onnxruntime.aar), which can never execute in that context but were 106 MB of a 169 MB package -
+	  downloaded by every user on every install. Every desktop RID (win/linux/osx, x64/x86/arm64) is
+	  kept, so the tool still runs everywhere it ran before, from the same single package.
+	-->
+	<Target Name="TrimMobileRuntimeAssets"
+	        AfterTargets="ComputeResolvedFilesToPublishList"
+	        BeforeTargets="_HandlePublishFilesForTool">
+		<ItemGroup>
+			<ResolvedFileToPublish
+				Remove="@(ResolvedFileToPublish)"
+				Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('runtimes/android/')) Or $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('runtimes\android\'))
+				        Or $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('runtimes/ios/')) Or $([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').StartsWith('runtimes\ios\'))" />
+		</ItemGroup>
+	</Target>
+
 </Project>
