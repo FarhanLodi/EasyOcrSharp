@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/FarhanLodi/EasyOcrSharp/security/advisories/new
+    about: Report privately. Please do not open a public issue for security problems.
+  - name: Question or usage help
+    url: https://github.com/FarhanLodi/EasyOcrSharp/discussions
+    about: For "how do I..." questions, start a discussion.

@@ -1,0 +1,73 @@
+name: Bug report
+description: Something behaves differently than documented
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If this is a **security** issue, please close this and use a
+        [private advisory](https://github.com/FarhanLodi/EasyOcrSharp/security/advisories/new) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Code that reproduces it
+      description: The smallest snippet that shows the problem.
+      render: csharp
+      placeholder: |
+        await using var ocr = new EasyOcrService();
+        var result = await ocr.ExtractTextFromImageAsync("page.png");
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: EasyOcrSharp version
+      placeholder: "3.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: .NET version and OS
+      placeholder: ".NET 10.0.301, Windows 11 / Ubuntu 24.04 / macOS 15"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Which package
+      multiple: true
+      options:
+        - EasyOcrSharp
+        - EasyOcrSharp.Gpu
+        - EasyOcrSharp.Cli
+    validations:
+      required: true
+
+  - type: textarea
+    id: sample
+    attributes:
+      label: Sample image or PDF
+      description: |
+        For anything about OCR results, a sample is essential — accuracy problems are very hard to
+        act on without the input. A cropped region that still shows the problem works fine and
+        avoids sharing anything sensitive. Drag the file in to attach it.
+
+  - type: textarea
+    id: exception
+    attributes:
+      label: Exception and stack trace
+      description: The full text, if one was thrown.
+      render: text
