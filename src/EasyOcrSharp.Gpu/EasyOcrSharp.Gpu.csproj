@@ -28,6 +28,7 @@
 
 	<ItemGroup>
 		<None Include="../../README.md" Pack="true" PackagePath="" />
+		<None Include="../../NOTICE" Pack="true" PackagePath="" />
 		<None Include="../EasyOcrSharp/Assets/icon.png" Pack="true" PackagePath="icon.png" />
 	</ItemGroup>
 
