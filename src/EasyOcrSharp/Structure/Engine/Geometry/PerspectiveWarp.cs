@@ -79,6 +79,10 @@ internal static class PerspectiveWarp
                 if (Math.Abs(denom) < 1e-9) continue;
                 double sx = (h[0] * u + h[1] * v + h[2]) / denom;
                 double sy = (h[3] * u + h[4] * v + h[5]) / denom;
+                // A degenerate homography yields NaN/Infinity here. BilinearSample's range clamps are both
+                // false for NaN, so it would sample at NaN and silently write black; leave the pixel at the
+                // buffer default instead.
+                if (!double.IsFinite(sx) || !double.IsFinite(sy)) continue;
                 dstBuf[v * dstW + u] = BilinearSample(srcBuf, sw, sh, sx - ox, sy - oy);
             }
         }
@@ -123,20 +127,28 @@ internal static class PerspectiveWarp
             Lerp(p00.B, p10.B, p01.B, p11.B));
     }
 
+    /// <summary>
+    /// Orders four corners as TL, TR, BR, BL by x-sorting: the two left-most points form the left edge (top =
+    /// smaller y), the two right-most the right edge. This is PaddleOCR's <c>get_mini_boxes</c> ordering, and
+    /// the codebase already uses it in <c>DBPostProcess.OrderQuad</c>.
+    /// <para>
+    /// It replaces a sum/difference heuristic (tl = min(x+y), tr = min(y−x), …) that degenerates when a quad
+    /// edge lies along a ±45° diagonal: the metric is constant along such an edge, so the tie-break handed the
+    /// SAME point to two roles. A text line rotated exactly 45° — a diagonal watermark or stamp — produced
+    /// tl == tr, which rectified a 100×20 line as a 20×102 vertical sliver and generated non-finite sample
+    /// coordinates; alternatively dstW collapsed to 0 and the region was silently dropped. Sorting by x
+    /// always assigns four distinct points to four distinct roles.
+    /// </para>
+    /// </summary>
     private static (OcrPoint tl, OcrPoint tr, OcrPoint br, OcrPoint bl) OrderCorners(OcrPoint[] quad)
     {
-        // tl = min(x+y), br = max(x+y), tr = min(y-x), bl = max(y-x).
-        OcrPoint tl = quad[0], br = quad[0], tr = quad[0], bl = quad[0];
-        double minSum = double.MaxValue, maxSum = double.MinValue, minDiff = double.MaxValue, maxDiff = double.MinValue;
-        foreach (var p in quad)
-        {
-            double sum = p.X + p.Y, diff = p.Y - p.X;
-            if (sum < minSum) { minSum = sum; tl = p; }
-            if (sum > maxSum) { maxSum = sum; br = p; }
-            if (diff < minDiff) { minDiff = diff; tr = p; }
-            if (diff > maxDiff) { maxDiff = diff; bl = p; }
-        }
-        return (tl, tr, br, bl);
+        var pts = (OcrPoint[])quad.Clone();
+        Array.Sort(pts, (a, b) => a.X.CompareTo(b.X));
+
+        var (leftTop, leftBottom) = pts[0].Y <= pts[1].Y ? (pts[0], pts[1]) : (pts[1], pts[0]);
+        var (rightTop, rightBottom) = pts[2].Y <= pts[3].Y ? (pts[2], pts[3]) : (pts[3], pts[2]);
+
+        return (leftTop, rightTop, rightBottom, leftBottom);
     }
 
     private static bool IsAxisAligned(OcrPoint tl, OcrPoint tr, OcrPoint br, OcrPoint bl)

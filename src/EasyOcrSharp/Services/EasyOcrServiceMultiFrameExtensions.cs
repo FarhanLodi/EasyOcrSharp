@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using EasyOcrSharp.Diagnostics;
 using EasyOcrSharp.Internal;
 using EasyOcrSharp.Models;
 using EasyImageSharp;
@@ -19,9 +20,18 @@ namespace EasyOcrSharp.Services;
 /// never disposed or mutated. Every overload also has a streaming twin
 /// (<c>StreamTextFromFramesAsync</c>) that yields each frame as it completes, so a long document starts
 /// producing text immediately instead of after the last page.
+/// <para>
+/// One <c>easyocr.operations</c> / <c>easyocr.duration</c> data point covers the whole container, with
+/// <c>easyocr.pages</c> counting the frames actually recognized and <c>easyocr.lines</c> their text — see
+/// <see cref="EasyOcrDiagnostics"/>. The aggregate overloads drain the streaming ones, so a call is
+/// measured exactly once either way. No concurrency slot is taken here: each frame goes through the public
+/// single-image API, which is already gated, and holding a second slot across every frame would deadlock a
+/// service limited to one concurrent operation.
+/// </para>
 /// </remarks>
 public static class EasyOcrServiceMultiFrameExtensions
 {
+
     // ---- aggregate: every frame, one result ----
 
     /// <summary>
@@ -211,6 +221,12 @@ public static class EasyOcrServiceMultiFrameExtensions
     /// Walks the frames of the loaded image, recognizing one at a time. The image is materialized lazily,
     /// on the first <c>MoveNextAsync</c>, so nothing is decoded for an enumeration the caller abandons.
     /// </summary>
+    /// <remarks>
+    /// The operation is measured here rather than in the public overloads because this is where the work
+    /// happens: an enumeration the caller never starts does none and so emits no data point, and the
+    /// aggregate <c>ExtractTextFromFramesAsync</c> overloads — which only drain this — are counted once
+    /// rather than twice.
+    /// </remarks>
     private static async IAsyncEnumerable<FrameOcrResult> IterateAsync(
         IEasyOcrService service,
         Func<CancellationToken, ValueTask<LoadedImage>> loader,
@@ -219,36 +235,94 @@ public static class EasyOcrServiceMultiFrameExtensions
         MultiFrameOcrOptions frameOptions,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        var loaded = await loader(cancellationToken).ConfigureAwait(false);
+        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.MultiFrame", ActivityKind.Internal);
+        using var recorder = EasyOcrDiagnostics.Begin(EasyOcrDiagnostics.OperationNames.MultiFrame, ProviderOf(service))
+            .WithLanguages(languages)
+            .Annotate(activity);
+
+        // C# forbids `yield return` inside a try/catch, so the outcome cannot simply be decided by one
+        // wrapper around the loop. Instead each step that can throw sits in its own catch that records the
+        // failure and rethrows, the yields stay outside those catches, and this local carries the verdict
+        // to the finally below (the iterator's state machine preserves it across suspensions). Breaking the
+        // iterator here would be far worse than having no metrics, so the shape matters more than brevity.
+        bool settled = false;
+
+        // `default` leaves Owned false, so the finally can never dispose a Source that was never loaded.
+        LoadedImage loaded = default;
         try
         {
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                loaded = await loader(cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                recorder.Failure(ex);
+                settled = true;
+                throw;
+            }
+
             var image = loaded.Source;
-            int count = image.Frames.Count;
-            GuardFrameCount(count, frameOptions.MaxFrames);
+            int count;
+            try
+            {
+                count = image.Frames.Count;
+                GuardFrameCount(count, frameOptions.MaxFrames);
+            }
+            catch (Exception ex)
+            {
+                recorder.Failure(ex);
+                settled = true;
+                throw;
+            }
 
             for (int i = 0; i < count; i++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var frame = image.Frames[i];
-                GuardFramePixels(frame.Width, frame.Height, i, frameOptions.MaxFramePixels);
-
-                // A single-frame image *is* the frame: hand it straight to the existing single-image call
-                // (which never disposes or mutates it) rather than paying for a full pixel copy. Anything
-                // with more frames gets its own throw-away clone, disposed before the next frame is read.
-                Image<Rgb24>? clone = count == 1 ? null : image.Frames.CloneFrame(i);
+                Image<Rgb24>? clone;
                 try
                 {
-                    var target = clone ?? image;
-                    var ocr = await service.ExtractTextFromImage(target, languages, options, cancellationToken).ConfigureAwait(false);
-                    var result = new FrameOcrResult
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var frame = image.Frames[i];
+                    GuardFramePixels(frame.Width, frame.Height, i, frameOptions.MaxFramePixels);
+
+                    // A single-frame image *is* the frame: hand it straight to the existing single-image call
+                    // (which never disposes or mutates it) rather than paying for a full pixel copy. Anything
+                    // with more frames gets its own throw-away clone, disposed before the next frame is read.
+                    clone = count == 1 ? null : image.Frames.CloneFrame(i);
+                }
+                catch (Exception ex)
+                {
+                    recorder.Failure(ex);
+                    settled = true;
+                    throw;
+                }
+
+                try
+                {
+                    FrameOcrResult result;
+                    try
                     {
-                        FrameIndex = i,
-                        Ocr = ocr,
-                        PixelWidth = target.Width,
-                        PixelHeight = target.Height,
-                    };
-                    frameOptions.Progress?.Report(new MultiFrameProgress(i + 1, count));
+                        var target = clone ?? image;
+                        var ocr = await service.ExtractTextFromImage(target, languages, options, cancellationToken).ConfigureAwait(false);
+                        result = new FrameOcrResult
+                        {
+                            FrameIndex = i,
+                            Ocr = ocr,
+                            PixelWidth = target.Width,
+                            PixelHeight = target.Height,
+                        };
+                        // Counted as each frame finishes, never from the frame count up front, so a container
+                        // that fails on frame 57 reports the 56 frames it really recognized.
+                        recorder.AddPages(1).AddLines(ocr.Lines.Count);
+                        frameOptions.Progress?.Report(new MultiFrameProgress(i + 1, count));
+                    }
+                    catch (Exception ex)
+                    {
+                        recorder.Failure(ex);
+                        settled = true;
+                        throw;
+                    }
                     yield return result;
                 }
                 finally
@@ -256,12 +330,23 @@ public static class EasyOcrServiceMultiFrameExtensions
                     clone?.Dispose();
                 }
             }
+
+            recorder.Success();
+            settled = true;
         }
         finally
         {
             if (loaded.Owned)
             {
                 loaded.Source.Dispose();
+            }
+
+            // A consumer that stops early — break, Take, or a throw in its own loop body — disposes the
+            // enumerator with nothing having failed and arrives here unsettled. That is a caller's choice,
+            // not a fault: recording it as an error would let one FirstAsync() poison the error rate.
+            if (!settled)
+            {
+                recorder.Canceled();
             }
         }
     }
@@ -362,6 +447,17 @@ public static class EasyOcrServiceMultiFrameExtensions
                 $"{maxFramePixels:N0} px (MultiFrameOcrOptions.MaxFrameMegapixels). Raise the limit or downscale " +
                 "the image. This guard protects against decompression-bomb / pixel-flood denial of service.");
     }
+
+    /// <summary>
+    /// The <see cref="EasyOcrDiagnostics.TagNames.Provider"/> value for a composite operation.
+    /// <see cref="EasyOcrService"/> keeps the exact resolved provider private and these are extensions on
+    /// the interface, so the tag is coarse here: "Cpu" matches the per-frame points exactly, a GPU service
+    /// reports "Gpu" without claiming to know whether it is CUDA, DirectML or CoreML, and a caller's own
+    /// <see cref="IEasyOcrService"/> reports "unknown" rather than a guess that would make a dashboard's
+    /// CPU/GPU split quietly wrong.
+    /// </summary>
+    private static string ProviderOf(IEasyOcrService service)
+        => service is EasyOcrService concrete ? concrete.ProviderName : "unknown";
 
     /// <summary>A loaded image plus whether this class allocated it (and must therefore dispose it).</summary>
     private readonly record struct LoadedImage(Image<Rgb24> Source, bool Owned);

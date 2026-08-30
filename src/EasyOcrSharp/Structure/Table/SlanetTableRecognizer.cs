@@ -11,6 +11,8 @@ using OcrLine = EasyOcrSharp.Models.OcrLine;
 using OcrPoint = EasyOcrSharp.Models.OcrPoint;
 using OcrBoundingBox = EasyOcrSharp.Models.OcrBoundingBox;
 
+using EasyOcrSharp.Structure.Engine;
+
 namespace EasyOcrSharp.Structure.Table;
 
 /// <summary>
@@ -207,7 +209,17 @@ internal sealed class SlanetTableRecognizer : ITableRecognizer
 
         // Dynamic dims (or an unexpected export): use the documented positional order out[0]=loc, out[1]=prob.
         var names = session.OutputMetadata.Keys.ToList();
-        return (names[0], names.Count > 1 ? names[1] : names[0]);
+        if (names.Count < 2)
+        {
+            // Returning (names[0], names[0]) fed Run() a duplicated output name and then read the same
+            // tensor as both the location and the structure head -- garbage cells rather than an error.
+            throw new StructureEngineException(
+                $"The table structure model declares {names.Count} output(s); this recognizer needs two " +
+                "(cell locations and structure probabilities). The model file is likely truncated or is not " +
+                "a SLANet/SLANeXt table-structure export.");
+        }
+
+        return (names[0], names[1]);
     }
 
     /// <summary>

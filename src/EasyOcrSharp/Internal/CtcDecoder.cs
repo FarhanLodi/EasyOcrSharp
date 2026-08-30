@@ -57,7 +57,19 @@ internal static class CtcDecoder
             _ => GreedyDecodeWithAlignment(logits, steps, classes, characters, allowed),
         };
 
-    private static bool IsSelectable(int cc, bool[]? allowed) => cc == 0 || allowed is null || allowed[cc - 1];
+    /// <summary>
+    /// Whether class <paramref name="cc"/> may be emitted. Class 0 is the CTC blank and is always selectable.
+    /// <para>
+    /// The bounds check is load-bearing: <paramref name="allowed"/> is sized from the vocabulary, while
+    /// <c>cc</c> ranges over the model's output class count. A custom recognizer whose dictionary is shorter
+    /// than its network's class count would otherwise read past the end and throw
+    /// <see cref="IndexOutOfRangeException"/> from inside the recognizer's <c>Parallel.For</c>, failing the
+    /// whole page. Classes with no vocabulary entry are simply not selectable — the same outcome as the
+    /// unfiltered path, which already ignores them.
+    /// </para>
+    /// </summary>
+    private static bool IsSelectable(int cc, bool[]? allowed)
+        => cc == 0 || allowed is null || (cc - 1 < allowed.Length && allowed[cc - 1]);
 
     private static bool IsSeparator(string characters, int charIdx)
         => charIdx >= 0 && charIdx < characters.Length && characters[charIdx] == '\0';

@@ -12,7 +12,7 @@ namespace EasyOcrSharp.Internal;
 /// </summary>
 internal static class ParagraphGrouper
 {
-    public static List<OcrLine> Merge(IReadOnlyList<OcrLine> lines, GroupingOptions? grouping = null)
+    public static List<OcrLine> Merge(IReadOnlyList<OcrLine> lines, GroupingOptions? grouping = null, bool rightToLeft = false)
     {
         grouping ??= GroupingOptions.Default;
         double xThreshold = grouping.ParagraphXThreshold;
@@ -53,7 +53,12 @@ internal static class ParagraphGrouper
                 continue;
             }
 
-            var ordered = para.OrderBy(l => l.BoundingBox.MinY).ThenBy(l => l.BoundingBox.MinX).ToList();
+            // Within a paragraph the rows run top-to-bottom either way; the tie-break decides which
+            // fragment of a shared row leads, and on a right-to-left page that is the right-most one.
+            var byRow = para.OrderBy(l => l.BoundingBox.MinY);
+            var ordered = (rightToLeft
+                ? byRow.ThenByDescending(l => l.BoundingBox.MaxX)
+                : byRow.ThenBy(l => l.BoundingBox.MinX)).ToList();
             var text = string.Join("\n", ordered.Select(l => l.Text));
             double minX = ordered.Min(l => l.BoundingBox.MinX);
             double minY = ordered.Min(l => l.BoundingBox.MinY);

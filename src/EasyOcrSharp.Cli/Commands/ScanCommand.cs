@@ -117,6 +117,14 @@ internal static class ScanCommand
         var pdfs = inputs.Where(InputResolver.IsPdf).ToArray();
         bool multipleExpected = inputs.Count > 1 || pdfs.Length > 0;
 
+        // Validate every option value once, up front, whatever the inputs turn out to be. --dpi is parsed and
+        // range-checked only inside BuildPdfOptions, which used to be called exclusively from the per-PDF
+        // loop -- so `scan page.png --dpi 99999` silently discarded the bad value and ran normally. The
+        // parser rejects an unknown option *name* loudly for exactly this reason ("a typo'd option in a batch
+        // job should fail loudly"); an out-of-range *value* deserves the same. The result is discarded; each
+        // PDF rebuilds it with its own progress reporter.
+        _ = OptionBinder.BuildPdfOptions(args);
+
         var writer = new ScanOutputWriter(format, args.Value(Output.Name), multipleExpected, console);
         var order = BuildOrderIndex(inputs);
 
@@ -195,6 +203,13 @@ internal static class ScanCommand
             }
             catch (OperationCanceledException)
             {
+                throw;
+            }
+            catch (CliUsageException)
+            {
+                // A bad option value is a usage error, not a per-input processing failure. Swallowing it
+                // here returned exit code 1, while `scan --help` documents 2 for "the command line was
+                // wrong" -- so a CI gate branching on 2 vs 1 mis-classified a typo as transient and retried.
                 throw;
             }
             catch (Exception ex)

@@ -83,6 +83,14 @@ internal static class PdfRasterizer
                 throw new PdfProcessingException("The PDF page count could not be read; the document may be corrupt.", ex);
             }
 
+            // PDFium opens documents whose page tree is empty and reports 0. Letting that through produced a
+            // "successful" searchable PDF containing << /Type /Pages /Count 0 /Kids [] >>, which Acrobat
+            // rejects as damaged -- a silent bad artifact instead of a clear error.
+            if (count <= 0)
+            {
+                throw new PdfProcessingException("The PDF contains no pages.");
+            }
+
             if (maxPages > 0 && count > maxPages)
             {
                 throw new PdfProcessingException(
@@ -118,8 +126,12 @@ internal static class PdfRasterizer
                                 "Lower the DPI or raise the limit.");
                         }
 
-                        // PDFium emits BGRA with a transparent background; flatten onto white so OCR sees a clean page.
-                        bgra = pageReader.GetImage(new NaiveTransparencyRemover());
+                        // PDFium emits BGRA with a transparent background. Take the raw buffer and let
+                        // ConvertToRgb24 composite it over white: NaiveTransparencyRemover only rewrites
+                        // FULLY transparent pixels, so partial alpha (anti-aliased glyph edges, watermarks,
+                        // transparency groups) would survive it un-blended and then be rendered at full
+                        // strength when the alpha channel was dropped.
+                        bgra = pageReader.GetImage();
                     }
 
                     image = ConvertToRgb24(bgra, width, height);
@@ -145,9 +157,58 @@ internal static class PdfRasterizer
         }
     }
 
+    /// <summary>
+    /// Converts PDFium's BGRA buffer to RGB, compositing over white.
+    /// <para>
+    /// <c>CloneAs&lt;Rgb24&gt;</c> alone <i>drops</i> the alpha channel instead of blending it, and
+    /// <c>NaiveTransparencyRemover</c> only rewrites FULLY transparent pixels. Every partially transparent
+    /// pixel therefore kept its un-blended source colour at full strength: anti-aliased glyph edges on a
+    /// born-digital page hard-thresholded to solid black, and — the visible failure — a 20%-opacity watermark
+    /// or transparency-group overlay rasterized at 100%, so OCR read the watermark over the real content and
+    /// the searchable PDF embedded that page image.
+    /// </para>
+    /// <para>
+    /// Composited in place over the caller's buffer, so no full-size Bgra32 image is materialised first.
+    /// </para>
+    /// </summary>
     private static Image<Rgb24> ConvertToRgb24(byte[] bgra, int width, int height)
     {
-        using var bgraImage = Image.LoadPixelData<Bgra32>(bgra, width, height);
-        return bgraImage.CloneAs<Rgb24>();
+        long pixelCount = (long)width * height;
+        if (pixelCount > Array.MaxLength)
+        {
+            throw new PdfProcessingException(
+                $"Page renders to {width}x{height} ({pixelCount:N0} px), which exceeds the maximum addressable " +
+                "pixel buffer. Lower PdfOcrOptions.Dpi.");
+        }
+
+        // PDFium hands back 4 bytes per pixel; a short buffer means the render did not produce the page we
+        // were told it would, and reading past it would be an out-of-range crash deep in the loop.
+        if (bgra.Length < pixelCount * 4)
+        {
+            throw new PdfProcessingException(
+                $"The renderer returned {bgra.Length:N0} bytes for a {width}x{height} page, which needs " +
+                $"{pixelCount * 4:N0}. The document may be corrupt.");
+        }
+
+        var rgb = new Rgb24[(int)pixelCount];
+
+        for (int i = 0, p = 0; i < rgb.Length; i++, p += 4)
+        {
+            byte b = bgra[p], g = bgra[p + 1], r = bgra[p + 2], a = bgra[p + 3];
+            if (a == 255)
+            {
+                rgb[i] = new Rgb24(r, g, b);
+                continue;
+            }
+
+            // out = src*a + 255*(1-a), rounded. a == 0 yields white, which is what OCR wants to see.
+            int inv = 255 - a;
+            rgb[i] = new Rgb24(
+                (byte)((r * a + 255 * inv + 127) / 255),
+                (byte)((g * a + 255 * inv + 127) / 255),
+                (byte)((b * a + 255 * inv + 127) / 255));
+        }
+
+        return Image.LoadPixelData<Rgb24>(rgb, width, height);
     }
 }

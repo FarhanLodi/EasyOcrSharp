@@ -147,7 +147,14 @@ internal static class MinAreaRect
             var b = corners[(i + 1) % 4];
             signedArea += (b.X - a.X) * (b.Y + a.Y);
         }
-        bool clockwise = signedArea > 0; // image coords: y grows downward, so positive shoelace = clockwise
+        // Σ(x₂−x₁)(y₂+y₁) is positive for a clockwise polygon in a y-UP frame. These are image coordinates,
+        // where y grows downward, so a visually clockwise quad sums NEGATIVE — e.g. TL(0,0) TR(10,0) BR(10,5)
+        // BL(0,5) gives −100. Testing `> 0` therefore never matched, and the walk below reversed every
+        // polygon: CRAFT lines came out counter-clockwise (TL, BL, BR, TR), contradicting this type's own
+        // contract, OcrWord.BoundingPolygon, and the clockwise polygons the structure engine produces —
+        // within a single OcrResult. Consumers taking polygon[0]→polygon[1] as the text-direction vector
+        // (the EasyOCR/PaddleOCR convention) got the descender direction instead.
+        bool clockwise = signedArea < 0;
 
         var ordered = new OcrPoint[4];
         for (int i = 0; i < 4; i++)

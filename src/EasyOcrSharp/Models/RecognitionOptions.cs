@@ -66,6 +66,20 @@ public sealed record RecognitionOptions
     public TextGrouping Grouping { get; init; } = TextGrouping.Line;
 
     /// <summary>
+    /// The direction in which detected regions are assembled into a reading order. Defaults to
+    /// <see cref="TextReadingDirection.Auto"/>, which reads right-to-left when every requested language is
+    /// written in a right-to-left script (<c>ar</c>, <c>fa</c>, <c>ur</c>, <c>ug</c>, <c>he</c> …) and
+    /// left-to-right otherwise.
+    /// </summary>
+    /// <remarks>
+    /// Set this explicitly for a page whose flow the language codes do not describe — a bilingual
+    /// Arabic/English form that reads right-to-left, or a right-to-left language passed through a custom
+    /// recognizer under a code this library does not know. See <see cref="TextReadingDirection"/> for the
+    /// boundary: this orders <i>boxes</i>, and is not the Unicode Bidirectional Algorithm.
+    /// </remarks>
+    public TextReadingDirection ReadingDirection { get; init; } = TextReadingDirection.Auto;
+
+    /// <summary>
     /// Maximum number of text regions recognized concurrently. Defaults to the processor count.
     /// Set to 1 to force sequential recognition.
     /// </summary>

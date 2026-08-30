@@ -1,13 +1,14 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using EasyOcrSharp.Models;
 
 namespace EasyOcrSharp.Structure;
 
 /// <summary>
 /// The result of a full document-structure analysis: the document's <see cref="Blocks"/> in reading order
 /// together with the source image dimensions (<see cref="SourceWidth"/> / <see cref="SourceHeight"/>) the
-/// block bounds are expressed in. Provides two exporters, <see cref="ToMarkdown"/> and <see cref="ToJson"/>,
+/// block bounds are expressed in. Provides two exporters, <see cref="ToMarkdown"/> and <see cref="ToJson()"/>,
 /// for serializing the analyzed layout.
 /// </summary>
 public sealed class StructureResult
@@ -116,18 +117,37 @@ public sealed class StructureResult
     /// to a JSON string via the source-generated <see cref="StructureJsonContext"/>, keeping the exporter
     /// trim / Native-AOT safe. The block list is projected onto a flat DTO that captures the renderable
     /// fields (the underlying OCR lines and polygons are intentionally omitted to keep the output compact).
+    /// Recognized text is written verbatim in every script — Cyrillic, CJK, Arabic and the rest stay
+    /// readable rather than turning into <c>\uXXXX</c> escapes (see <see cref="EasyOcrJson.Encoder"/>).
     /// </summary>
     /// <returns>The JSON representation of the document.</returns>
     public string ToJson()
+        => JsonSerializer.Serialize(ToDto(), StructureJsonContext.Unescaped.StructureResultDto);
+
+    /// <summary>
+    /// Serializes the analyzed document with caller-supplied <paramref name="options"/> — indentation,
+    /// naming policy, a different <see cref="System.Text.Json.JsonSerializerOptions.Encoder"/>, and so on.
+    /// The options are copied onto a source-generated context, so this overload is as trim / Native-AOT
+    /// safe as <see cref="ToJson()"/>; only the formatting differs.
+    /// </summary>
+    /// <param name="options">The serializer options to apply. The instance is copied, not retained.</param>
+    /// <returns>The JSON representation of the document.</returns>
+    public string ToJson(JsonSerializerOptions options)
     {
-        var dto = new StructureResultDto
-        {
-            SourceWidth = SourceWidth,
-            SourceHeight = SourceHeight,
-            Blocks = OrderedBlocks().Select(StructureBlockDto.From).ToArray(),
-        };
-        return JsonSerializer.Serialize(dto, StructureJsonContext.Default.StructureResultDto);
+        ArgumentNullException.ThrowIfNull(options);
+        var context = new StructureJsonContext(EasyOcrJson.ForContext(options));
+        return JsonSerializer.Serialize(ToDto(), context.StructureResultDto);
     }
+
+    /// <summary>
+    /// Projects the document onto its flat, serialization-friendly DTO, blocks in reading order.
+    /// </summary>
+    private StructureResultDto ToDto() => new()
+    {
+        SourceWidth = SourceWidth,
+        SourceHeight = SourceHeight,
+        Blocks = OrderedBlocks().Select(StructureBlockDto.From).ToArray(),
+    };
 
     /// <summary>
     /// Returns the blocks sorted by reading-order <see cref="StructureBlock.Order"/> (stable).

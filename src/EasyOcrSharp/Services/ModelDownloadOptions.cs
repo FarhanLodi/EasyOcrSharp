@@ -21,6 +21,19 @@ public readonly record struct ModelDownloadProgress(string FileName, long BytesD
 public sealed class ModelDownloadOptions
 {
     /// <summary>
+    /// Hard ceiling, in bytes, on a single model download. Default 512&#160;MB — comfortably above the
+    /// largest asset this library publishes (PP-DocLayoutV3, ~124&#160;MB). Set to 0 to disable the check.
+    /// </summary>
+    /// <remarks>
+    /// The checksum is verified only after the bytes are on disk, so without a ceiling a
+    /// <see cref="BaseUrlOverride"/> (or <c>EASYOCRSHARP_MODEL_BASE_URL</c>) pointing at a hostile or merely
+    /// misconfigured mirror can stream unbounded data into the cache directory and fill the disk long before
+    /// verification ever runs. <see cref="HttpClient.Timeout"/> bounds the wall clock, not the volume — and a
+    /// caller-supplied <see cref="HttpClientFactory"/> can remove even that.
+    /// </remarks>
+    public long MaxDownloadBytes { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>
     /// Number of additional attempts after a transient network/IO failure (exponential backoff).
     /// Default 3. Set to 0 to disable retries.
     /// </summary>

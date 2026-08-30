@@ -403,7 +403,12 @@ internal static class RedactionEngine
 
                 if (!string.IsNullOrEmpty(sanitized))
                 {
-                    if (text.Length > 0) text.AppendLine();
+                    // LF, not AppendLine's Environment.NewLine. ParagraphGrouper joins merged
+                    // lines with "\n" and the multi-frame/PDF aggregates join with
+                    // "\n\n", so on Windows a single FullText mixed both separators.
+                    // It also inflated CharacterErrorRate by one insertion per line break when
+                    // compared against LF ground truth.
+                    if (text.Length > 0) text.Append('\n');
                     text.Append(sanitized);
                 }
 

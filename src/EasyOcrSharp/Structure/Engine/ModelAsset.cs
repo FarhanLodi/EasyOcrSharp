@@ -9,8 +9,9 @@ namespace EasyOcrSharp.Structure.Engine;
 /// <param name="Url">The absolute HTTPS URL the asset is fetched from when not cached.</param>
 /// <param name="Sha256">
 /// Expected upper-case-hex SHA256, or <c>null</c> when no checksum is published yet. A <c>null</c>
-/// checksum makes <see cref="ModelDownloadManager"/> take its fail-open path: the asset is only accepted
+/// checksum makes <see cref="ModelDownloadManager"/> take its fail-closed path: the asset is only accepted
 /// when <see cref="Services.ModelDownloadOptions.AllowUnverifiedModels"/> is set, otherwise the download
-/// is rejected. See <see cref="StructureModelRegistry.Checksums"/> for why these are currently empty.
+/// is rejected. <see cref="StructureModelRegistry.Checksums"/> is fully populated, so every structure
+/// model shipped by this library is verified on download.
 /// </param>
 internal sealed record ModelAsset(string FileName, string Url, string? Sha256);

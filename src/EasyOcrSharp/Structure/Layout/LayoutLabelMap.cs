@@ -58,7 +58,22 @@ internal static class LayoutLabelMap
     /// </summary>
     public static IReadOnlyDictionary<int, StructureBlockType> Load(string labelPath)
     {
-        var map = new Dictionary<int, StructureBlockType>();
+        var names = LoadNames(labelPath);
+        var map = new Dictionary<int, StructureBlockType>(names.Count);
+        foreach (var kvp in names) map[kvp.Key] = MapName(kvp.Value);
+        return map;
+    }
+
+    /// <summary>
+    /// Loads the same sidecar as <see cref="Load"/> but keeps the <b>raw</b> label names (normalized by
+    /// <see cref="Normalize"/>), class-id → name. The post-processing filters need the raw names because
+    /// <see cref="MapName"/> deliberately collapses distinctions PaddleX's own filters depend on —
+    /// <c>reference</c> vs <c>reference_content</c> and <c>inline_formula</c> vs <c>display_formula</c> both
+    /// map to a single <see cref="StructureBlockType"/>. See <see cref="LayoutPostProcessor"/>.
+    /// </summary>
+    public static IReadOnlyDictionary<int, string> LoadNames(string labelPath)
+    {
+        var map = new Dictionary<int, string>();
         if (string.IsNullOrEmpty(labelPath) || !File.Exists(labelPath)) return map;
 
         // A PaddleX inference.yml mixes the label_list with unrelated keys (paths, mean/std, etc.). If a
@@ -112,7 +127,7 @@ internal static class LayoutLabelMap
             name = name.Trim('"', '\'', ' ');
             if (name.Length == 0) continue;
 
-            map[id] = MapName(name);
+            map[id] = Normalize(name);
             autoId = id + 1;
         }
 
@@ -132,13 +147,31 @@ internal static class LayoutLabelMap
     }
 
     /// <summary>
+    /// Builds a class-id → raw-label-name map from an ordered list of label names (id = list index),
+    /// normalized by <see cref="Normalize"/>. The name-keeping counterpart of <see cref="FromNames"/>.
+    /// </summary>
+    public static IReadOnlyDictionary<int, string> NamesFromList(IReadOnlyList<string> names)
+    {
+        var map = new Dictionary<int, string>(names.Count);
+        for (int i = 0; i < names.Count; i++) map[i] = Normalize(names[i]);
+        return map;
+    }
+
+    /// <summary>
+    /// Normalizes a label name for comparison: lower-cased, with <c>-</c> and spaces folded to <c>_</c>
+    /// (so <c>Inline-Formula</c>, <c>inline formula</c> and <c>inline_formula</c> all compare equal).
+    /// </summary>
+    public static string Normalize(string name) =>
+        name.Replace('-', '_').Replace(' ', '_').ToLowerInvariant();
+
+    /// <summary>
     /// Maps a (case/format-insensitive) layout label name onto a <see cref="StructureBlockType"/>. Covers
     /// the PP-DocLayout / PP-DocLayout_plus label vocabularies; unknown names map to
     /// <see cref="StructureBlockType.Unknown"/>.
     /// </summary>
     public static StructureBlockType MapName(string name)
     {
-        var key = name.Replace('-', '_').Replace(' ', '_').ToLowerInvariant();
+        var key = Normalize(name);
         return key switch
         {
             "text" or "plain_text" or "content" or "vertical_text" => StructureBlockType.Text,

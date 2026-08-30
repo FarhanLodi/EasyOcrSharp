@@ -43,7 +43,8 @@ public class PostOcrCorrectionTests
 
     private static OcrResult Result(params OcrLine[] lines) => new()
     {
-        FullText = string.Join(Environment.NewLine, lines.Select(l => l.Text).Where(t => t.Length > 0)),
+        // LF, matching the library: FullText is documented as LF-separated on every platform.
+        FullText = string.Join('\n', lines.Select(l => l.Text).Where(t => t.Length > 0)),
         Lines = lines,
         Languages = ["en"],
         SourceWidth = 100,
@@ -755,7 +756,7 @@ public class PostOcrCorrectionTests
 
         var corrected = result.Correct(Lexicon("invoice", "total"));
 
-        Assert.Equal("invoice" + Environment.NewLine + "total", corrected.FullText);
+        Assert.Equal("invoice\ntotal", corrected.FullText);
     }
 
     [Fact]
@@ -1303,6 +1304,6 @@ public class PostOcrCorrectionTests
         Assert.Equal("2026-03-12", corrected.Lines[0].Text);
         Assert.Same(lines[1], corrected.Lines[1]);
         Assert.Equal("12/03/2026", result.Lines[0].Text);
-        Assert.Equal("2026-03-12" + Environment.NewLine + "total", corrected.FullText);
+        Assert.Equal("2026-03-12\ntotal", corrected.FullText);
     }
 }

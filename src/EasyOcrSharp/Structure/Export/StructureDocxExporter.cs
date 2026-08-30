@@ -227,6 +227,7 @@ internal static class StructureDocxExporter
     // original placeholder/text behavior is used and <paramref name="media"/> stays empty.
     private static string DocumentXml(StructureResult result, Image<Rgb24>? sourceImage, List<MediaPart> media)
     {
+        sourceImage = ImageMatchingResult(result, sourceImage);
         var sb = new StringBuilder();
         sb.Append("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>");
         // Declare every namespace the body may use at the root so inline-image and OMML fragments stay terse.
@@ -365,6 +366,27 @@ internal static class StructureDocxExporter
     }
 
     // ---- inline-image embedding ------------------------------------------------------------------------
+
+    /// <summary>
+    /// Returns <paramref name="sourceImage"/> only when its dimensions match the image the result was
+    /// actually produced from, and <c>null</c> otherwise.
+    /// <para>
+    /// Block bounds are expressed in the analyzed page's coordinate space. With
+    /// <c>DocumentOrientation</c> or <c>DocumentUnwarp</c> enabled, that page is the rotated/dewarped copy —
+    /// which the engine disposes — while the caller still holds the original. Cropping the original with
+    /// those bounds embedded an unrelated part of the page as the figure, silently and with no error. A
+    /// dimension check catches the rotation and unwarp cases; on a mismatch the exporters fall back to the
+    /// textual placeholder, which is honest rather than wrong.
+    /// </para>
+    /// </summary>
+    private static Image<Rgb24>? ImageMatchingResult(StructureResult result, Image<Rgb24>? sourceImage)
+    {
+        if (sourceImage is null) return null;
+        if (result.SourceWidth <= 0 || result.SourceHeight <= 0) return sourceImage;
+        return sourceImage.Width == result.SourceWidth && sourceImage.Height == result.SourceHeight
+            ? sourceImage
+            : null;
+    }
 
     /// <summary>
     /// Crops <paramref name="block"/>'s <c>Bounds</c> (source-image pixels) out of <paramref name="image"/>,
@@ -575,14 +597,84 @@ internal static class StructureDocxExporter
         => result.Blocks.OrderBy(b => b.Order);
 
     /// <summary>
-    /// Escapes XML's five predefined entities so arbitrary OCR text is safe in element content.
+    /// Escapes XML's five predefined entities and drops the characters XML&#160;1.0 forbids outright, so
+    /// arbitrary OCR text is safe in element content.
+    /// <para>
+    /// The strip pass is not cosmetic: C0 controls other than tab/LF/CR, DEL, and unpaired surrogates have no
+    /// escape in XML&#160;1.0, and writing one produces a .docx/.xlsx that Word and Excel refuse to open
+    /// ("unreadable content"). OCR text can carry them — a caller-built <see cref="StructureResult"/>, or
+    /// table HTML with a numeric entity such as <c>&amp;#1;</c> that HTML-decoding turns into a real control
+    /// character.
+    /// </para>
     /// </summary>
-    internal static string Xml(string s) => s
+    internal static string Xml(string s) => SanitizeXmlText(s)
         .Replace("&", "&amp;")
         .Replace("<", "&lt;")
         .Replace(">", "&gt;")
         .Replace("\"", "&quot;")
         .Replace("'", "&apos;");
+
+    /// <summary>
+    /// Removes every character XML&#160;1.0 cannot represent: C0 controls except tab, LF and CR;
+    /// DEL and the C1 range; the non-characters U+FFFE/U+FFFF; and unpaired surrogates (a lone
+    /// surrogate is not a valid code point and cannot be UTF-8 encoded). Well-formed surrogate pairs — emoji,
+    /// astral CJK — are preserved intact.
+    /// </summary>
+    internal static string SanitizeXmlText(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return s;
+
+        bool clean = true;
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (!IsAllowedXmlChar(s, i, out _)) { clean = false; break; }
+        }
+        if (clean) return s;
+
+        var sb = new StringBuilder(s.Length);
+        for (int i = 0; i < s.Length; i++)
+        {
+            if (!IsAllowedXmlChar(s, i, out bool isPair)) continue;
+            if (isPair)
+            {
+                sb.Append(s[i]).Append(s[i + 1]);
+                i++;
+            }
+            else
+            {
+                sb.Append(s[i]);
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Whether the character at <paramref name="i"/> is legal in XML&#160;1.0 content. Sets
+    /// <paramref name="isSurrogatePair"/> when it is the high half of a well-formed pair, so the caller can
+    /// copy both halves and skip the low one.
+    /// </summary>
+    private static bool IsAllowedXmlChar(string s, int i, out bool isSurrogatePair)
+    {
+        isSurrogatePair = false;
+        char c = s[i];
+
+        if (char.IsHighSurrogate(c))
+        {
+            if (i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+            {
+                isSurrogatePair = true;
+                return true;
+            }
+            return false;   // unpaired high surrogate
+        }
+        if (char.IsLowSurrogate(c)) return false;   // unpaired low surrogate
+
+        if (c is '\t' or '\n' or '\r') return true;
+        if (c < 0x20) return false;                  // remaining C0 controls
+        if (c is >= (char)0x7F and <= (char)0x9F) return false;   // DEL + C1 controls
+        if (c is '\uFFFE' or '\uFFFF') return false;             // non-characters
+        return true;
+    }
 
     /// <summary>
     /// Adds a ZIP entry with the given (forward-slash, no leading slash) name and UTF-8 (no BOM) text.

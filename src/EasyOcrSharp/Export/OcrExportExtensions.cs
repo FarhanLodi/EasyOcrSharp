@@ -3,6 +3,8 @@ using System.Text;
 using System.Text.Json;
 using EasyOcrSharp.Models;
 
+using EasyOcrSharp.Structure.Export;
+
 namespace EasyOcrSharp.Export;
 
 /// <summary>
@@ -16,14 +18,35 @@ public static class OcrExportExtensions
     private static readonly string Producer =
         "EasyOcrSharp " + (typeof(OcrExportExtensions).Assembly.GetName().Version?.ToString(3) ?? "");
 
-    private static readonly EasyOcrJsonContext IndentedJson = new(new JsonSerializerOptions { WriteIndented = true });
+    private static readonly EasyOcrJsonContext CompactJson = new(EasyOcrJson.Options(indented: false));
+    private static readonly EasyOcrJsonContext IndentedJson = new(EasyOcrJson.Options(indented: true));
 
-    /// <summary>Serializes the result to JSON using the source-generated (AOT-safe) context.</summary>
+    /// <summary>
+    /// Serializes the result to JSON using the source-generated (AOT-safe) context. Non-ASCII text
+    /// (Cyrillic, CJK, Arabic, …) is written verbatim rather than as <c>\uXXXX</c> escapes — see
+    /// <see cref="EasyOcrJson.Encoder"/>.
+    /// </summary>
     public static string ToJson(this OcrResult result, bool indented = false)
     {
         ArgumentNullException.ThrowIfNull(result);
-        return JsonSerializer.Serialize(result,
-            indented ? IndentedJson.OcrResult : EasyOcrJsonContext.Default.OcrResult);
+        return JsonSerializer.Serialize(result, (indented ? IndentedJson : CompactJson).OcrResult);
+    }
+
+    /// <summary>
+    /// Serializes the result with caller-supplied <paramref name="options"/> (naming policy, indentation,
+    /// <see cref="System.Text.Json.JsonSerializerOptions.Encoder"/>, …). Serialization stays
+    /// reflection-free: the options are copied onto an <see cref="EasyOcrJsonContext"/>, so the
+    /// source-generated metadata is still what resolves the types.
+    /// </summary>
+    /// <remarks>
+    /// A context is built per call. When serializing in a loop, cache one instead:
+    /// <c>var ctx = new EasyOcrJsonContext(options); JsonSerializer.Serialize(result, ctx.OcrResult);</c>.
+    /// </remarks>
+    public static string ToJson(this OcrResult result, JsonSerializerOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentNullException.ThrowIfNull(options);
+        return JsonSerializer.Serialize(result, new EasyOcrJsonContext(EasyOcrJson.ForContext(options)).OcrResult);
     }
 
     /// <summary>
@@ -331,7 +354,12 @@ public static class OcrExportExtensions
 
     private static int Conf100(double confidence) => (int)Math.Round(Math.Clamp(confidence, 0, 1) * 100);
 
-    private static string Xml(string s) => s
+    /// <summary>
+    /// Escapes the five XML entities, after dropping the characters XML 1.0 forbids outright. hOCR and ALTO
+    /// are consumed by XML parsers, which reject a raw C0 control outright -- and no escape sequence for one
+    /// exists, so it has to be removed rather than encoded.
+    /// </summary>
+    private static string Xml(string s) => StructureDocxExporter.SanitizeXmlText(s)
         .Replace("&", "&amp;")
         .Replace("<", "&lt;")
         .Replace(">", "&gt;")

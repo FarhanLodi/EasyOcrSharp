@@ -9,6 +9,14 @@ namespace EasyOcrSharp.Structure.Engine.Services;
 internal sealed class ModelDownloadOptions
 {
     /// <summary>
+    /// Hard ceiling, in bytes, on a single model download. Default 512&#160;MB — comfortably above the
+    /// largest asset this library publishes. Set to 0 to disable the check. The checksum is verified only
+    /// after the bytes are on disk, so without a ceiling a misconfigured or hostile mirror can fill the
+    /// cache disk before verification ever runs.
+    /// </summary>
+    public long MaxDownloadBytes { get; set; } = 512L * 1024 * 1024;
+
+    /// <summary>
     /// Number of additional attempts after a transient network/IO failure (exponential backoff).
     /// Default 3. Set to 0 to disable retries.
     /// </summary>

@@ -63,10 +63,21 @@ internal sealed class ScanOutputWriter
         }
 
         var full = Path.GetFullPath(output);
+        // Decide from the DESTINATION, not from how many documents happen to be coming. `multipleExpected`
+        // alone used to force directory mode, and it is set for any PDF input regardless of page count -- so
+        // this command's own documented example, `scan report.pdf --format hocr -o report.hocr.html`, created
+        // a *directory* named report.hocr.html holding report.p001.hocr.html. Any script doing
+        // `scan in.pdf -o out.json && jq . out.json` broke, and because the directory is created in this
+        // constructor (before OCR runs) it was left behind even when the run failed.
+        //
+        // An explicit filename is now honoured and Flush() concatenates in input order -- which it already
+        // did, including building the single JSON array that directory mode never produced. Multi-document
+        // runs still get a directory when the destination looks like one: it exists, it ends with a
+        // separator, or it carries no extension (`-o results`).
         bool looksLikeDirectory =
             Directory.Exists(full)
             || output.EndsWith(Path.DirectorySeparatorChar) || output.EndsWith(Path.AltDirectorySeparatorChar)
-            || multipleExpected;
+            || (multipleExpected && !Path.HasExtension(full));
 
         if (looksLikeDirectory)
         {
@@ -169,13 +180,14 @@ internal sealed class ScanOutputWriter
     {
         if (_format is OutputFormat.Json)
         {
-            return JsonSerializer.Serialize(report, CliJsonContext.Default.CliScanReport);
+            return JsonSerializer.Serialize(report, CliJsonContext.Unescaped.CliScanReport);
         }
 
         if (report.Result is not { } result)
         {
-            // Non-JSON formats have nowhere to put an error, so it goes to stderr and the document is empty.
-            _console.Error($"{report.Source}: {report.Error}");
+            // Non-JSON formats have nowhere to put an error, so the document is empty. Reporting it is the
+            // caller's job -- ScanCommand already writes the message and owns the failure counter -- and
+            // doing it here too printed every failure to stderr twice.
             return string.Empty;
         }
 

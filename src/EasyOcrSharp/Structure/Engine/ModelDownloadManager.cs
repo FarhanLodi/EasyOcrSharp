@@ -96,9 +96,14 @@ internal static class ModelDownloadManager
         {
             try
             {
+                // CacheLock is a static, in-process semaphore, so it does not serialize a second process
+                // (another worker behind a load balancer, or the CLI alongside a web app) sharing the same
+                // cache directory. If that process already finished, the file is here and valid -- take it.
+                if (File.Exists(finalPath)) return;
+
                 await DownloadOnceAsync(url, asset, tempPath, options, logger, ct).ConfigureAwait(false);
                 await VerifyChecksumAsync(asset, tempPath, options, ct).ConfigureAwait(false);
-                File.Move(tempPath, finalPath, overwrite: false);
+                PublishVerified(tempPath, finalPath);
                 return;
             }
             catch (Exception ex) when (attempt < maxAttempts && IsTransient(ex) && !ct.IsCancellationRequested)
@@ -137,11 +142,24 @@ internal static class ModelDownloadManager
         response.EnsureSuccessStatusCode();
 
         long total = response.Content.Headers.ContentLength is { } len ? len + existing : -1L;
+
+        // Reject an over-large download from the declared size before opening the file, so an obviously
+        // wrong mirror costs nothing. The running total is checked again below, because Content-Length is
+        // advisory and may be absent or a lie.
+        long maxBytes = options.MaxDownloadBytes;
+        if (maxBytes > 0 && total > maxBytes)
+        {
+            throw new ModelDownloadException(
+                $"Model '{asset.FileName}' declares {total:N0} bytes, exceeding the limit of {maxBytes:N0} " +
+                "(ModelDownloadOptions.MaxDownloadBytes). Raise the limit if this is expected, or check " +
+                "ModelDownloadOptions.BaseUrlOverride / EASYOCRSHARP_MODEL_BASE_URL.");
+        }
         long downloaded = existing;
         logger?.LogInformation("Downloading model {Name} from {Url}{Resume}",
             asset.FileName, url, resuming ? $" (resuming at {existing:N0} bytes)" : string.Empty);
 
         var fileMode = resuming ? FileMode.Append : FileMode.Create;
+        long lastReportedBytes = -1;
         await using (var source = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
         await using (var file = new FileStream(tempPath, fileMode, FileAccess.Write, FileShare.None, 81920, useAsync: true))
         {
@@ -152,17 +170,31 @@ internal static class ModelDownloadManager
             {
                 await file.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
                 downloaded += read;
+
+                if (maxBytes > 0 && downloaded > maxBytes)
+                {
+                    throw new ModelDownloadException(
+                        $"Model '{asset.FileName}' exceeded the download limit of {maxBytes:N0} bytes " +
+                        "(ModelDownloadOptions.MaxDownloadBytes) mid-stream; the partial file was discarded.");
+                }
                 StructureDiagnostics.ModelDownloadBytes.Add(read);
 
                 if ((DateTime.UtcNow - lastReport).TotalSeconds >= 1)
                 {
                     Report(logger, options, asset.FileName, downloaded, total);
+                    lastReportedBytes = downloaded;
                     lastReport = DateTime.UtcNow;
                 }
             }
         }
 
-        Report(logger, options, asset.FileName, downloaded, total);
+        // Only report the tail when it differs from the last tick. The core ModelDownloadManager has always
+        // done this; without it a caller summing ModelDownloadProgress.BytesDownloaded double-counts the
+        // final chunk of every structure model, and a progress bar redraws its completed state twice.
+        if (downloaded != lastReportedBytes)
+        {
+            Report(logger, options, asset.FileName, downloaded, total);
+        }
     }
 
     private static async Task VerifyChecksumAsync(ModelAsset asset, string tempPath, ModelDownloadOptions options, CancellationToken ct)
@@ -184,6 +216,46 @@ internal static class ModelDownloadManager
             File.Delete(tempPath);
             throw new ModelChecksumException(
                 $"Downloaded model '{asset.FileName}' failed SHA256 verification. Expected {asset.Sha256}, got {actual}.");
+        }
+    }
+
+
+    /// <summary>
+    /// Moves a downloaded, checksum-verified file into its final cache slot, tolerating the benign race
+    /// where another process published the same model first.
+    /// <para>
+    /// <c>File.Move(overwrite: false)</c> throws <see cref="IOException"/> when the destination appeared
+    /// meanwhile. That used to be classified as a transient download failure, so the loser of the race
+    /// repeated the entire (tens of MB) download, failed the move again, and after the retry budget threw --
+    /// even though a valid, verified copy was sitting at the destination the whole time. Cold start behind a
+    /// load balancer reproduced it reliably.
+    /// </para>
+    /// </summary>
+    private static void PublishVerified(string tempPath, string finalPath)
+    {
+        try
+        {
+            File.Move(tempPath, finalPath, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(finalPath))
+        {
+            // Another process won. Its copy passed the same checksum, so ours is redundant.
+            TryDelete(tempPath);
+        }
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (IOException)
+        {
+            // A leftover .part is harmless -- the next download resumes from or overwrites it.
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 

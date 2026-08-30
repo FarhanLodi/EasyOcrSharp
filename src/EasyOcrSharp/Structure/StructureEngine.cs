@@ -47,12 +47,14 @@ internal sealed class StructureEngine : IAsyncDisposable
     private IDocPreprocessor? _preprocessor;
     private readonly SemaphoreSlim _preprocessorLock = new(1, 1);
 
-    private ILayoutDetector? _layoutDetector;
-    private LayoutModel _layoutDetectorModel;
+    // Keyed by model rather than a single slot: LayoutModel/TableRecognitionModel are per-call options, so a
+    // one-slot cache would have to dispose the cached instance whenever the requested model changed — freeing
+    // an ONNX session another thread is still running inference on. Every instance stays alive until
+    // DisposeAsync. There are at most 3 layout models and 2 table models, so the cache is bounded.
+    private readonly Dictionary<LayoutModel, ILayoutDetector> _layoutDetectors = [];
     private readonly SemaphoreSlim _layoutLock = new(1, 1);
 
-    private ITableRecognizer? _tableRecognizer;
-    private TableRecognitionModel _tableRecognizerModel;
+    private readonly Dictionary<TableRecognitionModel, ITableRecognizer> _tableRecognizers = [];
     private readonly SemaphoreSlim _tableLock = new(1, 1);
 
     private IFormulaRecognizer? _formulaRecognizer;
@@ -120,8 +122,15 @@ internal sealed class StructureEngine : IAsyncDisposable
 
             // ---- (2) layout detection ----------------------------------------------------------------
             var layoutDetector = await GetOrLoadLayoutDetectorAsync(options.LayoutModel, ct).ConfigureAwait(false);
-            var regions = layoutDetector.Detect(page);
-            _logger?.LogInformation("Layout detector found {Count} region(s).", regions.Count);
+            var detected = layoutDetector.Detect(page, options.LayoutScoreThreshold);
+
+            // The detectors emit a fixed top-k of candidates with no NMS, so the same area of the page is
+            // routinely proposed several times under different labels. Clean that up (and apply the optional
+            // NMS / unclip / merge passes) before anything is recognized.
+            var regions = Layout.LayoutPostProcessor.Apply(detected, options, page.Width, page.Height);
+            _logger?.LogInformation(
+                "Layout detector found {Count} region(s) ({Raw} before post-processing).",
+                regions.Count, detected.Count);
 
             if (regions.Count == 0)
             {
@@ -142,9 +151,17 @@ internal sealed class StructureEngine : IAsyncDisposable
             }
 
             // ---- (4) reading order -------------------------------------------------------------------
-            // XY-cut over the region bounds, then write the resulting rank into each block's Order. The
-            // returned blocks are also emitted in reading order so downstream exporters can rely on either.
-            var order = ReadingOrder.XyCutOrderer.Order(blocks.Select(b => b.Bounds).ToArray());
+            // Prefer the order the model predicted for itself when it supplied one for every region —
+            // LayoutPostProcessor has already sorted the regions (and therefore the blocks) by it, so the
+            // ranking is the identity. Otherwise fall back to XY-cut over the region bounds. Either way the
+            // rank is written into each block's Order and the blocks are emitted in that order, so downstream
+            // exporters can rely on either.
+            bool useModelOrder = options.ReadingOrder != LayoutReadingOrder.XyCut
+                && regions.Count == blocks.Count
+                && regions.All(r => r.OrderIndex is not null);
+            var order = useModelOrder
+                ? Enumerable.Range(0, blocks.Count).ToArray()
+                : ReadingOrder.XyCutOrderer.Order(blocks.Select(b => b.Bounds).ToArray(), options.RightToLeft);
             var ordered = new StructureBlock[blocks.Count];
             for (int rank = 0; rank < order.Count; rank++)
             {
@@ -349,13 +366,17 @@ internal sealed class StructureEngine : IAsyncDisposable
     /// </summary>
     public async Task<ILayoutDetector> GetOrLoadLayoutDetectorAsync(LayoutModel model, CancellationToken ct)
     {
-        if (_layoutDetector is not null && _layoutDetectorModel == model) return _layoutDetector;
+        lock (_layoutDetectors)
+        {
+            if (_layoutDetectors.TryGetValue(model, out var cached)) return cached;
+        }
         await _layoutLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_layoutDetector is not null && _layoutDetectorModel == model) return _layoutDetector;
-            _layoutDetector?.Dispose();
-            _layoutDetector = null;
+            lock (_layoutDetectors)
+            {
+                if (_layoutDetectors.TryGetValue(model, out var cached)) return cached;
+            }
 
             var (modelAsset, labelAsset) = model switch
             {
@@ -367,21 +388,25 @@ internal sealed class StructureEngine : IAsyncDisposable
 
             var labelPath = await EnsureAssetAsync(labelAsset, ct).ConfigureAwait(false);
             var classMap = LayoutLabelMap.Load(labelPath);
+            var labelNames = LayoutLabelMap.LoadNames(labelPath);
             if (classMap.Count == 0)
             {
                 // Sidecar missing/unparseable: fall back to the model's canonical label vocabulary so
                 // detections still map to real block types. The RT-DETR slot is served by PP-DocLayoutV3 (25-class).
-                classMap = LayoutLabelMap.FromNames(
-                    model == LayoutModel.RtDetrL ? LayoutLabelMap.DocLayoutV325 : LayoutLabelMap.DocLayout23);
+                var fallbackNames = model == LayoutModel.RtDetrL
+                    ? LayoutLabelMap.DocLayoutV325
+                    : LayoutLabelMap.DocLayout23;
+                classMap = LayoutLabelMap.FromNames(fallbackNames);
+                labelNames = LayoutLabelMap.NamesFromList(fallbackNames);
             }
             var session = await LoadSessionAsync(modelAsset, ct).ConfigureAwait(false);
 
-            _layoutDetector = model == LayoutModel.RtDetrL
-                ? new RtDetrLayoutDetector(session, classMap)
-                : new PicoDetLayoutDetector(session, classMap);
-            _layoutDetectorModel = model;
+            ILayoutDetector detector = model == LayoutModel.RtDetrL
+                ? new RtDetrLayoutDetector(session, classMap, labelNames)
+                : new PicoDetLayoutDetector(session, classMap, labelNames);
+            lock (_layoutDetectors) _layoutDetectors[model] = detector;
             _logger?.LogInformation("Layout detector loaded ({Model}).", model);
-            return _layoutDetector;
+            return detector;
         }
         finally
         {
@@ -398,19 +423,23 @@ internal sealed class StructureEngine : IAsyncDisposable
     /// </summary>
     public async Task<ITableRecognizer> GetOrLoadTableRecognizerAsync(TableRecognitionModel model, CancellationToken ct)
     {
-        if (_tableRecognizer is not null && _tableRecognizerModel == model) return _tableRecognizer;
+        lock (_tableRecognizers)
+        {
+            if (_tableRecognizers.TryGetValue(model, out var cached)) return cached;
+        }
         await _tableLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (_tableRecognizer is not null && _tableRecognizerModel == model) return _tableRecognizer;
-            _tableRecognizer?.Dispose();
-            _tableRecognizer = null;
+            lock (_tableRecognizers)
+            {
+                if (_tableRecognizers.TryGetValue(model, out var cached)) return cached;
+            }
 
-            _tableRecognizer = model == TableRecognitionModel.SlaNeXt
+            ITableRecognizer recognizer = model == TableRecognitionModel.SlaNeXt
                 ? await BuildSlaNeXtRouterAsync(ct).ConfigureAwait(false)
                 : await BuildSlanetPlusAsync(ct).ConfigureAwait(false);
-            _tableRecognizerModel = model;
-            return _tableRecognizer;
+            lock (_tableRecognizers) _tableRecognizers[model] = recognizer;
+            return recognizer;
         }
         finally
         {
@@ -582,8 +611,10 @@ internal sealed class StructureEngine : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _preprocessor?.Dispose();
-        _layoutDetector?.Dispose();
-        _tableRecognizer?.Dispose();
+        foreach (var detector in _layoutDetectors.Values) detector.Dispose();
+        _layoutDetectors.Clear();
+        foreach (var recognizer in _tableRecognizers.Values) recognizer.Dispose();
+        _tableRecognizers.Clear();
         _formulaRecognizer?.Dispose();
         _sealRecognizer?.Dispose();
         _sessionOptions.Dispose();

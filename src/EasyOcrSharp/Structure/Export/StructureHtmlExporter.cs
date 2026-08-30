@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using EasyOcrSharp.Structure.Engine.Models;
+using EasyOcrSharp.Structure.Export;
 using EasyImageSharp;
 using EasyImageSharp.Formats.Png;
 using EasyImageSharp.PixelFormats;
@@ -69,6 +70,7 @@ internal static class StructureHtmlExporter
 
     private static string RenderDocument(StructureResult result, Image<Rgb24>? sourceImage, string? title)
     {
+        sourceImage = ImageMatchingResult(result, sourceImage);
         var ordered = result.Blocks.OrderBy(b => b.Order).ToList();
         string docTitle = title ?? FirstTitle(ordered) ?? "Document";
 
@@ -186,7 +188,10 @@ internal static class StructureHtmlExporter
     /// </summary>
     private static string RenderTable(StructureBlock block)
     {
-        var html = block.TableHtml?.Trim();
+        // The recognizer emits PaddleOCR's <html><body><table>…</table></body></html> envelope, which is what
+        // StructureBlock.TableHtml carries. Only the <table> fragment may be spliced into the page we build,
+        // so unwrap first — validating the envelope as a table fragment would reject every real table.
+        var html = ExtractTableFragment(block.TableHtml);
         if (!string.IsNullOrEmpty(html) && IsWellFormedTable(html))
         {
             return html;
@@ -253,6 +258,27 @@ internal static class StructureHtmlExporter
     }
 
     /// <summary>
+    /// Returns <paramref name="sourceImage"/> only when its dimensions match the image the result was
+    /// actually produced from, and <c>null</c> otherwise.
+    /// <para>
+    /// Block bounds are expressed in the analyzed page's coordinate space. With
+    /// <c>DocumentOrientation</c> or <c>DocumentUnwarp</c> enabled, that page is the rotated/dewarped copy —
+    /// which the engine disposes — while the caller still holds the original. Cropping the original with
+    /// those bounds embedded an unrelated part of the page as the figure, silently and with no error. A
+    /// dimension check catches the rotation and unwarp cases; on a mismatch the exporters fall back to the
+    /// textual placeholder, which is honest rather than wrong.
+    /// </para>
+    /// </summary>
+    private static Image<Rgb24>? ImageMatchingResult(StructureResult result, Image<Rgb24>? sourceImage)
+    {
+        if (sourceImage is null) return null;
+        if (result.SourceWidth <= 0 || result.SourceHeight <= 0) return sourceImage;
+        return sourceImage.Width == result.SourceWidth && sourceImage.Height == result.SourceHeight
+            ? sourceImage
+            : null;
+    }
+
+    /// <summary>
     /// Crops <paramref name="block"/>'s <c>Bounds</c> (source-image pixels) out of <paramref name="image"/> and
     /// PNG-encodes the region. Bounds are clamped to the image; returns <c>null</c> when the clamped region is
     /// degenerate (width or height &lt; 2 px).
@@ -294,6 +320,24 @@ internal static class StructureHtmlExporter
     }
 
     /// <summary>
+    /// Returns the <c>&lt;table&gt;…&lt;/table&gt;</c> span of <paramref name="html"/>, trimmed, or <c>null</c>
+    /// when there is no such span. Accepts both a bare fragment and the recognizer's
+    /// <c>&lt;html&gt;&lt;body&gt;</c>-wrapped form.
+    /// </summary>
+    private static string? ExtractTableFragment(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return null;
+
+        int start = html.IndexOf("<table", StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return null;
+
+        int end = html.LastIndexOf("</table>", StringComparison.OrdinalIgnoreCase);
+        if (end < start) return null;
+
+        return html.Substring(start, end + "</table>".Length - start).Trim();
+    }
+
+    /// <summary>
     /// Cheap structural validation that <paramref name="html"/> is a single <c>&lt;table&gt;</c>-rooted
     /// fragment with balanced <c>&lt;table&gt;</c>/<c>&lt;/table&gt;</c> tags. We avoid a full HTML parse
     /// (no dependency) but reject markup that would obviously break the surrounding document.
@@ -330,7 +374,13 @@ internal static class StructureHtmlExporter
     /// <summary>
     /// HTML-escapes text content / attribute values (the five XML-significant characters).
     /// </summary>
-    private static string Esc(string s) => s
+    /// <summary>
+    /// Escapes the five XML entities, after dropping the characters XML 1.0 forbids outright. The exported
+    /// page declares XHTML and is routinely re-parsed by XML tooling, so an unescapable C0 control reaching
+    /// it (from a caller-built result, or a numeric entity in table HTML) makes the whole document
+    /// unparseable. Shares one sanitizer with the DOCX/XLSX writers so all three agree.
+    /// </summary>
+    private static string Esc(string s) => StructureDocxExporter.SanitizeXmlText(s)
         .Replace("&", "&amp;")
         .Replace("<", "&lt;")
         .Replace(">", "&gt;")

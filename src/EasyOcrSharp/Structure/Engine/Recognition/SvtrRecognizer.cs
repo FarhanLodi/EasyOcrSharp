@@ -1,3 +1,4 @@
+using System.Threading;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyOcrSharp.Structure.Engine.Models;
@@ -38,16 +39,17 @@ internal sealed class SvtrRecognizer : ITextRecognizer
     // Built lazily on the first decode, once the model's actual output class count is known, so the vocab
     // length matches the network exactly (community dicts disagree on whether the blank/space are included).
     private IReadOnlyList<string>? _vocab;
+    /// <summary>
+    /// Upper bound on a crop's resized width, matching <c>CrnnRecognizer.MaxWidth</c>. Without it the
+    /// tensor and the model's per-timestep output grow without limit in the source aspect ratio.
+    /// </summary>
+    private const int MaxRecWidth = 4096;
+
     private readonly int _imageHeight;
     private readonly string _inputName;
     private readonly string _outputName;
     private readonly int _batchSize;
 
-    // The most recently requested character filter. The recognizer is shared/cached across calls, while
-    // Allowlist/Blocklist are per-call options, so the engine sets this immediately before invoking
-    // Recognize, or passes options to the options-aware overload. Null = no filtering.
-    private IReadOnlyCollection<string>? _allowlist;
-    private IReadOnlyCollection<string>? _blocklist;
 
     /// <summary>
     /// Creates the recognizer over an already-built ONNX <see cref="InferenceSession"/> and a loaded
@@ -74,25 +76,10 @@ internal sealed class SvtrRecognizer : ITextRecognizer
     }
 
     /// <summary>
-    /// Applies the per-call character filter (<see cref="RecognitionOptions.Allowlist"/> /
-    /// <see cref="RecognitionOptions.Blocklist"/>) used by subsequent <see cref="Recognize(IReadOnlyList{Image{Rgb24}})"/>
-    /// calls. The recognizer is shared and cached across recognition calls while these options are per-call,
-    /// so the engine sets the filter immediately before each <c>Recognize</c> (or uses the
-    /// <see cref="Recognize(IReadOnlyList{Image{Rgb24}}, RecognitionOptions)"/> overload, which scopes it
-    /// automatically). Passing <c>null</c>, or options with empty lists, clears the filter.
-    /// </summary>
-    /// <param name="options">The recognition options whose allow/block lists to honor, or <c>null</c> to clear.</param>
-    public void SetCharacterFilter(RecognitionOptions? options)
-    {
-        _allowlist = options?.Allowlist;
-        _blocklist = options?.Blocklist;
-    }
-
-    /// <summary>
     /// Recognizes a batch of crops while honoring the character filter (allow/block lists) carried by
-    /// <paramref name="options"/>. The filter is scoped to this call: it is applied for the duration of the
-    /// recognition and the previously active filter is restored afterwards, so a shared recognizer stays
-    /// safe to reuse across calls with different options.
+    /// <paramref name="options"/>. The filter is a parameter of this call only — it is never stored on the
+    /// recognizer — so a shared, cached instance stays safe to use concurrently from callers passing
+    /// different options.
     /// </summary>
     /// <param name="crops">The upright text-line crops (caller retains ownership of each).</param>
     /// <param name="options">The recognition options whose allow/block lists to honor.</param>
@@ -102,20 +89,7 @@ internal sealed class SvtrRecognizer : ITextRecognizer
     {
         ArgumentNullException.ThrowIfNull(crops);
         ArgumentNullException.ThrowIfNull(options);
-
-        var prevAllow = _allowlist;
-        var prevBlock = _blocklist;
-        _allowlist = options.Allowlist;
-        _blocklist = options.Blocklist;
-        try
-        {
-            return Recognize(crops);
-        }
-        finally
-        {
-            _allowlist = prevAllow;
-            _blocklist = prevBlock;
-        }
+        return RecognizeCore(crops, options.Allowlist, options.Blocklist);
     }
 
     /// <inheritdoc />
@@ -129,6 +103,18 @@ internal sealed class SvtrRecognizer : ITextRecognizer
     public IReadOnlyList<(string Text, float Confidence)> Recognize(IReadOnlyList<Image<Rgb24>> crops)
     {
         ArgumentNullException.ThrowIfNull(crops);
+        return RecognizeCore(crops, allowlist: null, blocklist: null);
+    }
+
+    /// <summary>
+    /// The shared recognition body. The allow/block lists arrive as parameters rather than instance state,
+    /// which is what makes a cached recognizer safe to share across concurrent calls with different filters.
+    /// </summary>
+    private IReadOnlyList<(string Text, float Confidence)> RecognizeCore(
+        IReadOnlyList<Image<Rgb24>> crops,
+        IReadOnlyCollection<string>? allowlist,
+        IReadOnlyCollection<string>? blocklist)
+    {
         int count = crops.Count;
         var results = new (string Text, float Confidence)[count];
         if (count == 0) return results;
@@ -145,10 +131,8 @@ internal sealed class SvtrRecognizer : ITextRecognizer
         }
         Array.Sort(ratios, order);
 
-        // Snapshot the active character filter for the whole call so concurrent mutation can't change it
-        // mid-batch. The actual mask is built lazily below, once the vocab (and thus class indices) is known.
-        var allowlist = _allowlist;
-        var blocklist = _blocklist;
+        // The allow/block lists are call-scoped parameters, so no snapshot is needed. The actual mask is
+        // built lazily below, once the vocab (and thus the class indices) is known.
         bool[]? selectable = null;
         bool selectableBuilt = false;
 
@@ -203,8 +187,15 @@ internal sealed class SvtrRecognizer : ITextRecognizer
             var dims = output.Dimensions;
             int timeSteps = dims.Length >= 3 ? dims[1] : 0;
             int numClasses = dims.Length >= 3 ? dims[2] : _dictLines.Count;
-            // Build the vocab to match the model's class count on first use (then reuse it).
-            var vocab = _vocab ??= CharacterDictionary.BuildVocab(_dictLines, numClasses);
+            // Build the vocab to match the model's class count on first use (then reuse it). Published with
+            // Interlocked so a concurrent caller either sees null or a fully-constructed list — a plain
+            // `??=` store can be observed half-built on weak memory models (ARM64).
+            var vocab = Volatile.Read(ref _vocab);
+            if (vocab is null)
+            {
+                var built = CharacterDictionary.BuildVocab(_dictLines, numClasses);
+                vocab = Interlocked.CompareExchange(ref _vocab, built, null) ?? built;
+            }
 
             // Build the allow/block selectable mask once for the whole call, now that the vocab (and so the
             // class→token mapping) is known. Null when no filter is requested — the decoder then runs
@@ -217,7 +208,10 @@ internal sealed class SvtrRecognizer : ITextRecognizer
 
             // Materialize once to a flat span so the decoder can index by (row, t, c) without per-element
             // overhead from the tensor indexer.
-            ReadOnlySpan<float> flat = output.ToArray();
+            // Zero-copy where the runtime hands back a DenseTensor (it does, for these graphs): the
+            // output is [N, T, C] against an ~18k-class vocabulary, so ToArray() doubles the peak for
+            // no benefit. Fall back to a copy only if some future export returns another tensor type.
+            ReadOnlySpan<float> flat = output is DenseTensor<float> dense ? dense.Buffer.Span : output.ToArray();
             int rowStride = timeSteps * numClasses;
 
             for (int b = 0; b < batchCount; b++)
@@ -239,8 +233,14 @@ internal sealed class SvtrRecognizer : ITextRecognizer
     {
         int h = _imageHeight;
         // Scale width by the same factor that maps the source height to H, keeping aspect ratio. Clamp to
-        // at least 1px so degenerate crops still produce a valid tensor.
-        int w = Math.Max(1, (int)Math.Ceiling(crop.Width * (double)h / Math.Max(1, crop.Height)));
+        // at least 1px so degenerate crops still produce a valid tensor, and to MaxRecWidth at the top: the
+        // resized width is unbounded in the source aspect ratio, and the recognizer's [N, T, C] output grows
+        // with it against an ~18k-class vocabulary. A 4000x8 crop — a horizontal rule or a table border
+        // picked up as a text line on a wide scan — resizes to 24000px and produces a 55M-float output
+        // (measured: 795 MB peak, 4.2 s for a single crop); crops are batched by aspect ratio, so the widest
+        // land together and multiply that. PaddleOCR caps the same way via imgH * max_wh_ratio, and the
+        // sibling CRNN engine uses the identical 4096 ceiling.
+        int w = Math.Clamp((int)Math.Ceiling(crop.Width * (double)h / Math.Max(1, crop.Height)), 1, MaxRecWidth);
 
         using var resized = crop.Clone(c => c.Resize(new ResizeOptions
         {

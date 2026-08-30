@@ -154,7 +154,19 @@ internal sealed class DbTextDetector : ITextDetector
         }));
 
         var tensor = new DenseTensor<float>(new[] { 1, 3, resizeH, resizeW });
-        int plane = resizeH * resizeW;
+        // Checked in long before narrowing. On the limit_type=min path a 10000x3 image scales to
+        // 3,200,000 x 960, and resizeH * resizeW overflows int to a NEGATIVE value -- so the tensor
+        // allocation above fails with an arithmetic error rather than anything naming the real problem.
+        long planeLong = (long)resizeH * resizeW;
+        if (planeLong * 3 > Array.MaxLength)
+        {
+            throw new ImageTooLargeException(
+                $"The image rescales to {resizeW}x{resizeH} for detection, needing a {planeLong * 3:N0}-element " +
+                "tensor, which exceeds the maximum array length. Downscale the image, or use a less extreme " +
+                "aspect ratio.");
+        }
+
+        int plane = (int)planeLong;
         Memory<float> bufferMem = tensor.Buffer;
 
         resized.ProcessPixelRows(accessor =>

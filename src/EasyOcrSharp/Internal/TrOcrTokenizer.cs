@@ -172,18 +172,24 @@ internal sealed class TrOcrTokenizer
             if (skipSpecialTokens && _specialIds.Contains(id)) continue;
             if (TokenAt(id) is not { } token) continue;
 
-            foreach (var ch in token)
+            for (int i = 0; i < token.Length; i++)
             {
+                char ch = token[i];
                 if (CharToByte.TryGetValue(ch, out var b))
                 {
                     bytes.Add(b);
+                    continue;
                 }
-                else
-                {
-                    // Not a byte-level character (a vocabulary that stores literal text, or a stray
-                    // symbol): emit the character's own UTF-8 bytes so it still round-trips.
-                    bytes.AddRange(Encoding.UTF8.GetBytes(ch.ToString()));
-                }
+
+                // Not a byte-level character (a vocabulary that stores literal text, or a stray symbol):
+                // emit the character's own UTF-8 bytes so it still round-trips. Encode a surrogate PAIR
+                // as one unit — encoding each half separately yields U+FFFD twice, turning an emoji or an
+                // astral CJK ideograph into two replacement characters.
+                int len = char.IsHighSurrogate(ch) && i + 1 < token.Length && char.IsLowSurrogate(token[i + 1])
+                    ? 2
+                    : 1;
+                bytes.AddRange(Encoding.UTF8.GetBytes(token.Substring(i, len)));
+                i += len - 1;
             }
         }
 

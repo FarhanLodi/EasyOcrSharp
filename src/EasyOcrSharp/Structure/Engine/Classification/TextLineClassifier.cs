@@ -123,6 +123,9 @@ internal sealed class TextLineClassifier : IAngleClassifier
     private static int ArgMax(ReadOnlySpan<float> scores, out float max)
     {
         int best = 0;
+        // A truncated/corrupt .onnx, or output-name resolution landing on an empty auxiliary output, yields
+        // an empty span; DocPreprocessor.ArgMax already guards this way.
+        if (scores.Length == 0) { max = 0f; return 0; }
         max = scores[0];
         for (int i = 1; i < scores.Length; i++)
         {

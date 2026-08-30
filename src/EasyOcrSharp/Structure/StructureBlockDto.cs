@@ -5,7 +5,7 @@ using System.Text.Json.Serialization;
 namespace EasyOcrSharp.Structure;
 
 /// <summary>
-/// Flat, serialization-friendly projection of a <see cref="StructureBlock"/> used by <see cref="StructureResult.ToJson"/>.
+/// Flat, serialization-friendly projection of a <see cref="StructureBlock"/> used by <see cref="StructureResult.ToJson()"/>.
 /// Carries the block's semantic type (as its name), reading-order index, axis-aligned bounds and any
 /// recovered text / table-HTML / LaTeX; the heavy underlying OCR lines and polygons are dropped.
 /// </summary>

@@ -348,8 +348,14 @@ public sealed class SymSpellIndex
             {
                 for (int i = 0; i < candidate.Length; i++)
                 {
-                    var shorter = candidate.Remove(i, 1);
+                    // Delete a whole scalar, not one UTF-16 code unit. Removing half a surrogate pair
+                    // produced index keys containing a lone surrogate, so a lexicon term with an astral
+                    // character could never be reached at edit distance 1 by deleting *the character*.
+                    int len = char.IsHighSurrogate(candidate[i]) && i + 1 < candidate.Length
+                              && char.IsLowSurrogate(candidate[i + 1]) ? 2 : 1;
+                    var shorter = candidate.Remove(i, len);
                     if (into.Add(shorter)) next.Add(shorter);
+                    i += len - 1;
                 }
             }
             if (next.Count == 0) break;

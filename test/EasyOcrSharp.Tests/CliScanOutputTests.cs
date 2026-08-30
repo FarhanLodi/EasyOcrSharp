@@ -176,6 +176,42 @@ public sealed class CliScanOutputTests : IDisposable
     }
 
     [Fact]
+    public void Json_output_writes_non_ascii_text_verbatim()
+    {
+        // Recognized Cyrillic (or CJK, Arabic, …) reaching the file as \uXXXX escapes is valid JSON but
+        // unreadable in a plain editor, which is the whole point of scanning to a file.
+        var path = Path.Combine(_root, "cyrillic.json");
+        var writer = new ScanOutputWriter(OutputFormat.Json, path, multipleExpected: false, Quiet);
+
+        writer.Add(0, Report("ru.png", "ИСТОРИЯ РОССИЙСКОГО ГОСУДАРСТВА"));
+        writer.Flush();
+
+        var json = File.ReadAllText(path);
+
+        Assert.Contains("ИСТОРИЯ РОССИЙСКОГО ГОСУДАРСТВА", json, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"\u04", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Json_output_still_omits_null_properties()
+    {
+        // The unescaping context is built from an explicit options instance, which does not inherit the
+        // [JsonSourceGenerationOptions] attribute — so the null handling has to be restated there, and
+        // this pins that it was.
+        var path = Path.Combine(_root, "nulls.json");
+        var writer = new ScanOutputWriter(OutputFormat.Json, path, multipleExpected: false, Quiet);
+
+        writer.Add(0, Report("a.png", "alpha"));   // no Page, no Error
+        writer.Flush();
+
+        using var parsed = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        var item = parsed.RootElement.EnumerateArray().Single();
+
+        Assert.False(item.TryGetProperty("Error", out _));
+        Assert.False(item.TryGetProperty("Page", out _));
+    }
+
+    [Fact]
     public void A_failed_input_still_appears_in_json_carrying_its_error()
     {
         var path = Path.Combine(_root, "failed.json");
@@ -342,12 +378,52 @@ public sealed class CliScanOutputTests : IDisposable
     // ---------------------------------------------------------------- headers
 
     [Fact]
-    public void Text_output_of_a_multi_input_run_labels_each_document()
+    public void A_multi_input_run_writes_one_file_when_the_destination_names_one()
     {
+        // Directory mode follows the destination, not the input count. `-o report.hocr.html` on a PDF used
+        // to produce a *directory* of that name — breaking `scan report.pdf --format hocr -o report.hocr.html`,
+        // the example in this command's own help text.
         var path = Path.Combine(_root, "headers.txt");
         var writer = new ScanOutputWriter(OutputFormat.Text, path, multipleExpected: true, Quiet);
 
-        Assert.True(writer.IsDirectoryMode); // multipleExpected turns a path into a directory
+        Assert.False(writer.IsDirectoryMode);
+
+        writer.Add(0, Report("a.png", "alpha"));
+        writer.Add(1, Report("b.png", "beta"));
+        writer.Flush();
+
+        Assert.True(File.Exists(path));
+        var text = File.ReadAllText(path);
+        Assert.Contains("alpha", text);
+        Assert.Contains("beta", text);
+    }
+
+    [Fact]
+    public void A_multi_input_run_writes_a_directory_when_the_destination_has_no_extension()
+    {
+        var path = Path.Combine(_root, "out-dir-no-ext");
+        var writer = new ScanOutputWriter(OutputFormat.Text, path, multipleExpected: true, Quiet);
+
+        Assert.True(writer.IsDirectoryMode);
+    }
+
+    [Fact]
+    public void A_single_pdf_run_honours_an_explicit_output_file_name()
+    {
+        // The regression this guards: any PDF input set multipleExpected, so even a one-page document with an
+        // explicit -o filename went to a directory, and `scan in.pdf -o out.json && jq . out.json` broke.
+        var path = Path.Combine(_root, "report.json");
+        var writer = new ScanOutputWriter(OutputFormat.Json, path, multipleExpected: true, Quiet);
+
+        Assert.False(writer.IsDirectoryMode);
+
+        writer.Add(0, Report("report.pdf", "page one"));
+        writer.Flush();
+
+        // Flush also produces the single JSON array that directory mode never emitted.
+        var json = File.ReadAllText(path).TrimStart();
+        Assert.StartsWith("[", json);
+        Assert.Contains("page one", json);
     }
 
     [Fact]

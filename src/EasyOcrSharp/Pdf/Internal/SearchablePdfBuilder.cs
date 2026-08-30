@@ -72,6 +72,17 @@ internal sealed class SearchablePdfBuilder
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(ocr);
 
+        // JpegEncoder throws NotSupportedException past 65535px in either dimension. A very wide, short page
+        // (60in x 1in at 1200 DPI = 72000 x 1200 = 86 Mpx) passes the rasterizer's megapixel guard and would
+        // then throw an untyped exception from inside the page handler, past this subsystem's typed contract.
+        const int MaxJpegDimension = 65535;
+        if (image.Width > MaxJpegDimension || image.Height > MaxJpegDimension)
+        {
+            throw new PdfProcessingException(
+                $"Page renders to {image.Width}x{image.Height}px at {dpi} DPI, and the JPEG format cannot " +
+                $"encode a dimension above {MaxJpegDimension}px. Lower PdfOcrOptions.Dpi.");
+        }
+
         double scale = 72.0 / dpi;                 // points per pixel (PDF user space is 72 dpi)
         double widthPt = image.Width * scale;
         double heightPt = image.Height * scale;
@@ -153,7 +164,8 @@ internal sealed class SearchablePdfBuilder
             foreach (var rune in text.EnumerateRunes())
             {
                 int value = rune.Value is '\r' or '\n' ? ' ' : rune.Value;
-                if (value > 0xFF)
+                // Representable by the declared /WinAnsiEncoding, not merely by Latin-1 — see TryMapWinAnsi.
+                if (!TryMapWinAnsi(value, out _))
                 {
                     allLatin1 = false;
                 }
@@ -260,21 +272,74 @@ internal sealed class SearchablePdfBuilder
         return sb.ToString();
     }
 
+    /// <summary>
+    /// WinAnsiEncoding's 0x80-0x9F block — where it departs from Latin-1. These are the typographic
+    /// characters OCR produces most often on ordinary English scans (curly quotes, en/em dash, ellipsis,
+    /// euro), and the standard text layer declares <c>/WinAnsiEncoding</c>, so all of them are encodable.
+    /// </summary>
+    private static readonly Dictionary<int, byte> WinAnsiHighRange = new()
+    {
+        [0x20AC] = 0x80, [0x201A] = 0x82, [0x0192] = 0x83, [0x201E] = 0x84, [0x2026] = 0x85,
+        [0x2020] = 0x86, [0x2021] = 0x87, [0x02C6] = 0x88, [0x2030] = 0x89, [0x0160] = 0x8A,
+        [0x2039] = 0x8B, [0x0152] = 0x8C, [0x017D] = 0x8E, [0x2018] = 0x91, [0x2019] = 0x92,
+        [0x201C] = 0x93, [0x201D] = 0x94, [0x2022] = 0x95, [0x2013] = 0x96, [0x2014] = 0x97,
+        [0x02DC] = 0x98, [0x2122] = 0x99, [0x0161] = 0x9A, [0x203A] = 0x9B, [0x0153] = 0x9C,
+        [0x017E] = 0x9E, [0x0178] = 0x9F,
+    };
+
+    /// <summary>
+    /// Maps a code point to its WinAnsiEncoding byte, reporting whether the standard (non-embedded) text
+    /// layer can represent it at all. This is both the escaper's table and the font-embedding trigger.
+    /// <para>
+    /// Both sites previously tested <c>&gt; 0xFF</c> — i.e. Latin-1, not the WinAnsi the layer actually
+    /// declares. That destroyed every character in the 0x80-0x9F block: an English invoice OCR'd as
+    /// <c>don't</c> (U+2019) or <c>€1,234</c> became <c>don?t</c> / <c>?1,234</c> under
+    /// <see cref="PdfTextLayerFontMode.Never"/> and was unsearchable. Under the default
+    /// <see cref="PdfTextLayerFontMode.Auto"/> it was arguably worse: one curly apostrophe flipped the
+    /// document onto the embedded-font path, costing a recursive font-directory scan and a multi-megabyte
+    /// <c>/FontFile2</c> — and on a headless container with no fonts installed, the <c>?</c> appeared anyway.
+    /// </para>
+    /// </summary>
+    private static bool TryMapWinAnsi(int codePoint, out byte encoded)
+    {
+        if (codePoint is (>= 0x20 and <= 0x7E) or (>= 0xA0 and <= 0xFF))
+        {
+            encoded = (byte)codePoint;
+            return true;
+        }
+        return WinAnsiHighRange.TryGetValue(codePoint, out encoded);
+    }
+
     private static string EscapePdfText(string text)
     {
         var sb = new StringBuilder(text.Length + 8);
-        foreach (char ch in text)
+        foreach (var rune in text.EnumerateRunes())
         {
-            // WinAnsi/Latin1 only; replace anything outside with '?' so the (invisible) layer stays valid.
-            char c = ch > 0xFF ? '?' : ch;
-            switch (c)
+            int value = rune.Value is '\r' or '\n' ? ' ' : rune.Value;
+            if (!TryMapWinAnsi(value, out byte b))
             {
-                case '\\': sb.Append("\\\\"); break;
-                case '(': sb.Append("\\("); break;
-                case ')': sb.Append("\\)"); break;
-                case '\r': sb.Append(' '); break;
-                case '\n': sb.Append(' '); break;
-                default: sb.Append(c); break;
+                b = (byte)'?';   // genuinely outside WinAnsi; the layer stays valid, that glyph is not searchable
+            }
+
+            switch (b)
+            {
+                case (byte)'\\': sb.Append("\\\\"); break;
+                case (byte)'(': sb.Append("\\("); break;
+                case (byte)')': sb.Append("\\)"); break;
+                default:
+                    // Bytes >= 0x20 go out raw: this string is serialized with Encoding.Latin1
+                    // (see BuildStandardContent), which maps char n to byte n across the whole 0x00-0xFF
+                    // range, so the WinAnsi byte lands in the file exactly as computed. Control bytes have
+                    // no place in a text-showing operator, so escape those octally instead.
+                    if (b < 0x20)
+                    {
+                        sb.Append('\\').Append(Convert.ToString(b, 8).PadLeft(3, '0'));
+                    }
+                    else
+                    {
+                        sb.Append((char)b);
+                    }
+                    break;
             }
         }
         return sb.ToString();
@@ -356,12 +421,12 @@ internal sealed class SearchablePdfBuilder
         var box = font.BoundingBox;
         offsets[descriptorObj] = stream.Position;
         WriteAscii(stream,
-            $"{descriptorObj} 0 obj\n<< /Type /FontDescriptor /FontName /{baseFont} /Flags {font.Flags} " +
-            $"/FontBBox [{font.ToThousandths(box.MinX)} {font.ToThousandths(box.MinY)} " +
-            $"{font.ToThousandths(box.MaxX)} {font.ToThousandths(box.MaxY)}] " +
-            $"/ItalicAngle {Num(font.ItalicAngle)} /Ascent {font.ToThousandths(font.Ascent)} " +
-            $"/Descent {font.ToThousandths(font.Descent)} /CapHeight {font.ToThousandths(font.CapHeight)} " +
-            $"/StemV {font.StemV} /MissingWidth 1000 /FontFile2 {fontFileObj} 0 R >>\nendobj\n");
+            $"{descriptorObj} 0 obj\n<< /Type /FontDescriptor /FontName /{baseFont} /Flags {Num(font.Flags)} " +
+            $"/FontBBox [{Num(font.ToThousandths(box.MinX))} {Num(font.ToThousandths(box.MinY))} " +
+            $"{Num(font.ToThousandths(box.MaxX))} {Num(font.ToThousandths(box.MaxY))}] " +
+            $"/ItalicAngle {Num(font.ItalicAngle)} /Ascent {Num(font.ToThousandths(font.Ascent))} " +
+            $"/Descent {Num(font.ToThousandths(font.Descent))} /CapHeight {Num(font.ToThousandths(font.CapHeight))} " +
+            $"/StemV {Num(font.StemV)} /MissingWidth 1000 /FontFile2 {fontFileObj} 0 R >>\nendobj\n");
 
         offsets[fontFileObj] = stream.Position;
         WriteAscii(stream,
@@ -525,10 +590,52 @@ internal sealed class SearchablePdfBuilder
             }
 
             glyphs.Add(glyph);
-            toUnicode.TryAdd(glyph, value.ToString());
+            RecordToUnicode(toUnicode, glyph, value);
         }
 
         return glyphs.ToArray();
+    }
+
+    /// <summary>
+    /// Records the glyph → text entry the <c>/ToUnicode</c> CMap is built from, resolving the case where two
+    /// different code points share one glyph.
+    /// <para>
+    /// The font is embedded with <c>/CIDToGIDMap /Identity</c>, so a CID <i>is</i> a glyph id and the reverse
+    /// map has one slot per glyph. Sharing is common: a symbol font aliases every <c>U+F0xx</c> code point to
+    /// its low byte (see <c>TrueTypeSubsetter</c>'s cmap handling), so <b>every</b> glyph in such a font has
+    /// two code points; in ordinary text fonts U+00A0 shares the space glyph, U+00AD the hyphen, U+2126 the
+    /// omega, and CJK compatibility ideographs (U+F900–U+FA6D) share glyphs with their unified forms.
+    /// </para>
+    /// <para>
+    /// A plain <c>TryAdd</c> kept whichever code point the OCR happened to emit first, so the other one
+    /// extracted — and searched — as the wrong character. Preferring a non-private-use code point resolves
+    /// the symbol-font case deterministically and in the right direction: the real character wins over its
+    /// <c>U+F0xx</c> alias. Genuine BMP-to-BMP ties (U+00A0 vs U+0020) keep first-wins, which is as good as
+    /// an Identity map can do — distinguishing those would need a real CID→GID stream.
+    /// </para>
+    /// </summary>
+    private static void RecordToUnicode(Dictionary<ushort, string> toUnicode, ushort glyph, Rune value)
+    {
+        if (!toUnicode.TryGetValue(glyph, out var existing))
+        {
+            toUnicode[glyph] = value.ToString();
+            return;
+        }
+
+        // Replace a private-use placeholder with a real character; never the other way round.
+        if (IsPrivateUse(existing) && !IsPrivateUse(value.ToString()))
+        {
+            toUnicode[glyph] = value.ToString();
+        }
+    }
+
+    /// <summary>Whether the (single-scalar) text sits in a Unicode private-use area.</summary>
+    private static bool IsPrivateUse(string text)
+    {
+        if (!Rune.TryGetRuneAt(text, 0, out var rune)) return false;
+        return rune.Value is (>= 0xE000 and <= 0xF8FF)      // BMP PUA
+            or (>= 0xF0000 and <= 0xFFFFD)                   // Plane 15
+            or (>= 0x100000 and <= 0x10FFFD);                // Plane 16
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -744,6 +851,16 @@ internal sealed class SearchablePdfBuilder
     }
 
     private static string Num(double value) => value.ToString("0.##", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Formats a PDF integer invariantly. Every number written here goes through
+    /// <see cref="WriteAscii(Stream, string)"/>, so an ambient-culture negative sign is not merely unusual —
+    /// it is unrepresentable. Under sv-SE / fi-FI / nb-NO / lt-LT, <c>int.ToString()</c> renders the sign as
+    /// U+2212 MINUS SIGN (ar-SA and fa-IR prepend a bidi mark), which <see cref="Encoding.ASCII"/> turns into
+    /// <c>?</c> — not a PDF number token, so readers reject the object. <c>/Descent</c> and the
+    /// <c>/FontBBox</c> corners are negative for essentially every real font.
+    /// </summary>
+    private static string Num(int value) => value.ToString(CultureInfo.InvariantCulture);
 
     private static void WriteAscii(Stream stream, string s)
     {

@@ -31,28 +31,57 @@ internal static class ImageProcessing
         int srcW = source.Width;
         int srcH = source.Height;
 
+        // Both knobs are public and unvalidated on DetectionOptions; a zero or negative value would drive
+        // every dimension below to 0.
+        canvasSize = Math.Max(32, canvasSize);
+        magRatio = Math.Max(1e-3, magRatio);
+
         // EasyOCR: target_size = mag_ratio * max(h, w); then clamp to canvas; resize keeping aspect.
         double targetSize = magRatio * Math.Max(srcH, srcW);
         if (targetSize > canvasSize) targetSize = canvasSize;
 
         double ratio = targetSize / Math.Max(srcH, srcW);
-        int targetH = (int)(srcH * ratio);
-        int targetW = (int)(srcW * ratio);
 
-        // Pad to multiple of 32 (CRAFT requirement).
-        int padH = (targetH + 31) / 32 * 32;
-        int padW = (targetW + 31) / 32 * 32;
+        // Floor both edges at 1px. On an extreme aspect ratio — a 10000x3 receipt strip, a 2561x1 rule —
+        // the short edge truncates to 0, Resize(w, 0) silently derives 1 from the aspect ratio, and the
+        // zero then survives the pad-to-32 rounding below (which maps 0 -> 0) into the tensor shape.
+        // ONNX Runtime rejects that with "Invalid input shape: {0,2560}" from inside the CRAFT Conv node,
+        // and nothing on the path catches it, so the whole OCR call fails.
+        int targetH = Math.Max(1, (int)(srcH * ratio));
+        int targetW = Math.Max(1, (int)(srcW * ratio));
+
+        // Pad to multiple of 32 (CRAFT requirement), never to zero.
+        int padH = Math.Max(32, (targetH + 31) / 32 * 32);
+        int padW = Math.Max(32, (targetW + 31) / 32 * 32);
 
         using var resized = source.Clone(ctx => ctx.Resize(targetW, targetH));
 
-        // Allocate padded canvas, copy resized image into top-left.
-        var tensor = new float[3 * padH * padW];
+        // Allocate padded canvas, copy resized image into top-left. Computed as long: canvasSize is caller
+        // -supplied, and 3 * padH * padW overflows int well before the allocation would fail on its own.
+        long tensorLength = 3L * padH * padW;
+        if (tensorLength > Array.MaxLength)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(canvasSize), canvasSize,
+                $"DetectionOptions.CanvasSize {canvasSize} with MagRatio {magRatio} needs a {tensorLength}-element " +
+                "input tensor, which exceeds the maximum array length. Lower CanvasSize or MagRatio.");
+        }
+        var tensor = new float[(int)tensorLength];
         // ImageNet normalization in 0-255 space: (pixel - mean*255) / (std*255)
         // mean = (0.485, 0.456, 0.406), std = (0.229, 0.224, 0.225)
         const float meanR = 0.485f * 255f, meanG = 0.456f * 255f, meanB = 0.406f * 255f;
         const float stdR = 0.229f * 255f, stdG = 0.224f * 255f, stdB = 0.225f * 255f;
 
         int hwPad = padH * padW;
+
+        // Pre-fill with normalized BLACK, then overwrite the real pixels below. EasyOCR pads in *pixel*
+        // space with zeros and normalizes afterwards, so its padding lands at (0 - mean*255)/(std*255) ≈ -2.1.
+        // Leaving the tensor at 0.0 instead encodes pixel ≈ (124,116,104) — mid-grey — which for an extreme
+        // aspect ratio is most of the canvas (a 5000x2 image resizes to height 1 and pads to 32 rows).
+        Array.Fill(tensor, (0f - meanR) / stdR, 0 * hwPad, hwPad);
+        Array.Fill(tensor, (0f - meanG) / stdG, 1 * hwPad, hwPad);
+        Array.Fill(tensor, (0f - meanB) / stdB, 2 * hwPad, hwPad);
+
         resized.ProcessPixelRows(rows =>
         {
             for (int y = 0; y < targetH; y++)

@@ -48,7 +48,7 @@ internal static class InfoCommand
 
         if (args.Flag(Json.Name))
         {
-            Console.Out.WriteLine(JsonSerializer.Serialize(report, CliJsonContext.Default.CliInfoReport));
+            Console.Out.WriteLine(JsonSerializer.Serialize(report, CliJsonContext.Unescaped.CliInfoReport));
             return ExitCodes.Success;
         }
 

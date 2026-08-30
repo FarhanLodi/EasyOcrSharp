@@ -50,17 +50,13 @@ internal sealed class PicoDetLayoutDetector : ILayoutDetector
     private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
 
     /// <summary>
-    /// Detections scoring at or below this confidence are discarded (PaddleX layout <c>threshold</c>).
-    /// </summary>
-    private const float ScoreThreshold = 0.5f;
-
-    /// <summary>
     /// Fallback square input edge when the graph declares a dynamic spatial dimension (PP-DocLayout-S default).
     /// </summary>
     private const int DefaultInputSize = 480;
 
     private readonly InferenceSession _session;
     private readonly IReadOnlyDictionary<int, StructureBlockType> _classMap;
+    private readonly IReadOnlyDictionary<int, string>? _labelNames;
 
     // Resolved once from the graph metadata: the single image input name, the model's fixed input H/W, and
     // the (optional) scale_factor input name. The PicoDet export's first output is the [N,6] detections.
@@ -75,10 +71,20 @@ internal sealed class PicoDetLayoutDetector : ILayoutDetector
     /// </summary>
     /// <param name="session">The loaded PicoDet layout model session (this instance takes ownership).</param>
     /// <param name="classMap">Maps the model's raw class indices to <see cref="StructureBlockType"/>.</param>
-    public PicoDetLayoutDetector(InferenceSession session, IReadOnlyDictionary<int, StructureBlockType> classMap)
+    /// <param name="labelNames">
+    /// Optional class-id → raw label name map from the same sidecar. Carried onto every
+    /// <see cref="LayoutRegion.RawLabel"/> so <see cref="LayoutPostProcessor"/> can tell apart labels that
+    /// <see cref="StructureBlockType"/> collapses (<c>reference</c> vs <c>reference_content</c>,
+    /// <c>inline_formula</c> vs <c>display_formula</c>).
+    /// </param>
+    public PicoDetLayoutDetector(
+        InferenceSession session,
+        IReadOnlyDictionary<int, StructureBlockType> classMap,
+        IReadOnlyDictionary<int, string>? labelNames = null)
     {
         _session = session ?? throw new ArgumentNullException(nameof(session));
         _classMap = classMap ?? throw new ArgumentNullException(nameof(classMap));
+        _labelNames = labelNames;
 
         // PicoDet layout graphs expose the page as a 4-D image input plus, on some exports, a 2-D
         // "scale_factor" input. Pick the 4-D tensor as the image and remember the scale_factor name if present.
@@ -87,7 +93,7 @@ internal sealed class PicoDetLayoutDetector : ILayoutDetector
     }
 
     /// <inheritdoc />
-    public IReadOnlyList<LayoutRegion> Detect(Image<Rgb24> image)
+    public IReadOnlyList<LayoutRegion> Detect(Image<Rgb24> image, float scoreThreshold)
     {
         ArgumentNullException.ThrowIfNull(image);
 
@@ -136,7 +142,7 @@ internal sealed class PicoDetLayoutDetector : ILayoutDetector
         float invScaleY = boxesInSourceSpace ? 1f : origH / (float)_inputHeight;
 
         var regions = LayoutGraph.BuildRegions(
-            detections, _classMap, ScoreThreshold, invScaleX, invScaleY, origW, origH);
+            detections, _classMap, scoreThreshold, invScaleX, invScaleY, origW, origH, _labelNames);
         return regions;
     }
 

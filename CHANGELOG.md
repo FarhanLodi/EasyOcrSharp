@@ -2,6 +2,308 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## 3.1.0
+
+Two bodies of work ship together here. A **production-operations pass** — the library can now be *run*,
+not just called: you can alert on it, bound it, and prove it works before traffic arrives. And the
+**document-structure engine fixes and production-readiness audit** that were prepared as 3.0.1 but never
+published; they are released here instead of separately, so 3.0.1 does not exist as a public version.
+
+A minor bump rather than a patch, because the operations work adds public API (three
+`EasyOcrServiceOptions` knobs, two exception types, a hosted service, health-check options and the
+`EasyOcrDiagnostics` tag constants). Everything is additive: no public type, member or default was removed
+or changed incompatibly, every new guard is off by default, and a service constructed exactly as before
+behaves exactly as before.
+
+### Added — production operations
+
+- **Metrics you can build an SLO on.** `easyocr.operations`, `easyocr.duration`, `easyocr.lines` and
+  `easyocr.pages` are now tagged with `easyocr.operation`, `easyocr.outcome`, `easyocr.provider`,
+  `easyocr.languages` and — on failures — `error.type`, so latency and error rate can be sliced by entry
+  point, language and CPU-vs-GPU. The constants are public
+  (`EasyOcrDiagnostics.TagNames` / `.Outcomes` / `.OperationNames`) so alert rules need no magic strings.
+  New saturation instruments: `easyocr.queue.wait`, `easyocr.operations.active`,
+  `easyocr.operations.queued`.
+- **`MaxConcurrentOperations`, `QueueTimeout`, `OperationTimeout`** on `EasyOcrServiceOptions`, with new
+  typed `OcrBusyException` (503-shaped: at the limit and the queue wait elapsed) and `OcrTimeoutException`
+  (504-shaped: one operation blew its budget). Both derive `EasyOcrSharpException`, so existing catch-all
+  handlers keep working. All three default to off. The gate is taken once per outermost operation; PDF,
+  multi-frame and batch runs are gated per page instead, so a long document cannot hold a slot for its
+  whole duration.
+- **`AddEasyOcrWarmUp(languages)`** — an `IHostedService` that loads models off the startup path, so a host
+  that cannot reach the model mirror still starts and reports state rather than crash-looping. Warm-up
+  progress is published through the new `EasyOcrWarmUpState`.
+- **Deep health check.** `EasyOcrHealthCheckOptions { DeepProbe, ProbeInterval, ProbeTimeout }` runs a tiny
+  synthetic page through the real pipeline once, caches the verdict, and reports the execution provider
+  that actually resolved. It never triggers a download, and readiness reports not-ready while warm-up is
+  still running. The existing constructor and registration keep their exact signatures and behaviour.
+- Metrics and spans on the previously **uninstrumented** PDF, searchable-PDF, multi-frame and batch paths.
+
+### Fixed — production operations
+
+- **Operations were only ever counted on the success path**, so a deployment that was failing every request
+  reported *zero* operations rather than a 100% error rate — the one shape of failure a dashboard cannot
+  see. Failures, cancellations, timeouts and shed load are now all recorded, and classified apart:
+  shedding is the concurrency limit working as designed and must not page anyone as a defect, while a
+  timeout points at one pathological input rather than broken code.
+- **`EasyOcrDiagnostics` reported version `2.2.1`** while the package was 3.x, mislabelling every metric
+  and span it emitted. A test now pins it to the csproj.
+- **Timeout ceiling was set to the wrong constant, and only failed under load.**
+  `SemaphoreSlim.WaitAsync(TimeSpan)` does not validate its argument up front: with a permit free it
+  returns on the fast path and never arms a timer, so an over-long `QueueTimeout` survived every
+  uncontended dev run and CI pass, then threw `ArgumentOutOfRangeException` out of the first request that
+  actually had to queue — the back-pressure path failing precisely when back-pressure existed, handing
+  callers an argument exception instead of the `OcrBusyException` they are meant to retry on. The real
+  ceiling is `uint.MaxValue - 1` ms (~49.7 days), not `int.MaxValue` ms (~24.8 days); a clamp at the
+  smaller value silently converted every configured wait between the two into "queue forever", turning a
+  bounded shed into an unbounded queue. `OperationTimeout` had no upper clamp at all and reaches
+  `CancelAfter`, which *does* validate eagerly — so an over-long budget threw on every operation, gated or
+  not. Both knobs now share one measured ceiling and coerce beyond it to an infinite wait.
+
+
+Three bugs reported against [PaddleOcrNet](https://github.com/FarhanLodi/PaddleOcrNet/issues) — whose
+PP-StructureV3 engine 3.0.0 brought in-tree — apply verbatim to the copy of that engine inside this
+package. All three are fixed here, along with the layout work the third one turned up.
+
+A full production-readiness audit followed, covering Unicode and text handling, image decoding and
+geometry, concurrency and native resource lifetime, the document-structure subsystem, PDF input and output,
+and the public API, CLI and packaging surface. Its results are in the **production-hardening pass** section
+below and reach the plain-text OCR path too — most consequentially, images with transparency decoded to a
+black page and EXIF-rotated phone photos were read sideways, both returning empty or near-empty text with
+no error.
+
+### Fixed — document-structure engine
+
+- **Every document-analysis language pack decoded one character class off**
+  ([PaddleOcrNet#1](https://github.com/FarhanLodi/PaddleOcrNet/issues/1)). The per-script PP-OCRv5
+  dictionaries (`cyrillic_dict.txt`, `latin_dict.txt`, `arabic_dict.txt`, `devanagari_dict.txt`,
+  `korean_dict.txt`, `japan_dict.txt`, `th_dict.txt`, `ppocrv5_el_dict.txt`, `te_dict.txt`, `ta_dict.txt`,
+  `ppocrv5_eslav_dict.txt`) begin with an **empty first line** — that line is the CTC blank slot itself,
+  and the class the file leaves off is the trailing space. `CharacterDictionary` saw only that the file
+  was one class short of the network and prepended a *second* blank, shifting every class by one:
+  `ИСТОРИЯ РОССИЙСКОГО ГОСУДАРСТВА` came out as `ЗРСНПЗЮꚟПНРРЗИРЙНВНꚟВНРТГЏПРСБЏ`. `BuildVocab` now
+  checks whether the first line is empty and builds `["blank"] + lines[1..] + [" "]` in that case,
+  restoring the exact class alignment the models were trained with. The dictionary *files* were correct
+  all along and are unchanged, so nothing re-downloads. Affected: Russian and every other Cyrillic
+  language, the Latin-script languages routed to the `latin` pack (fr, de, es, it, pt, …), Arabic,
+  Devanagari, Korean, Japanese, Thai, Greek, Telugu, Tamil and East Slavic. The default
+  Chinese/English/Japanese recognizers on `ppocrv5_dict.txt` were never affected — that file ships as the
+  complete class list and took a different branch.
+- **Non-ASCII text is no longer escaped in JSON output**
+  ([PaddleOcrNet#2](https://github.com/FarhanLodi/PaddleOcrNet/issues/2)). `OcrResult.ToJson()`,
+  `StructureResult.ToJson()` and the CLI's `--format json` inherited the System.Text.Json default
+  encoder, which escapes everything outside Basic Latin — so Cyrillic, Greek, Arabic, Hebrew, CJK,
+  Devanagari … reached the caller as `\uXXXX` sequences: valid JSON, but unreadable in Notepad and
+  friends. All three now serialize through `EasyOcrJson.Encoder`
+  (`JavaScriptEncoder.Create(UnicodeRanges.All)`) and emit those scripts verbatim. HTML-sensitive
+  characters (`< > & ' +`) are still escaped — deliberately not `UnsafeRelaxedJsonEscaping`, since blocks
+  carry `TableHtml` that may be embedded in a page. The decoded text is unchanged either way; only
+  readability differs. Note the scope: `UnicodeRanges.All` is the Basic Multilingual Plane, so
+  supplementary-plane scalars (emoji, CJK Ext-B at U+20000+) remain escaped as surrogate pairs; pass
+  `UnsafeRelaxedJsonEscaping` through the new options overload if you need those verbatim too.
+
+### Added — text handling, structure and JSON
+
+- **Right-to-left reading order.** Arabic, Persian, Urdu, Uyghur and Hebrew pages were assembled
+  left-to-right: every line was recognized correctly, but the *sequence* was wrong. A two-column Arabic
+  page started on the left (last) column, and a form row whose label sits to the right of its value
+  concatenated as `value label`. All five ordering sites now take a direction —
+  `EasyOcrService.SortLinesByReadingOrder` and its `StructureService` twin, both `ParagraphGrouper`s,
+  `StructureTextEngine`'s `sorted_boxes` port, and `XyCutOrderer` — reading the right-most column first and
+  breaking row ties on the right-most edge. Keyed on `MaxX` rather than `MinX`, so a short fragment sitting
+  to the right of a longer one still leads.
+  - `RecognitionOptions.ReadingDirection` and `DocumentAnalysisOptions.ReadingDirection` select it;
+    both default to `TextReadingDirection.Auto`, which reads right-to-left when **every** requested
+    language is right-to-left. A mixed request such as `["ar", "en"]` stays left-to-right — such a page is
+    usually Latin-majority, and guessing wrong there is worse than leaving the established order alone.
+    `TextReadingDirection.RightToLeft` forces it for a bilingual page that really does flow right-to-left.
+  - `StructureOptions.RightToLeft` is the structure engine's equivalent. When the layout model emits its
+    own reading-order index and that is in use, the model's prediction still wins — it was trained on the
+    document's real order and already accounts for direction.
+  - Left-to-right output is byte-for-byte unchanged: `Auto` resolves to false for every non-RTL language,
+    which is the pre-existing code path verbatim.
+  - Scope: this orders *boxes*. It is not the Unicode Bidirectional Algorithm, and does not need to be —
+    the recognizer already emits each line as a logical-order string, so bidi remains the renderer's job
+    and this library's output is correct input for one.
+
+- **`ToJson(JsonSerializerOptions)` overloads** on `OcrResult` and `StructureResult`, for callers who
+  want a different encoder, indentation or naming policy. The options are copied onto the
+  source-generated context, so the overload stays trim / Native-AOT safe and leaves the caller's options
+  instance mutable and reusable. Passing `Encoder = JavaScriptEncoder.Default` restores the pre-3.1.0
+  escaping.
+- **`EasyOcrSharp.Models.EasyOcrJson.Encoder`**, the exporters' default `JavaScriptEncoder`, exposed so
+  callers can reuse it in their own `JsonSerializerOptions`.
+- **`DocumentAnalysisOptions.LayoutScoreThreshold`** — the layout-detection confidence floor is now
+  configurable ([PaddleOcrNet#3](https://github.com/FarhanLodi/PaddleOcrNet/issues/3)). It was a
+  `private const float ScoreThreshold = 0.5f` inside `RtDetrLayoutDetector` and `PicoDetLayoutDetector`,
+  so callers could not keep the regions the detector was unsure about (or discard the marginal ones).
+  Default is unchanged at `0.5` — the value PaddleX ships in `inference.yml` (`draw_threshold`) for both
+  PP-DocLayoutV3 and PP-DocLayout-S/M — and the comparison stays exclusive (`score > threshold`), matching
+  PaddleX. `DocumentAnalysisOptions.DefaultLayoutScoreThreshold` exposes the default as a constant.
+- **Layout post-processing**, which investigating that report turned up. The detectors emit a fixed top-k
+  of candidates with no NMS, so the same area of a page is routinely proposed several times under
+  different labels and every candidate reached the caller. A new clean-up chain collapses overlapping
+  regions, drops sub-6px slivers, `reference` markers whose text the neighbouring `reference_content`
+  block already carries, and whole-page `image` false positives:
+  - `FilterOverlappingRegions` (default **true**) — the duplicate collapse. Barely visible at the default
+    threshold, since duplicates rarely score that high, and increasingly important as you lower it.
+  - `LayoutNms` (default false) — additional non-maximum suppression, 0.6 IoU within a class and 0.98
+    across classes.
+  - `LayoutUnclipRatio` (default none) — grow each region about its centre before recognition, for tight
+    boxes that clip glyphs out of the table/formula crops.
+  - `LayoutMergeMode` (default `None`) — keep the enclosing block, the inner blocks, or both, for nested
+    regions.
+- **Reading order predicted by the model.** PP-DocLayoutV3 emits a reading-order index alongside every
+  box that was previously discarded in favour of re-deriving the order geometrically. It now orders the
+  blocks, with XY-cut still the fallback for models that emit no such column;
+  `DocumentAnalysisOptions.ReadingOrder` selects between them (`Auto` by default, `XyCut` to force the
+  geometric orderer).
+
+### Fixed — production-hardening pass
+
+A multi-agent audit of the whole library (Unicode/text, image handling, concurrency and resource lifetime,
+document structure, PDF, and the public API/CLI surface) turned up the following. Everything here is a
+behaviour fix; no public type, member or default was removed or changed incompatibly.
+
+**Images — silently wrong or empty results**
+
+- **A transparent background decoded to solid black.** RGBA→RGB conversion *discarded* alpha instead of
+  compositing it, so a PNG with a transparent background (a logo, an exported diagram, a screenshot) became
+  dark glyphs on a black page and OCR returned empty text with no error. Every decode now composites over
+  white, and partial alpha is blended rather than taken at full strength. Affects OCR, barcode scanning and
+  redaction alike.
+- **EXIF orientation was never applied.** A phone photo of a receipt is normally stored landscape with an
+  `Orientation` tag of 6; every viewer shows it upright, but the detector received the sideways buffer and
+  found almost nothing. Decoding now honours the tag (a no-op when there is no EXIF profile, and lossless
+  for the 90° cases). Multi-frame images keep every frame through both steps.
+- **Extreme aspect ratios crashed the CRAFT detector.** An image narrower than 1/2560 of its length — a
+  10000×3 receipt strip, a 2561×1 rule — truncated a tensor dimension to zero and ONNX Runtime threw
+  `Invalid input shape: {0,2560}` out of the whole OCR call. Both edges are floored at 1px and the
+  pad-to-32 rounding no longer maps 0 to 0. `CanvasSize` and `MagRatio` are validated too.
+- **Detection polygons came out counter-clockwise.** The shoelace winding test had an inverted sign for
+  image (y-down) coordinates, so CRAFT line polygons were emitted TL→BL→BR→TR — contradicting the documented
+  order, `OcrWord.BoundingPolygon`, and the clockwise polygons the structure engine produces *within the same
+  result*. Consumers taking `polygon[0]→polygon[1]` as the text direction got the descender direction.
+- **Quads at ~45° collapsed two corners.** The sum/difference corner heuristic is degenerate along a ±45°
+  edge, so a diagonal watermark or stamp rectified as a transposed sliver with non-finite sample
+  coordinates, or was dropped outright. Replaced with the tie-free x-sort ordering already used by the DB
+  post-processor, plus a non-finite sample guard.
+- **A single wide crop could cost ~800 MB.** The structure recognizer resized crops to an unbounded width;
+  a 4000×8 crop (a table border picked up as a text line) produced a 55M-float output. Capped at 4096px, as
+  PaddleOCR and the sibling CRNN engine already do, and the output tensor is no longer copied.
+- Deskew no longer rotates a blank page by −15°, and stays inside its documented ±15° range.
+
+**Concurrency and resource lifetime**
+
+- **Layout/table recognizers could be disposed while another thread was using them.** The caches replaced
+  their single cached instance when a concurrent call asked for a different model, freeing an
+  `InferenceSession` mid-`Run` — an `AccessViolationException` that kills the process, not a catchable
+  exception. Both caches are now keyed by model.
+- **Character allow/block lists leaked between concurrent calls.** `SvtrRecognizer` stored the per-call
+  filter on the shared, cached instance, so one request's digits-only allowlist could be dropped or applied
+  to an unrelated request. The filter is now a parameter, never instance state.
+- **Streaming disposed the page image out from under in-flight recognition.** Abandoning a stream early
+  (`break` in the consumer's loop) left up to `MaxDegreeOfParallelism` tasks reading pixel memory that was
+  already returned to the pool. Abandoned work is now awaited before the image is released.
+- **`DisposeAsync` never released the handwriting models**, leaking a TrOCR encoder/decoder pair — hundreds
+  of MB of native arena — per service. `UnloadHandwritingModels()` is also safe to call concurrently now:
+  it waits for in-flight handwriting calls instead of freeing sessions under them.
+- Streaming's document pre-processing runs inside the dispose gate, so shutdown can no longer free the
+  orientation/unwarp sessions mid-run.
+- The batch API no longer disposes its concurrency gate under running tasks on cancellation, and no longer
+  orphans its pump when the consumer stops early (which kept OCRing every remaining file into a channel
+  nobody was draining).
+- **Concurrent model downloads no longer fail hard.** Two processes sharing a cache raced on the final
+  `File.Move`; the loser classified the `IOException` as transient, repeated the entire download, failed
+  again, and eventually threw — with a valid, verified copy sitting at the destination. Cold start behind a
+  load balancer reproduced it reliably.
+- Structure-engine image loading goes through the same decode-limit guard as the rest of the library, so the
+  decompression-bomb ceiling is no longer header-only there.
+
+**PDF**
+
+- **Page alpha was discarded rather than composited.** `NaiveTransparencyRemover` only rewrites *fully*
+  transparent pixels, and the RGB conversion then dropped the channel — so anti-aliased glyph edges
+  hard-thresholded to black and, worse, a 20%-opacity watermark rasterized at 100% and OCR read the
+  watermark over the real content. Now composited properly over white.
+- **WinAnsi characters were destroyed in the standard text layer.** The layer declares `/WinAnsiEncoding`
+  but the builder tested for Latin-1, so `’ – — … € ‘ “ ”` — the characters OCR produces most often on
+  ordinary English scans — became `?`. `don’t` and `€1,234` were unsearchable, and under the default `Auto`
+  mode one curly apostrophe dragged the whole document onto the embedded-font path (a recursive font scan
+  and a multi-megabyte `/FontFile2`) for nothing.
+- **`/ToUnicode` collisions resolved in the wrong direction.** Where two code points share one glyph — every
+  glyph in a symbol font, plus U+00A0/U+0020, U+2126/U+03A9 and the CJK compatibility ideographs — the
+  first-seen code point won. A private-use alias no longer displaces the real character.
+- A PDF whose page tree is empty is now rejected with a clear error instead of producing a structurally
+  invalid `/Count 0 /Kids []` document reported as success.
+- The output PDF is written via a temp file and renamed, so a cancellation or a full disk no longer leaves a
+  truncated file at the user's path — destroying whatever was there before.
+- A page too wide for the JPEG format now raises `PdfProcessingException` naming the DPI to lower, rather
+  than an untyped `NotSupportedException` from inside the page handler.
+
+**Document structure**
+
+- Every `reference` region was deleted unconditionally by the default-on overlap filter, on the assumption
+  that a neighbouring `reference_content` carried its text. Nothing verified that — and the 23-class PicoDet
+  vocabulary has no `reference_content` class at all, so on those models *every* reference region was lost.
+  A marker is now dropped only when a `reference_content` region actually overlaps it.
+- `LayoutMergeMode.Large` dropped **both** members of a duplicate pair (containment was symmetric for
+  near-identical boxes), and the formula protection compared against a label the shipped PP-DocLayoutV3
+  model never emits.
+- Tables exported as an empty `<table></table>` in the HTML exporter, which validated the recognizer's
+  `<html><body>` envelope as a table fragment and always failed.
+- The detection-count output is now matched by name and shape, not by CLR type alone — PP-DocLayoutV3's
+  instance mask is `int32` too, and selecting it yielded zero layout regions with no error and no log. That
+  mask (~48 MB per page) is no longer fetched at all.
+- OOXML and XHTML/hOCR/ALTO writers strip the control characters XML 1.0 forbids outright. No escape exists
+  for them, and one reaching `word/document.xml` produces a .docx Word refuses to open.
+- `colspan`/`rowspan` are clamped in the OOXML table parser, matching the public `TableHtmlParser`; an
+  unbounded span was an immediate `OutOfMemoryException`.
+- The image-aware DOCX/HTML exporters now fall back to a text placeholder when the supplied image does not
+  match the analyzed page, instead of cropping an unrelated region — reachable whenever document orientation
+  or unwarp is enabled, since block bounds are in the corrected page's coordinate space.
+
+**Text and API**
+
+- **`FullText` is LF-separated on every platform.** It used `Environment.NewLine` while paragraph grouping
+  joined with `\n` and the multi-frame/PDF aggregates with `\n\n`, so a single string carried two different
+  line endings on Windows — and `CharacterErrorRate` gained one spurious insertion per line break when
+  measured against LF ground truth.
+- Public `AnalyzeDocumentAsync` overloads validate their arguments before constructing the analyzer, instead
+  of failing deep inside the engine after allocating sessions and possibly downloading models.
+- `AddEasyOcrSharp` is idempotent. A library and its host app both calling it used to register two OCR
+  singletons while the health check kept reading the first options object — a readiness probe reporting on a
+  different cache path and language set than the service actually used.
+- **`ModelDownloadOptions.MaxDownloadBytes`** (new, default 512 MB) caps a single model download. The
+  checksum is only verified once the bytes are on disk, so an unbounded stream from a misconfigured
+  `BaseUrlOverride` could fill the cache disk before verification ran.
+- CLI: `scan report.pdf -o report.hocr.html` writes a **file**, not a directory of that name — the command's
+  own documented example was broken, because any PDF input forced directory mode regardless of page count.
+  Directory mode now follows the destination. A bad `--dpi` exits 2 (the documented usage code) instead of 1,
+  is validated even when no PDF is among the inputs, and each failure is reported once rather than twice.
+- Corrected two XML docs that stated the opposite of the code: the structure model checksum path is
+  fail-**closed** and its checksum table is fully populated. Ported the download-progress double-count guard
+  into the structure engine's copy of the download manager.
+
+### Notes
+
+- **`EasyOcrJson.Encoder` covers the Basic Multilingual Plane.** `UnicodeRanges.All` is the BMP, so
+  supplementary-plane scalars (emoji, CJK Ext-B at U+20000+) are still written as surrogate escape pairs.
+  That is valid JSON which deserializes to the identical string; pass
+  `JavaScriptEncoder.UnsafeRelaxedJsonEscaping` through the new options overload if you need them verbatim
+  and are not embedding the JSON in a page. Documented rather than changed, since allowing astral scalars
+  requires an `unsafe` encoder subclass.
+- **Channel order in the structure engine is unverified.** Its seven tensor builders write RGB planes while
+  PaddleOCR's configs decode BGR. Greyscale and black-on-white scans are unaffected (R == G == B), so this
+  would only show on colour input — a red stamp, a coloured header. Changing it blind risks a large accuracy
+  regression in the other direction, so it is left as-is pending an A/B against colour pages.
+- **Searchable-PDF generation buffers the whole document in memory.** An ~800-page colour scan at 300 DPI
+  approaches the 2 GB `MemoryStream` ceiling. `MaxPages` (default 5000) therefore bounds pages, not memory;
+  streaming the build to the destination is a larger change left for a follow-up.
+- The second half of PaddleOcrNet#3 — layout scores clustering near 0.5 where the original Paddle
+  inference reports 0.9+ — was **not reproducible**. Checked against the original Paddle inference model
+  on the same pages, the scores are identical, so nothing was changed there.
+
 ## 3.0.0
 
 **Two dependencies leave: imaging moves to [EasyImageSharp](https://github.com/FarhanLodi/EasyImageSharp),

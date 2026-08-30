@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using EasyOcrSharp.Models;
 
@@ -76,4 +77,17 @@ internal sealed record CliInfoReport
 [JsonSerializable(typeof(CliInfoReport))]
 internal sealed partial class CliJsonContext : JsonSerializerContext
 {
+    /// <summary>
+    /// The context the CLI actually serializes through: the same shape as <see cref="Default"/>, but with
+    /// <see cref="EasyOcrJson.Encoder"/>, so recognized text (and a cache path under a non-ASCII user
+    /// name) is written verbatim instead of collapsing into <c>\uXXXX</c> escapes. The attribute-level
+    /// options above do not carry over to a context built from an explicit options instance, so the
+    /// indentation and null-handling are repeated here to keep the two contexts identical.
+    /// </summary>
+    internal static CliJsonContext Unescaped { get; } = new(new JsonSerializerOptions
+    {
+        Encoder = EasyOcrJson.Encoder,
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    });
 }

@@ -65,11 +65,15 @@ public static class OcrVisualizationExtensions
 
     private static void Plot(Image<Rgb24> img, int cx, int cy, Rgb24 color, int thickness)
     {
-        int r = thickness / 2;
-        for (int y = cy - r; y <= cy + r; y++)
+        // An inclusive [-r, +r] sweep around r = thickness/2 draws 2*(thickness/2)+1 pixels, so the default
+        // thickness of 2 painted a 3px brush and 4 painted 5px. Splitting the span asymmetrically draws
+        // exactly `thickness` pixels for both odd and even values.
+        int lo = (thickness - 1) / 2;
+        int hi = thickness / 2;
+        for (int y = cy - lo; y <= cy + hi; y++)
         {
             if (y < 0 || y >= img.Height) continue;
-            for (int x = cx - r; x <= cx + r; x++)
+            for (int x = cx - lo; x <= cx + hi; x++)
             {
                 if (x < 0 || x >= img.Width) continue;
                 img[x, y] = color;

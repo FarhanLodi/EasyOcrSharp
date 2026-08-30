@@ -107,9 +107,12 @@ internal sealed record RecognitionOptions
         if (string.IsNullOrEmpty(characters))
             return Array.Empty<string>();
 
+        // Enumerate by Rune, not by char: a dictionary token is a whole character, so splitting a surrogate
+        // pair here would produce two lone-surrogate tokens that match no vocabulary entry — the allowlist
+        // would then exclude the very character the caller asked to allow (e.g. "𠮷", U+20BB7).
         var list = new List<string>(characters.Length);
-        foreach (char c in characters)
-            list.Add(c.ToString());
+        foreach (var rune in characters.EnumerateRunes())
+            list.Add(rune.ToString());
         return list;
     }
 

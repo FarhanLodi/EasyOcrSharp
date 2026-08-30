@@ -14,12 +14,12 @@ namespace EasyOcrSharp.Structure.Layout;
 /// already-decoded detections whose leading columns are <c>[class_id, score, x1, y1, x2, y2]</c>, plus an
 /// <c>int32</c> <c>boxes_num</c> tensor giving the per-image row count (batch = 1). The PicoDet / RT-DETR-plus
 /// exports use a 6-wide row; the re-hosted PP-DocLayoutV3 RT-DETR export emits a <b>7-wide</b> row
-/// (<c>[class_id, score, x1, y1, x2, y2, extra]</c>, the trailing column being an in-graph rank/index that is
-/// ignored), confirmed by loading the ONNX and printing the output. The detection row width is therefore
-/// detected per-run rather than fixed. This class centralizes (a) resolving the image input name + fixed
-/// spatial size and the optional auxiliary inputs from the session metadata, (b) reading those fused
-/// detections out of the run results, and (c) thresholding + class-mapping + box-scaling them into
-/// <see cref="LayoutRegion"/>s.
+/// (<c>[class_id, score, x1, y1, x2, y2, order_index]</c>, the trailing column being the model's predicted
+/// reading-order index, which this parser surfaces on the region), confirmed by loading the ONNX and printing
+/// the output. The detection row width is therefore detected per-run rather than fixed. This class
+/// centralizes (a) resolving the image input name + fixed spatial size and the optional auxiliary inputs from
+/// the session metadata, (b) reading those fused detections out of the run results, and (c) thresholding +
+/// class-mapping + box-scaling them into <see cref="LayoutRegion"/>s.
 /// </summary>
 internal static class LayoutGraph
 {
@@ -105,6 +105,66 @@ internal static class LayoutGraph
     private const int MinRowWidth = 6;
 
     /// <summary>
+    /// Whether an output name is the conventional PaddleDetection detection-count output. Used to prefer the
+    /// right integer output over any other integer tensor the graph happens to declare.
+    /// </summary>
+    private static bool IsCountName(string name)
+        => name.Contains("boxes_num", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("num_boxes", StringComparison.OrdinalIgnoreCase)
+        || name.Contains("bbox_num", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Resolves the subset of graph outputs box detection actually consumes: the float detection tensor and
+    /// the rank&#8209;&#8804;1 integer <c>boxes_num</c> companion. Everything else is skipped — notably
+    /// PP-DocLayoutV3's <c>int32[300,200,200]</c> instance mask, which costs ~48&#160;MB of compute and
+    /// marshalling per page and is then discarded. Returns <c>null</c> when the metadata does not clearly
+    /// identify the outputs, in which case the caller should fetch them all.
+    /// </summary>
+    /// <param name="session">The layout detection session to inspect.</param>
+    public static IReadOnlyList<string>? ResolveDetectionOutputs(InferenceSession session)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+
+        var wanted = new List<string>(2);
+        string? detections = null;
+        string? count = null;
+
+        // OutputMetadata is a Dictionary, so enumeration order is not contractual. Both picks below are
+        // therefore constrained by shape as well as type, and the count also prefers its conventional name:
+        // PP-DocLayoutV3's instance mask is int32 too, and selecting it as `boxes_num` would yield a mask
+        // pixel value (typically 0) as the detection count -- zero layout regions, no error, no log.
+        foreach (var (name, meta) in session.OutputMetadata)
+        {
+            if (!meta.IsTensor) continue;
+
+            var dims = meta.Dimensions;
+            int rank = dims?.Length ?? 0;
+
+            // ReadDetections requires at least MinRowWidth columns per row; a float 2-D output narrower than
+            // that is some other head, not the detections. -1 is a dynamic dimension, which we accept.
+            bool widthUsable = rank < 2 || dims is null || dims[^1] < 0 || dims[^1] >= MinRowWidth;
+            if (detections is null && meta.ElementType == typeof(float) && rank is 1 or 2 && widthUsable)
+            {
+                detections = name;
+                continue;
+            }
+
+            bool isIntegral = meta.ElementType == typeof(int) || meta.ElementType == typeof(long);
+            if (isIntegral && rank <= 1 && (count is null || IsCountName(name)))
+            {
+                count = name;
+            }
+        }
+
+        // Without the detection tensor there is nothing to select on; let the caller fetch everything.
+        if (detections is null) return null;
+
+        wanted.Add(detections);
+        if (count is not null) wanted.Add(count);
+        return wanted;
+    }
+
+    /// <summary>
     /// Reads the fused-decode detections out of the run <paramref name="results"/>. Picks the float output
     /// shaped <c>[N, W]</c> (W ≥ 6) as the detection tensor — its leading six columns are
     /// <c>[class_id, score, x1, y1, x2, y2]</c> and any trailing column is ignored — and uses the companion
@@ -164,7 +224,9 @@ internal static class LayoutGraph
     /// (<paramref name="scaleX"/>, <paramref name="scaleY"/>) into source-image space (1,1 when the graph
     /// already emitted source pixels) and clamped to <paramref name="origW"/>×<paramref name="origH"/>; and
     /// its raw class id is mapped via <paramref name="classMap"/> (unmapped ids resolve to
-    /// <see cref="StructureBlockType.Unknown"/>). Zero-area boxes are dropped.
+    /// <see cref="StructureBlockType.Unknown"/>) and, when <paramref name="labelNames"/> is supplied, its raw
+    /// label name is carried through on the region. Rows wider than six columns also carry the model's
+    /// predicted reading-order index (column 6). Zero-area boxes are dropped.
     /// </summary>
     public static IReadOnlyList<LayoutRegion> BuildRegions(
         Detections detections,
@@ -173,7 +235,8 @@ internal static class LayoutGraph
         float scaleX,
         float scaleY,
         int origW,
-        int origH)
+        int origH,
+        IReadOnlyDictionary<int, string>? labelNames = null)
     {
         var data = detections.Data;
         int rowWidth = detections.RowWidth;
@@ -206,7 +269,15 @@ internal static class LayoutGraph
             }
 
             var type = classMap.TryGetValue(rawClassId, out var mapped) ? mapped : StructureBlockType.Unknown;
-            regions.Add(new LayoutRegion(type, new OcrBoundingBox(minX, minY, maxX, maxY), score, rawClassId));
+            string? rawLabel = labelNames is not null && labelNames.TryGetValue(rawClassId, out var name)
+                ? name
+                : null;
+
+            // The 7-wide PP-DocLayoutV3 rows carry the model's own reading-order index in the trailing column.
+            int? orderIndex = rowWidth > 6 ? (int)MathF.Round(data[baseIdx + 6]) : null;
+
+            regions.Add(new LayoutRegion(
+                type, new OcrBoundingBox(minX, minY, maxX, maxY), score, rawClassId, rawLabel, orderIndex));
         }
 
         return regions;
@@ -220,10 +291,13 @@ internal static class LayoutGraph
     {
         switch (value.Value)
         {
-            case Tensor<int> i32 when i32.Length >= 1:
+            // Rank must be <= 1. RT-DETR layout exports also carry an int32[300,200,200] instance mask, and
+            // accepting it here would read a mask pixel (usually 0) as the box count and silently return no
+            // layout regions at all.
+            case Tensor<int> i32 when i32.Length >= 1 && i32.Dimensions.Length <= 1:
                 count = i32.GetValue(0);
                 return true;
-            case Tensor<long> i64 when i64.Length >= 1:
+            case Tensor<long> i64 when i64.Length >= 1 && i64.Dimensions.Length <= 1:
                 count = (int)i64.GetValue(0);
                 return true;
             default:

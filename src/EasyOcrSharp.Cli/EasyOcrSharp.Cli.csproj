@@ -6,12 +6,13 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
+		<IsAotCompatible>true</IsAotCompatible>
 		<RootNamespace>EasyOcrSharp.Cli</RootNamespace>
 		<AssemblyName>EasyOcrSharp.Cli</AssemblyName>
 		<PackAsTool>true</PackAsTool>
 		<ToolCommandName>easyocrsharp</ToolCommandName>
 		<PackageId>EasyOcrSharp.Cli</PackageId>
-		<Version>3.0.0</Version>
+		<Version>3.1.0</Version>
 		<Authors>Farhan Lodi</Authors>
 		<Description>Command-line OCR powered by EasyOcrSharp — EasyOCR's neural models on ONNX Runtime, no Python required. Scans images, PDFs, globs and folders to text, JSON, hOCR, ALTO or TSV, writes searchable PDFs, and pre-pulls models for air-gapped deployment.</Description>
 		<PackageTags>OCR;EasyOCR;ONNX;CLI;dotnet-tool;TextRecognition;hOCR;ALTO;SearchablePDF;.NET10</PackageTags>
@@ -20,7 +21,7 @@
 		<PackageReadmeFile>README.md</PackageReadmeFile>
 		<PackageLicenseExpression>MIT</PackageLicenseExpression>
 		<PackageIcon>icon.png</PackageIcon>
-		<PackageReleaseNotes>3.0.0: Tracks EasyOcrSharp 3.0.0. The imaging stack moves to EasyImageSharp and the PP-StructureV3 document-structure engine is now built into EasyOcrSharp rather than coming from the third-party PaddleOcrNet package, so no split-licensed dependency remains anywhere in the graph. Models are served from the EasyOcrSharp model repository and cached in one directory shared with the library (%LOCALAPPDATA%/EasyOcrSharp/models), so structure models re-download once after upgrading. No command, flag, output format or exit code changed.</PackageReleaseNotes>
+		<PackageReleaseNotes>3.1.0: Tracks EasyOcrSharp 3.1.0, which adds tagged OpenTelemetry metrics (recorded on failures too, not just successes), opt-in concurrency limiting and per-operation timeouts, a warm-up hosted service, and a health check that verifies OCR actually runs rather than only that model files exist. No command, flag, output format or exit code changed. 3.0.0: Tracks EasyOcrSharp 3.0.0. The imaging stack moves to EasyImageSharp and the PP-StructureV3 document-structure engine is now built into EasyOcrSharp rather than coming from the third-party PaddleOcrNet package, so no split-licensed dependency remains anywhere in the graph. Models are served from the EasyOcrSharp model repository and cached in one directory shared with the library (%LOCALAPPDATA%/EasyOcrSharp/models), so structure models re-download once after upgrading. No command, flag, output format or exit code changed.</PackageReleaseNotes>
 		<NeutralLanguage>en-US</NeutralLanguage>
 		<PublishRepositoryUrl>true</PublishRepositoryUrl>
 		<UseWindowsForms>false</UseWindowsForms>

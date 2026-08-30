@@ -1,6 +1,7 @@
 using EasyImageSharp;
 using EasyImageSharp.Formats;
 using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 
 namespace EasyOcrSharp.Internal;
 
@@ -34,7 +35,8 @@ internal static class DecodeLimits
     {
         try
         {
-            return await Image.LoadAsync<Rgb24>(path, For(maxPixels), ct).ConfigureAwait(false);
+            using var decoded = await Image.LoadAsync<Rgba32>(path, For(maxPixels), ct).ConfigureAwait(false);
+            return Normalize(decoded);
         }
         catch (ImageSizeLimitExceededException ex)
         {
@@ -46,7 +48,8 @@ internal static class DecodeLimits
     {
         try
         {
-            return await Image.LoadAsync<Rgb24>(stream, For(maxPixels), ct).ConfigureAwait(false);
+            using var decoded = await Image.LoadAsync<Rgba32>(stream, For(maxPixels), ct).ConfigureAwait(false);
+            return Normalize(decoded);
         }
         catch (ImageSizeLimitExceededException ex)
         {
@@ -58,12 +61,42 @@ internal static class DecodeLimits
     {
         try
         {
-            return Image.Load<Rgb24>(bytes, For(maxPixels));
+            using var decoded = Image.Load<Rgba32>(bytes, For(maxPixels));
+            return Normalize(decoded);
         }
         catch (ImageSizeLimitExceededException ex)
         {
             throw Restate(ex, optionName);
         }
+    }
+
+    /// <summary>
+    /// Turns a freshly decoded image into the upright, opaque RGB buffer the models expect.
+    /// <para>
+    /// Two steps, both of which the pipeline previously skipped by decoding straight to
+    /// <see cref="Rgb24"/>:
+    /// </para>
+    /// <para>
+    /// <b>EXIF orientation.</b> A phone photo of a receipt is normally stored landscape with an
+    /// <c>Orientation</c> tag of 6; every viewer shows it upright, but the raw buffer is sideways and the
+    /// detector finds almost nothing. <c>AutoOrient</c> applies the tag and resets it — a no-op when there is
+    /// no EXIF profile or the orientation is already 1, and lossless for the 90° cases.
+    /// </para>
+    /// <para>
+    /// <b>Alpha compositing.</b> Converting RGBA to RGB discards alpha rather than compositing it, so a
+    /// transparent background (a logo, an exported diagram, a screenshot with transparency) becomes
+    /// <c>(0,0,0)</c> — dark glyphs on a black page, which returns empty text with no error.
+    /// </para>
+    /// <para>
+    /// Both steps are applied <b>in place, to every frame</b>, and the RGB image is then produced with
+    /// <c>CloneAs</c>. That matters: building a fresh single-frame <c>Image&lt;Rgb24&gt;</c> and drawing onto it
+    /// would silently flatten a multi-frame TIFF to its first page, breaking the multi-frame API.
+    /// </para>
+    /// </summary>
+    private static Image<Rgb24> Normalize(Image<Rgba32> decoded)
+    {
+        decoded.Mutate(c => c.AutoOrient().BackgroundColor(Color.White));
+        return decoded.CloneAs<Rgb24>();
     }
 
     private static ImageTooLargeException Restate(ImageSizeLimitExceededException inner, string optionName)

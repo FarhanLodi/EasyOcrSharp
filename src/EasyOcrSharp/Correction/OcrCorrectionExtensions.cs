@@ -373,7 +373,12 @@ public static class OcrCorrectionExtensions
         foreach (var line in lines)
         {
             if (string.IsNullOrEmpty(line.Text)) continue;
-            if (sb.Length > 0) sb.AppendLine();
+            // LF, not AppendLine's Environment.NewLine. ParagraphGrouper joins merged
+            // lines with "\n" and the multi-frame/PDF aggregates join with
+            // "\n\n", so on Windows a single FullText mixed both separators.
+            // It also inflated CharacterErrorRate by one insertion per line break when
+            // compared against LF ground truth.
+            if (sb.Length > 0) sb.Append('\n');
             sb.Append(line.Text);
         }
         return sb.ToString();

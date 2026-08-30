@@ -12,6 +12,8 @@ using OcrLine = EasyOcrSharp.Models.OcrLine;
 using OcrPoint = EasyOcrSharp.Models.OcrPoint;
 using OcrBoundingBox = EasyOcrSharp.Models.OcrBoundingBox;
 
+using EasyOcrSharp.Internal;
+
 namespace EasyOcrSharp.Structure.Engine.Services;
 
 /// <summary>
@@ -458,7 +460,9 @@ internal sealed class StructureService : IStructureService
     /// </summary>
     private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0, IReadOnlyList<string>? detectedLanguages = null)
     {
-        var ordered = SortLinesByReadingOrder(lines);
+        // Derived from the requested languages: this engine has no per-call direction option, and every
+        // caller reaching it has already resolved its language set.
+        var ordered = SortLinesByReadingOrder(lines, ScriptDirection.IsRightToLeft(languages));
         sw.Stop();
         _logger?.LogInformation("OCR completed: {Count} lines in {Ms:F0} ms", ordered.Count, sw.Elapsed.TotalMilliseconds);
 
@@ -624,19 +628,26 @@ internal sealed class StructureService : IStructureService
     /// from the median line height — so large headings / high-DPI scans aren't split across bands and
     /// dense small text isn't merged, unlike a fixed pixel tolerance.
     /// </summary>
-    internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines)
+    internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines, bool rightToLeft = false)
     {
         if (lines.Count <= 1) return lines.ToList();
 
         double medianHeight = Median(lines.Select(l => (double)l.BoundingBox.Height).Where(h => h > 0));
         double tol = Math.Max(4.0, 0.5 * medianHeight);
 
+        var columns = DetectColumns(lines, medianHeight);
+
+        // A right-to-left page is read starting from the right-most column; within a row band the
+        // right-most fragment leads. Mirrors EasyOcrService.SortLinesByReadingOrder exactly.
+        if (rightToLeft) columns.Reverse();
+
         var result = new List<OcrLine>(lines.Count);
-        foreach (var column in DetectColumns(lines, medianHeight))
+        foreach (var column in columns)
         {
-            result.AddRange(column
-                .OrderBy(l => Math.Round(l.BoundingBox.MinY / tol) * tol)
-                .ThenBy(l => l.BoundingBox.MinX));
+            var byRow = column.OrderBy(l => Math.Round(l.BoundingBox.MinY / tol) * tol);
+            result.AddRange(rightToLeft
+                ? byRow.ThenByDescending(l => l.BoundingBox.MaxX)
+                : byRow.ThenBy(l => l.BoundingBox.MinX));
         }
         return result;
     }
@@ -690,13 +701,23 @@ internal sealed class StructureService : IStructureService
         foreach (var line in lines)
         {
             if (string.IsNullOrEmpty(line.Text)) continue;
-            if (sb.Length > 0) sb.AppendLine();
+            // LF, not AppendLine's Environment.NewLine. ParagraphGrouper joins merged
+            // lines with "\n" and the multi-frame/PDF aggregates join with
+            // "\n\n", so on Windows a single FullText mixed both separators.
+            // It also inflated CharacterErrorRate by one insertion per line break when
+            // compared against LF ground truth.
+            if (sb.Length > 0) sb.Append('\n');
             sb.Append(line.Text);
         }
         return sb.ToString();
     }
 
     // ---- guarded image loading (decompression-bomb / pixel-flood DoS guard) ----
+
+    /// <summary>
+    /// The option named in an <c>ImageTooLargeException</c> raised from the decoder on this path.
+    /// </summary>
+    private const string PixelOptionName = "StructureServiceOptions.MaxImagePixels";
 
     private async Task<Image<Rgb24>> LoadGuarded(string path, CancellationToken ct)
     {
@@ -705,13 +726,13 @@ internal sealed class StructureService : IStructureService
             var info = await Image.IdentifyAsync(path, ct).ConfigureAwait(false);
             GuardPixels(info.Width, info.Height);
         }
-        return await Image.LoadAsync<Rgb24>(path, ct).ConfigureAwait(false);
+        return await DecodeLimits.LoadAsync(path, _maxImagePixels, PixelOptionName, ct).ConfigureAwait(false);
     }
 
     private async Task<Image<Rgb24>> LoadGuarded(Stream stream, CancellationToken ct)
     {
         if (_maxImagePixels <= 0)
-            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+            return await DecodeLimits.LoadAsync(stream, _maxImagePixels, PixelOptionName, ct).ConfigureAwait(false);
 
         if (stream.CanSeek)
         {
@@ -719,7 +740,7 @@ internal sealed class StructureService : IStructureService
             var info = await Image.IdentifyAsync(stream, ct).ConfigureAwait(false);
             GuardPixels(info.Width, info.Height);
             stream.Seek(pos, SeekOrigin.Begin);
-            return await Image.LoadAsync<Rgb24>(stream, ct).ConfigureAwait(false);
+            return await DecodeLimits.LoadAsync(stream, _maxImagePixels, PixelOptionName, ct).ConfigureAwait(false);
         }
 
         // Non-seekable: buffer the (small) compressed bytes once so we can inspect the header before
@@ -736,7 +757,7 @@ internal sealed class StructureService : IStructureService
             var info = Image.Identify(bytes);
             GuardPixels(info.Width, info.Height);
         }
-        return Image.Load<Rgb24>(bytes);
+        return DecodeLimits.Load(bytes, _maxImagePixels, PixelOptionName);
     }
 
     private void GuardPixels(int width, int height)

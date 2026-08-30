@@ -9,8 +9,16 @@ namespace EasyOcrSharp.Models;
 public sealed record OcrResult
 {
     /// <summary>
-    /// Gets the concatenated text extracted from the image.
+    /// Gets the concatenated text extracted from the image, one <see cref="Lines"/> entry per line joined
+    /// with a single line feed (<c>\n</c>) on every platform.
     /// </summary>
+    /// <remarks>
+    /// LF, not <see cref="Environment.NewLine"/>: paragraph grouping joins merged lines with <c>\n</c> and the
+    /// multi-frame and PDF aggregates join pages with <c>\n\n</c>, so a platform-dependent separator here
+    /// produced a single string carrying two different line endings on Windows. It also inflated
+    /// <c>TextAccuracyMetrics.CharacterErrorRate</c> by one spurious insertion per line break whenever the
+    /// ground truth was read from an LF file.
+    /// </remarks>
     public required string FullText { get; init; }
 
     /// <summary>

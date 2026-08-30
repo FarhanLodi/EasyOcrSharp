@@ -29,8 +29,12 @@ internal static class XyCutOrderer
     /// Returns the input block indices reordered into reading order.
     /// </summary>
     /// <param name="blocks">The block bounding boxes, in arbitrary order (source-image pixel coordinates).</param>
+    /// <param name="rightToLeft">
+    /// When <c>true</c>, columns are emitted right-to-left and same-row blocks are ordered right-to-left —
+    /// the reading order of an Arabic or Hebrew page. Defaults to <c>false</c>.
+    /// </param>
     /// <returns>A permutation of <c>0..blocks.Count-1</c> giving the reading order.</returns>
-    public static IReadOnlyList<int> Order(IReadOnlyList<OcrBoundingBox> blocks)
+    public static IReadOnlyList<int> Order(IReadOnlyList<OcrBoundingBox> blocks, bool rightToLeft = false)
     {
         if (blocks.Count == 0) return Array.Empty<int>();
         if (blocks.Count == 1) return new[] { 0 };
@@ -43,7 +47,7 @@ internal static class XyCutOrderer
         // Start by cutting on X (into columns) — a page's coarsest structure is its columns; CutX falls
         // through to CutY when the group forms a single column, so either starting axis converges, but
         // X-first matches the "left column fully then right" ordering the pipeline wants.
-        CutX(blocks, all, result);
+        CutX(blocks, all, result, rightToLeft);
         return result;
     }
 
@@ -53,7 +57,7 @@ internal static class XyCutOrderer
     /// column (no vertical gap splits it) it is handed to <see cref="CutY"/> directly to attempt a
     /// horizontal cut, so the two axes alternate until the group can no longer be divided.
     /// </summary>
-    private static void CutX(IReadOnlyList<OcrBoundingBox> blocks, IReadOnlyList<int> group, List<int> result)
+    private static void CutX(IReadOnlyList<OcrBoundingBox> blocks, IReadOnlyList<int> group, List<int> result, bool rightToLeft)
     {
         if (group.Count == 1)
         {
@@ -65,13 +69,22 @@ internal static class XyCutOrderer
         if (columns.Count <= 1)
         {
             // No vertical gap divides the group → it is a single column; try to cut it horizontally.
-            CutY(blocks, group, result);
+            CutY(blocks, group, result, rightToLeft);
             return;
         }
 
-        // Columns already come out ordered left → right (by their min-X). Recurse each on the Y axis.
-        foreach (var column in columns)
-            CutY(blocks, column, result);
+        // Columns come out ordered left → right (by their min-X). A right-to-left page is read starting
+        // from the right-most column, so walk them in reverse.
+        if (rightToLeft)
+        {
+            for (int i = columns.Count - 1; i >= 0; i--)
+                CutY(blocks, columns[i], result, rightToLeft);
+        }
+        else
+        {
+            foreach (var column in columns)
+                CutY(blocks, column, result, rightToLeft);
+        }
     }
 
     /// <summary>
@@ -80,7 +93,7 @@ internal static class XyCutOrderer
     /// When no horizontal gap divides the group, recursion has bottomed out: the group is emitted directly
     /// in top-to-bottom / left-to-right order.
     /// </summary>
-    private static void CutY(IReadOnlyList<OcrBoundingBox> blocks, IReadOnlyList<int> group, List<int> result)
+    private static void CutY(IReadOnlyList<OcrBoundingBox> blocks, IReadOnlyList<int> group, List<int> result, bool rightToLeft)
     {
         if (group.Count == 1)
         {
@@ -93,14 +106,14 @@ internal static class XyCutOrderer
         {
             // Neither axis can divide this group (it is a single column AND a single band) → leaf.
             // Emit its blocks in reading order so overlapping/nested boxes still come out sensibly.
-            EmitLeaf(blocks, group, result);
+            EmitLeaf(blocks, group, result, rightToLeft);
             return;
         }
 
         // Bands already come out ordered top → bottom (by their min-Y). Recurse each on the X axis so a
         // band that spans multiple columns is itself column-ordered.
         foreach (var band in bands)
-            CutX(blocks, band, result);
+            CutX(blocks, band, result, rightToLeft);
     }
 
     /// <summary>
@@ -159,13 +172,16 @@ internal static class XyCutOrderer
     /// overlapping boxes). They are ordered top-to-bottom then left-to-right so the output is still a
     /// sensible local reading order rather than the arbitrary input order.
     /// </summary>
-    private static void EmitLeaf(IReadOnlyList<OcrBoundingBox> blocks, IReadOnlyList<int> group, List<int> result)
+    private static void EmitLeaf(IReadOnlyList<OcrBoundingBox> blocks, IReadOnlyList<int> group, List<int> result, bool rightToLeft)
     {
         var ordered = new List<int>(group);
         ordered.Sort((x, y) =>
         {
             int c = blocks[x].MinY.CompareTo(blocks[y].MinY);
-            return c != 0 ? c : blocks[x].MinX.CompareTo(blocks[y].MinX);
+            if (c != 0) return c;
+            return rightToLeft
+                ? blocks[y].MaxX.CompareTo(blocks[x].MaxX)
+                : blocks[x].MinX.CompareTo(blocks[y].MinX);
         });
         result.AddRange(ordered);
     }

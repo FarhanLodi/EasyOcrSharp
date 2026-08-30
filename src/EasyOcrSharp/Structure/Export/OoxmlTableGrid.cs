@@ -15,21 +15,28 @@ internal sealed class OoxmlTableGrid
     public required int RowCount { get; init; }
     public required int ColumnCount { get; init; }
 
+    // Upper bounds on the materialized grid, mirroring TableHtmlParser's. FromRows allocates two
+    // rowCount x maxCols arrays, so degenerate markup (many rows, each summing to a huge colspan) would
+    // otherwise OOM inside SaveAsDocx/SaveAsXlsx. Far above any real recovered table.
+    private const int MaxRows = 4096;
+    private const int MaxColumns = 1024;
+
     public static OoxmlTableGrid FromRows(List<List<OoxmlRawCell>> rows)
     {
-        int rowCount = rows.Count;
+        int rowCount = Math.Min(rows.Count, MaxRows);
 
         // Column count is the widest row once colspans are accounted for. Because rowspans push cells down
         // into later rows, we resolve placement with an occupancy map and grow the column count as needed.
         // First pass: an upper bound on columns.
         int maxCols = 0;
-        foreach (var row in rows)
+        for (int r = 0; r < rowCount; r++)
         {
             int width = 0;
-            foreach (var cell in row) width += cell.ColSpan;
+            foreach (var cell in rows[r]) width += cell.ColSpan;
             if (width > maxCols) maxCols = width;
         }
         if (maxCols == 0) maxCols = 1;
+        if (maxCols > MaxColumns) maxCols = MaxColumns;
 
         // occupied[r,c] marks slots already taken by a rowspan/colspan placed earlier.
         var occupied = new bool[rowCount, maxCols];

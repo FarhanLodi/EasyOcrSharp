@@ -121,6 +121,10 @@ public sealed partial class EasyOcrService
         // The four-way orientation sweep scores whole-page results against each other, so not a single
         // line can be trusted until the last orientation has been recognized. Run the buffered pipeline
         // and replay it — correct output, just not incremental (documented on the public overloads).
+        //
+        // No governor slot is taken for this branch: it delegates to the buffered pipeline, which takes
+        // one of its own. Acquiring here as well would take two slots for one call and deadlock a service
+        // configured with a single slot against itself.
         if (options.Preprocessing.DetectOrientation)
         {
             var buffered = await ExtractTextFromImage(image, languages, options, cancellationToken).ConfigureAwait(false);
@@ -131,7 +135,75 @@ public sealed partial class EasyOcrService
             yield break;
         }
 
+        EnsureNotDisposed();
+        // Same acquire → record → translate sequence as RunGatedAsync, spelled out because an iterator
+        // cannot yield from inside a catch block. Declaration order is disposal order reversed: the
+        // recorder stamps its outcome on the span, so the span must outlive it.
         using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.ExtractStream", ActivityKind.Internal);
+        using var recorder = EasyOcrDiagnostics.Begin(EasyOcrDiagnostics.OperationNames.ExtractStream, ProviderName).Annotate(activity);
+
+        OperationLease? lease = null;
+        bool completed = false;
+        bool faulted = false;
+        try
+        {
+            try
+            {
+                lease = await _governor.AcquireAsync(EasyOcrDiagnostics.OperationNames.ExtractStream, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                faulted = true;
+                var shed = RecordFailure(recorder, lease, ex);
+                if (ReferenceEquals(shed, ex)) throw;
+                throw shed;
+            }
+
+            // The pipeline runs on the LEASE token, not the caller's, so OperationTimeout can fire.
+            await using var lines = StreamPipelineAsync(image, languages, options, recorder, activity, lease.Token)
+                .GetAsyncEnumerator(lease.Token);
+            while (true)
+            {
+                OcrLine current;
+                try
+                {
+                    if (!await lines.MoveNextAsync().ConfigureAwait(false)) break;
+                    current = lines.Current;
+                }
+                catch (Exception ex)
+                {
+                    faulted = true;
+                    var surfaced = RecordFailure(recorder, lease, ex);
+                    if (ReferenceEquals(surfaced, ex)) throw;
+                    throw surfaced;
+                }
+
+                yield return current;
+            }
+            completed = true;
+        }
+        finally
+        {
+            // A consumer that walks away mid-stream (a `break`, or an exception of its own) made a choice
+            // rather than hitting a fault, so it is recorded as a cancellation — otherwise the recorder's
+            // deliberate "error" default would brand every partially consumed page as a failure.
+            if (completed) recorder.Success();
+            else if (!faulted) recorder.Canceled();
+            lease?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The streaming pipeline proper, run under the governor lease held by <see cref="StreamCoreAsync"/>.
+    /// </summary>
+    private async IAsyncEnumerable<OcrLine> StreamPipelineAsync(
+        Image<Rgb24> image,
+        IEnumerable<string> languages,
+        RecognitionOptions options,
+        OcrOperationRecorder recorder,
+        Activity? activity,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
         var sw = Stopwatch.StartNew();
         var langs = Array.Empty<string>();
         int emitted = 0;
@@ -144,6 +216,10 @@ public sealed partial class EasyOcrService
             // buffered pipeline does, so boxes are reported in the corrected image's coordinate space.
             if (options.Preprocessing.DocumentOrientation || options.Preprocessing.DocumentUnwarp)
             {
+                // Inside the drain gate, like every other model call: without it _activeOperations stays 0
+                // while the orientation/UVDoc sessions are running, so a concurrent DisposeAsync sees an idle
+                // service and frees those sessions mid-Run.
+                using var op = BeginOperation();
                 var (corrected, rotation) = await _docPreprocess.ApplyAsync(
                     image, options.Preprocessing.DocumentOrientation, options.Preprocessing.DocumentUnwarp, cancellationToken).ConfigureAwait(false);
                 docCorrected = corrected;
@@ -162,13 +238,16 @@ public sealed partial class EasyOcrService
             langs = await ResolveStreamLanguagesAsync(working, languages, options, cancellationToken).ConfigureAwait(false);
 
             // One detection pass over the whole page. This also applies the region-of-interest crop and
-            // the Line/Paragraph box merging, and reports polygons in `working` coordinates.
-            var regions = await DetectRegionsAsync(working, options, cancellationToken).ConfigureAwait(false);
+            // the Line/Paragraph box merging, and reports polygons in `working` coordinates. The ungated
+            // core, not the public method: this stream already holds a governor slot, and asking for a
+            // second one would deadlock a single-slot service against itself.
+            var regions = await DetectRegionsCoreAsync(working, options, cancellationToken).ConfigureAwait(false);
             if (regions.Count > 0)
             {
                 // Recognize BatchSize regions per call so a caller that opted into batched inference still
                 // gets it; 1 (the default) is the lowest-latency, most incremental setting.
-                var chunks = OrderRegionsForReading(regions).Chunk(Math.Max(1, options.BatchSize)).ToArray();
+                bool rightToLeft = ScriptDirection.IsRightToLeft(options.ReadingDirection, langs);
+                var chunks = OrderRegionsForReading(regions, rightToLeft).Chunk(Math.Max(1, options.BatchSize)).ToArray();
                 var perChunk = options with
                 {
                     // Paragraph merging spans the whole page — never merge inside a chunk. (For Word/Line
@@ -197,7 +276,7 @@ public sealed partial class EasyOcrService
                     {
                         page.Add(line);
                     }
-                    foreach (var paragraph in SortLinesByReadingOrder(ParagraphGrouper.Merge(page, options.GroupingOptions)))
+                    foreach (var paragraph in SortLinesByReadingOrder(ParagraphGrouper.Merge(page, options.GroupingOptions, rightToLeft), rightToLeft))
                     {
                         emitted++;
                         yield return paragraph;
@@ -220,10 +299,10 @@ public sealed partial class EasyOcrService
 
             sw.Stop();
             // Recorded even when the consumer abandons the enumeration, so a partially consumed stream
-            // still shows up in the metrics with what it actually produced.
-            EasyOcrDiagnostics.Operations.Add(1);
-            EasyOcrDiagnostics.Duration.Record(sw.Elapsed.TotalMilliseconds);
-            EasyOcrDiagnostics.LinesRecognized.Add(emitted);
+            // still shows up in the metrics with what it actually produced. The measurements themselves
+            // are emitted by the recorder — tagged with the operation, provider and outcome — when
+            // StreamCoreAsync disposes it, which happens after this finally on every exit path.
+            recorder.WithLanguages(langs).AddLines(emitted);
             if (activity is not null)
             {
                 activity.SetTag("easyocr.languages", string.Join(",", langs));
@@ -268,7 +347,8 @@ public sealed partial class EasyOcrService
             return ResolveLanguages(languages, allowEmpty: false);
         }
 
-        var detected = await DetectLanguagesAsync(image, options.AutoDetectCandidates, cancellationToken).ConfigureAwait(false);
+        // The ungated core: the caller already holds this stream's one governor slot.
+        var detected = await DetectLanguagesCoreAsync(image, options.AutoDetectCandidates, cancellationToken).ConfigureAwait(false);
         if (detected.Count > 0)
         {
             _logger?.LogInformation("Auto-detected languages: {Langs}", string.Join(", ", detected));
@@ -287,7 +367,7 @@ public sealed partial class EasyOcrService
     /// nothing but <see cref="OcrLine.BoundingBox"/>, and identity (not value) lookup maps each sorted
     /// placeholder back to its region even when two regions share identical geometry.
     /// </summary>
-    internal static IReadOnlyList<DetectedRegion> OrderRegionsForReading(IReadOnlyList<DetectedRegion> regions)
+    internal static IReadOnlyList<DetectedRegion> OrderRegionsForReading(IReadOnlyList<DetectedRegion> regions, bool rightToLeft = false)
     {
         if (regions.Count <= 1) return regions;
 
@@ -304,7 +384,7 @@ public sealed partial class EasyOcrService
             origin[placeholders[i]] = i;
         }
 
-        var sorted = SortLinesByReadingOrder(placeholders);
+        var sorted = SortLinesByReadingOrder(placeholders, rightToLeft);
         var ordered = new List<DetectedRegion>(regions.Count);
         foreach (var placeholder in sorted)
         {
@@ -405,8 +485,15 @@ internal static class OrderedStreamPump
             // The producer swallows its own faults into the channel completion, so this never throws;
             // awaiting it guarantees no further item is queued behind our back before we drain.
             await producer.ConfigureAwait(false);
-            if (awaiting is not null) Observe(awaiting);
-            while (channel.Reader.TryRead(out var leftover)) Observe(leftover);
+
+            // AWAIT the abandoned work rather than merely observing its faults. When the consumer breaks out
+            // of the enumeration early, up to MaxDegreeOfParallelism recognition tasks are still inside
+            // synchronous native inference, reading the page image. stop.Cancel() cannot interrupt them --
+            // the detector and recognizer take no token -- so returning here would let StreamCoreAsync's own
+            // finally dispose that image out from under them, reading pixel memory already returned to the
+            // pool. This is the only point that can guarantee no task outlives the image.
+            if (awaiting is not null) await DrainAsync(awaiting).ConfigureAwait(false);
+            while (channel.Reader.TryRead(out var leftover)) await DrainAsync(leftover).ConfigureAwait(false);
         }
     }
 
@@ -437,13 +524,15 @@ internal static class OrderedStreamPump
         catch (OperationCanceledException)
         {
             // Cancellation is the consumer's business to report (it holds the original token); completing
-            // cleanly here keeps a ChannelClosedException from masking it.
-            if (started is not null) Observe(started);
+            // cleanly here keeps a ChannelClosedException from masking it. The task started but never queued
+            // is reading the page image, so wait it out here -- RunOrderedAsync awaits this producer before
+            // its caller disposes that image.
+            if (started is not null) await DrainAsync(started).ConfigureAwait(false);
             writer.TryComplete();
         }
         catch (Exception ex)
         {
-            if (started is not null) Observe(started);
+            if (started is not null) await DrainAsync(started).ConfigureAwait(false);
             writer.TryComplete(ex);
         }
     }
@@ -467,21 +556,20 @@ internal static class OrderedStreamPump
     }
 
     /// <summary>
-    /// Marks a task's fault as observed so an item nobody will ever await can't surface later as an
-    /// unobserved task exception. Cancelled tasks need no such treatment.
+    /// Waits for a task whose result nobody will consume, swallowing whatever it finishes with. Used to make
+    /// abandoned in-flight work quiesce before the caller tears down the image it is reading; it also marks
+    /// the fault observed, so nothing surfaces later as an unobserved task exception.
     /// </summary>
-    private static void Observe(Task task)
+    private static async Task DrainAsync(Task task)
     {
-        if (task.IsCompleted)
+        try
         {
-            _ = task.Exception;
-            return;
+            await task.ConfigureAwait(false);
         }
-
-        _ = task.ContinueWith(
-            static t => _ = t.Exception,
-            CancellationToken.None,
-            TaskContinuationOptions.ExecuteSynchronously,
-            TaskScheduler.Default);
+        catch
+        {
+            // The consumer abandoned this item, so its outcome -- fault or cancellation -- is irrelevant.
+            // What matters is that the task has stopped touching the source image.
+        }
     }
 }

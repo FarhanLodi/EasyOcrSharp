@@ -245,7 +245,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
 
         if (options.Grouping != TextGrouping.Paragraph) return merged;
 
-        var paragraphs = ParagraphGrouper.Merge(merged, options.GroupingOptions);
+        var paragraphs = ParagraphGrouper.Merge(merged, options.GroupingOptions, ScriptDirection.IsRightToLeft(options.ReadingDirection, languages));
         return options.WordLevelDetail == WordLevelDetail.None
             ? paragraphs
             : ReattachWords(paragraphs, merged);

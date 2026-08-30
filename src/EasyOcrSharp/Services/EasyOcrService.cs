@@ -30,6 +30,12 @@ public sealed partial class EasyOcrService : IEasyOcrService
     private readonly EngineOptions _engineOptions;
     private readonly bool _useGpu;
     private readonly long _maxImagePixels;
+    // Concurrency/timeout gate for the outermost public operations. Disabled unless the caller configured
+    // it, in which case it is a pass-through that hands the pipeline the caller's own token.
+    private readonly OperationGovernor _governor;
+    // Cached: it becomes a tag on every metric point, and ResolvedProvider.ToString() would box the enum
+    // and allocate a string per operation.
+    private readonly string _providerName;
     private volatile bool _disposed;
     // Count of OCR operations currently touching the engine's ONNX sessions. DisposeAsync drains this
     // to zero before disposing the sessions so a session is never freed while a Recognize is in flight
@@ -72,7 +78,18 @@ public sealed partial class EasyOcrService : IEasyOcrService
         _docPreprocess = new DocumentPreprocessHost(engineOptions, logger);
         // ResolvedProvider has already turned Auto into a concrete choice based on the installed runtime.
         _useGpu = _engine.ResolvedProvider != OcrExecutionProvider.Cpu;
+        _providerName = _engine.ResolvedProvider.ToString();
+        _governor = options.CreateGovernor();
     }
+
+    /// <summary>The resolved execution provider's name, used as the <c>easyocr.provider</c> metric tag.</summary>
+    /// <summary>
+    /// The resolved execution provider (<c>Cpu</c> / <c>Cuda</c> / ...), used as the <c>easyocr.provider</c>
+    /// metric tag. Internal rather than private so the composite extension methods (PDF, multi-frame,
+    /// batch) tag their data points with the SAME value the per-page points carry — a coarse "Gpu" there
+    /// and an exact "Cuda" here would split one deployment across two series on every provider chart.
+    /// </summary>
+    internal string ProviderName => _providerName;
 
     /// <summary>
     /// Gets a value indicating whether a GPU accelerator was selected for this service — either requested
@@ -167,10 +184,30 @@ public sealed partial class EasyOcrService : IEasyOcrService
     /// (e.g. "en", "ru", "ja"). Candidate scripts default to a common set; widen with
     /// <paramref name="candidates"/> to consider heavier scripts (e.g. "ar", "hi").
     /// </summary>
-    public async Task<IReadOnlyList<string>> DetectLanguagesAsync(
+    public Task<IReadOnlyList<string>> DetectLanguagesAsync(
         Image<Rgb24> image,
         IEnumerable<string>? candidates = null,
         CancellationToken cancellationToken = default)
+        => RunGatedAsync(
+            EasyOcrDiagnostics.OperationNames.DetectLanguages,
+            "EasyOcr.DetectLanguages",
+            async (recorder, _, token) =>
+            {
+                var detected = await DetectLanguagesCoreAsync(image, candidates, token).ConfigureAwait(false);
+                recorder.WithLanguages(detected);
+                return detected;
+            },
+            cancellationToken);
+
+    /// <summary>
+    /// The ungated body of <see cref="DetectLanguagesAsync(Image{Rgb24}, IEnumerable{string}, CancellationToken)"/>.
+    /// The streaming pipeline calls this rather than the public method: it already holds a governor slot,
+    /// and asking for a second one would deadlock a service configured with a single slot against itself.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> DetectLanguagesCoreAsync(
+        Image<Rgb24> image,
+        IEnumerable<string>? candidates,
+        CancellationToken cancellationToken)
     {
         using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
@@ -194,10 +231,25 @@ public sealed partial class EasyOcrService : IEasyOcrService
     /// <see cref="RecognitionOptions.Region"/>, <see cref="RecognitionOptions.Grouping"/> and
     /// <see cref="RecognitionOptions.Detection"/>; recognition-only options are ignored.
     /// </summary>
-    public async Task<IReadOnlyList<DetectedRegion>> DetectRegionsAsync(
+    public Task<IReadOnlyList<DetectedRegion>> DetectRegionsAsync(
         Image<Rgb24> image,
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
+        => RunGatedAsync(
+            EasyOcrDiagnostics.OperationNames.Detect,
+            "EasyOcr.Detect",
+            (_, _, token) => DetectRegionsCoreAsync(image, options, token),
+            cancellationToken);
+
+    /// <summary>
+    /// The ungated body of <see cref="DetectRegionsAsync(Image{Rgb24}, RecognitionOptions?, CancellationToken)"/>,
+    /// called directly by the streaming pipeline — which already holds a governor slot, and would deadlock
+    /// a single-slot service by asking for a second one.
+    /// </summary>
+    private async Task<IReadOnlyList<DetectedRegion>> DetectRegionsCoreAsync(
+        Image<Rgb24> image,
+        RecognitionOptions? options,
+        CancellationToken cancellationToken)
     {
         using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
@@ -234,35 +286,39 @@ public sealed partial class EasyOcrService : IEasyOcrService
     /// character filters, decoder, rotation and paragraph grouping in <paramref name="options"/>;
     /// <see cref="RecognitionOptions.Region"/> and detection thresholds are ignored.
     /// </summary>
-    public async Task<OcrResult> RecognizeRegionsAsync(
+    public Task<OcrResult> RecognizeRegionsAsync(
         Image<Rgb24> image,
         IEnumerable<IReadOnlyList<OcrPoint>> regions,
         IEnumerable<string> languages,
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
-    {
-        using var op = BeginOperation();
-        ArgumentNullException.ThrowIfNull(image);
-        ArgumentNullException.ThrowIfNull(regions);
-        options ??= RecognitionOptions.Default;
+        => RunGatedAsync(
+            EasyOcrDiagnostics.OperationNames.Recognize,
+            "EasyOcr.Recognize",
+            async (recorder, activity, token) =>
+            {
+                using var op = BeginOperation();
+                ArgumentNullException.ThrowIfNull(image);
+                ArgumentNullException.ThrowIfNull(regions);
+                options ??= RecognitionOptions.Default;
 
-        var polygons = regions
-            .Where(r => r is { Count: >= 3 })
-            .Select(r => r.ToArray())
-            .ToArray();
+                var polygons = regions
+                    .Where(r => r is { Count: >= 3 })
+                    .Select(r => r.ToArray())
+                    .ToArray();
 
-        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Recognize", ActivityKind.Internal);
-        var sw = Stopwatch.StartNew();
+                var sw = Stopwatch.StartNew();
 
-        var langs = ResolveLanguages(languages, allowEmpty: false);
-        if (polygons.Length == 0)
-        {
-            return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity, image.Width, image.Height);
-        }
+                var langs = ResolveLanguages(languages, allowEmpty: false);
+                if (polygons.Length == 0)
+                {
+                    return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity, image.Width, image.Height, options.ReadingDirection, recorder);
+                }
 
-        var lines = await _engine.RecognizeRegionsAsync(image, langs, polygons, options, cancellationToken).ConfigureAwait(false);
-        return BuildResult(lines, langs, sw, activity, image.Width, image.Height);
-    }
+                var lines = await _engine.RecognizeRegionsAsync(image, langs, polygons, options, token).ConfigureAwait(false);
+                return BuildResult(lines, langs, sw, activity, image.Width, image.Height, options.ReadingDirection, recorder);
+            },
+            cancellationToken);
 
     /// <summary>Recognizes text inside regions located by a prior <see cref="DetectRegionsAsync(Image{Rgb24}, RecognitionOptions?, CancellationToken)"/> pass.</summary>
     public Task<OcrResult> RecognizeRegionsAsync(
@@ -279,22 +335,113 @@ public sealed partial class EasyOcrService : IEasyOcrService
     /// <inheritdoc />
     public async Task WarmUp(IEnumerable<string> languages, CancellationToken cancellationToken = default)
     {
-        using var op = BeginOperation();
-        var langs = ResolveLanguages(languages, allowEmpty: false);
-        await _engine.WarmUp(langs, cancellationToken).ConfigureAwait(false);
+        // Deliberately NOT gated. Warm-up runs at startup, ahead of any traffic, and is exactly the call
+        // that must not be shed by the governor or killed by OperationTimeout — losing it would push the
+        // cold-start cost onto the first real request, which is what WarmUp exists to prevent. Metrics only.
+        using var recorder = EasyOcrDiagnostics.Begin(EasyOcrDiagnostics.OperationNames.WarmUp, ProviderName);
+        try
+        {
+            using var op = BeginOperation();
+            var langs = ResolveLanguages(languages, allowEmpty: false);
+            recorder.WithLanguages(langs);
+            await _engine.WarmUp(langs, cancellationToken).ConfigureAwait(false);
+            recorder.Success();
+        }
+        catch (Exception ex)
+        {
+            recorder.Failure(ex);
+            throw;
+        }
     }
 
     // ---- pipeline ----
 
-    private async Task<OcrResult> RunPipelineAsync(
+    /// <summary>
+    /// Runs one outermost public operation: a governor slot, a metrics recorder and a span, wrapped around
+    /// the body exactly once.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The slot is taken here and nowhere else. <see cref="BeginOperation"/> — the dispose-drain guard — is
+    /// entered many times per logical operation (once per recognized chunk while streaming), so putting the
+    /// governor inside it would take N slots for one call and deadlock a single-slot service against itself.
+    /// It is also acquired <b>before</b> the body registers with <see cref="BeginOperation"/>, so a call
+    /// still waiting at the gate does not count as in flight and cannot hold <see cref="DisposeAsync"/>'s
+    /// drain hostage for the whole queue timeout.
+    /// </para>
+    /// <para>
+    /// Declaration order is disposal order reversed: the recorder stamps its outcome on the span, so the
+    /// span has to outlive it. The recorder starts before the slot is acquired so an operation shed by the
+    /// governor still produces a measurement — a service rejecting every request must not look idle.
+    /// </para>
+    /// </remarks>
+    private async Task<T> RunGatedAsync<T>(
+        string operation,
+        string activityName,
+        Func<OcrOperationRecorder, Activity?, CancellationToken, Task<T>> body,
+        CancellationToken cancellationToken)
+    {
+        EnsureNotDisposed();
+        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity(activityName, ActivityKind.Internal);
+        using var recorder = EasyOcrDiagnostics.Begin(operation, ProviderName).Annotate(activity);
+
+        OperationLease? lease = null;
+        try
+        {
+            lease = await _governor.AcquireAsync(operation, cancellationToken).ConfigureAwait(false);
+            // The pipeline runs on the LEASE token, not the caller's: that is what lets OperationTimeout
+            // fire at all. With no timeout configured the lease hands back the caller's own token.
+            var result = await body(recorder, activity, lease.Token).ConfigureAwait(false);
+            recorder.Success();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            var surfaced = RecordFailure(recorder, lease, ex);
+            if (ReferenceEquals(surfaced, ex)) throw;
+            throw surfaced;
+        }
+        finally
+        {
+            lease?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Records a failed gated operation and returns the exception to surface. A timeout and a caller
+    /// cancellation leave the pipeline as the same exception type; only the lease knows which token fired,
+    /// so the translation and the metric outcome have to be decided together, in one place.
+    /// </summary>
+    private static Exception RecordFailure(OcrOperationRecorder recorder, OperationLease? lease, Exception exception)
+    {
+        var surfaced = exception is OperationCanceledException canceled && lease is not null
+            ? lease.Translate(canceled)
+            : exception;
+        recorder.Failure(surfaced);
+        return surfaced;
+    }
+
+    private Task<OcrResult> RunPipelineAsync(
         Image<Rgb24> image,
         IEnumerable<string> languages,
         RecognitionOptions? options,
         CancellationToken cancellationToken)
+        => RunGatedAsync(
+            EasyOcrDiagnostics.OperationNames.Extract,
+            "EasyOcr.Extract",
+            (recorder, activity, token) => RunPipelineCoreAsync(image, languages, options, recorder, activity, token),
+            cancellationToken);
+
+    private async Task<OcrResult> RunPipelineCoreAsync(
+        Image<Rgb24> image,
+        IEnumerable<string> languages,
+        RecognitionOptions? options,
+        OcrOperationRecorder recorder,
+        Activity? activity,
+        CancellationToken cancellationToken)
     {
         using var op = BeginOperation();
         options ??= RecognitionOptions.Default;
-        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Extract", ActivityKind.Internal);
         var sw = Stopwatch.StartNew();
 
         // Model-based document preprocessing (PP-LCNet orientation / UVDoc unwarp) runs first, so every
@@ -324,7 +471,7 @@ public sealed partial class EasyOcrService : IEasyOcrService
                 outcome = await CoreAsync(working, languages, options, cancellationToken).ConfigureAwait(false);
             }
 
-            return BuildResult(outcome.Lines, outcome.Languages, sw, activity, working.Width, working.Height);
+            return BuildResult(outcome.Lines, outcome.Languages, sw, activity, working.Width, working.Height, options.ReadingDirection, recorder);
         }
         finally
         {
@@ -333,15 +480,16 @@ public sealed partial class EasyOcrService : IEasyOcrService
     }
 
     /// <summary>Sorts into reading order, records metrics/trace tags, and assembles the result.</summary>
-    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0)
+    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0, TextReadingDirection direction = TextReadingDirection.Auto, OcrOperationRecorder? recorder = null)
     {
-        var ordered = SortLinesByReadingOrder(lines);
+        var ordered = SortLinesByReadingOrder(lines, ScriptDirection.IsRightToLeft(direction, languages));
         sw.Stop();
         _logger?.LogInformation("OCR completed: {Count} lines in {Ms:F0} ms", ordered.Count, sw.Elapsed.TotalMilliseconds);
 
-        EasyOcrDiagnostics.Operations.Add(1);
-        EasyOcrDiagnostics.Duration.Record(sw.Elapsed.TotalMilliseconds);
-        EasyOcrDiagnostics.LinesRecognized.Add(ordered.Count);
+        // The counters/histogram are emitted by the recorder when the operation ends, tagged with the
+        // operation, provider and outcome; emitting them here as well would double-count every call and
+        // still miss every failure.
+        recorder?.WithLanguages(languages).AddLines(ordered.Count);
         if (activity is not null)
         {
             activity.SetTag("easyocr.languages", string.Join(",", languages));
@@ -556,19 +704,28 @@ public sealed partial class EasyOcrService : IEasyOcrService
     /// from the median line height — so large headings / high-DPI scans aren't split across bands and
     /// dense small text isn't merged, unlike a fixed pixel tolerance.
     /// </summary>
-    internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines)
+    internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines, bool rightToLeft = false)
     {
         if (lines.Count <= 1) return lines.ToList();
 
         double medianHeight = Median(lines.Select(l => (double)l.BoundingBox.Height).Where(h => h > 0));
         double tol = Math.Max(4.0, 0.5 * medianHeight);
 
+        var columns = DetectColumns(lines, medianHeight);
+
+        // Right-to-left pages are read starting from the right-most column, so the left-to-right column
+        // sweep is reversed wholesale; within a row band the right-most fragment leads. Ordering by
+        // DESCENDING MaxX (not MinX) is what makes a short fragment sitting to the right of a long one come
+        // first, which is the common label/value case on an Arabic form.
+        if (rightToLeft) columns.Reverse();
+
         var result = new List<OcrLine>(lines.Count);
-        foreach (var column in DetectColumns(lines, medianHeight))
+        foreach (var column in columns)
         {
-            result.AddRange(column
-                .OrderBy(l => Math.Round(l.BoundingBox.MinY / tol) * tol)
-                .ThenBy(l => l.BoundingBox.MinX));
+            var byRow = column.OrderBy(l => Math.Round(l.BoundingBox.MinY / tol) * tol);
+            result.AddRange(rightToLeft
+                ? byRow.ThenByDescending(l => l.BoundingBox.MaxX)
+                : byRow.ThenBy(l => l.BoundingBox.MinX));
         }
         return result;
     }
@@ -622,7 +779,12 @@ public sealed partial class EasyOcrService : IEasyOcrService
         foreach (var line in lines)
         {
             if (string.IsNullOrEmpty(line.Text)) continue;
-            if (sb.Length > 0) sb.AppendLine();
+            // LF, not AppendLine's Environment.NewLine. ParagraphGrouper joins merged
+            // lines with "\n" and the multi-frame/PDF aggregates join with
+            // "\n\n", so on Windows a single FullText mixed both separators.
+            // It also inflated CharacterErrorRate by one insertion per line break when
+            // compared against LF ground truth.
+            if (sb.Length > 0) sb.Append('\n');
             sb.Append(line.Text);
         }
         return sb.ToString();
@@ -705,6 +867,11 @@ public sealed partial class EasyOcrService : IEasyOcrService
             await Task.Delay(15).ConfigureAwait(false);
         }
 
+        // After the drain, never before: a call still waiting at the gate is released by the in-flight
+        // operations giving their slots back, and only then discovers the service is gone (as a clean
+        // ObjectDisposedException from BeginOperation).
+        _governor.Dispose();
+
         await _engine.DisposeAsync().ConfigureAwait(false);
         _docPreprocess.Dispose();
         // The drain above also guarantees no AnalyzeDocumentAsync is mid-flight on the analyzer.
@@ -712,6 +879,12 @@ public sealed partial class EasyOcrService : IEasyOcrService
         {
             await _documentAnalyzer.DisposeAsync().ConfigureAwait(false);
         }
+
+        // The TrOCR encoder/decoder pair is several hundred MB of native ONNX arena and was previously left
+        // behind entirely: a worker creating and disposing per-tenant services with handwriting enabled
+        // leaked the whole pair each time, invisibly to GC pressure heuristics, until the container was
+        // OOM-killed.
+        UnloadHandwritingModels();
     }
 
     private void EnsureNotDisposed()

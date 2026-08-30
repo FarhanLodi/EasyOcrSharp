@@ -28,7 +28,8 @@ internal static class ParagraphGrouper
     public static List<OcrLine> Merge(
         IReadOnlyList<OcrLine> lines,
         double yThreshold = DefaultYThreshold,
-        double xThreshold = DefaultXThreshold)
+        double xThreshold = DefaultXThreshold,
+        bool rightToLeft = false)
     {
         var remaining = lines.Where(l => !string.IsNullOrEmpty(l.Text)).ToList();
         remaining.Sort((a, b) => a.BoundingBox.MinY.CompareTo(b.BoundingBox.MinY));
@@ -65,7 +66,12 @@ internal static class ParagraphGrouper
                 continue;
             }
 
-            var ordered = para.OrderBy(l => l.BoundingBox.MinY).ThenBy(l => l.BoundingBox.MinX).ToList();
+            // Rows run top-to-bottom either way; the tie-break decides which fragment of a shared row
+            // leads, and on a right-to-left page that is the right-most one.
+            var byRow = para.OrderBy(l => l.BoundingBox.MinY);
+            var ordered = (rightToLeft
+                ? byRow.ThenByDescending(l => l.BoundingBox.MaxX)
+                : byRow.ThenBy(l => l.BoundingBox.MinX)).ToList();
             var text = string.Join("\n", ordered.Select(l => l.Text));
             double minX = ordered.Min(l => l.BoundingBox.MinX);
             double minY = ordered.Min(l => l.BoundingBox.MinY);

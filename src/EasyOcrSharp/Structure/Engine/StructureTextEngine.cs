@@ -252,9 +252,10 @@ internal sealed class StructureTextEngine : IAsyncDisposable
                 });
             }
 
-            var ordered = SortLines(lines);
+            bool rightToLeft = EasyOcrSharp.Internal.ScriptDirection.IsRightToLeft(languages);
+            var ordered = SortLines(lines, rightToLeft);
             return options.Grouping == TextGrouping.Paragraph
-                ? ParagraphGrouper.Merge(ordered)
+                ? ParagraphGrouper.Merge(ordered, rightToLeft: rightToLeft)
                 : ordered;
         }
         finally
@@ -514,10 +515,10 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     /// Orders recognized lines into reading order using the same <c>sorted_boxes</c> rule as
     /// <see cref="SortBoxes"/>, keying off each line's axis-aligned bounding box.
     /// </summary>
-    private static List<OcrLine> SortLines(List<OcrLine> lines)
+    private static List<OcrLine> SortLines(List<OcrLine> lines, bool rightToLeft = false)
     {
         if (lines.Count <= 1) return lines;
-        SortByReadingOrder(lines, l => l.BoundingBox);
+        SortByReadingOrder(lines, l => l.BoundingBox, rightToLeft);
         return lines;
     }
 
@@ -525,13 +526,16 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     /// In-place <c>sorted_boxes</c>: a stable sort by top-y then left-x, followed by a one-pass bubble
     /// that swaps an out-of-order neighbour pair that actually sits on the same text line.
     /// </summary>
-    private static void SortByReadingOrder<T>(List<T> items, Func<T, OcrBoundingBox> boxOf)
+    private static void SortByReadingOrder<T>(List<T> items, Func<T, OcrBoundingBox> boxOf, bool rightToLeft = false)
     {
         // Stable primary sort: top-y, then left-x. List.Sort is not stable, so use OrderBy/ThenBy (stable)
-        // and copy back — matching numpy's lexicographic sort used by PaddleOCR.
-        var sorted = items
-            .OrderBy(i => boxOf(i).MinY)
-            .ThenBy(i => boxOf(i).MinX)
+        // and copy back — matching numpy's lexicographic sort used by PaddleOCR. On a right-to-left page the
+        // horizontal key inverts: right-most first, keyed on MaxX so a short fragment to the right of a
+        // longer one still leads.
+        var byRow = items.OrderBy(i => boxOf(i).MinY);
+        var sorted = (rightToLeft
+            ? byRow.ThenByDescending(i => boxOf(i).MaxX)
+            : byRow.ThenBy(i => boxOf(i).MinX))
             .ToList();
         for (int i = 0; i < items.Count; i++) items[i] = sorted[i];
 
@@ -546,7 +550,8 @@ internal sealed class StructureTextEngine : IAsyncDisposable
             {
                 var a = boxOf(items[j + 1]);
                 var b = boxOf(items[j]);
-                if (Math.Abs(a.MinY - b.MinY) < SameLineTolerance && a.MinX < b.MinX)
+                bool outOfOrder = rightToLeft ? a.MaxX > b.MaxX : a.MinX < b.MinX;
+                if (Math.Abs(a.MinY - b.MinY) < SameLineTolerance && outOfOrder)
                 {
                     (items[j], items[j + 1]) = (items[j + 1], items[j]);
                 }

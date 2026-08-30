@@ -72,19 +72,41 @@ internal static class ImagePreprocessor
             c.Grayscale().BinaryThreshold(0.5f);
         });
 
-        double best = SearchSkew(work, -15, 15, 1.0, out _);
-        best = SearchSkew(work, best - 1.0, best + 1.0, 0.2, out _);
-        return best;
+        // Too few rows to measure row-ink variance against: every angle scores identically and the search
+        // degenerates. A 10000x3 strip resizes to 800x1, which is exactly this case.
+        if (work.Height < 8) return 0;
+
+        double coarse = SearchSkew(work, -15, 15, 1.0, out double coarseScore);
+        // Keep the refinement inside the documented +/-15 range; without the clamp a coarse winner at an
+        // endpoint lets the refine pass return -16.
+        double fine = SearchSkew(
+            work, Math.Max(-15, coarse - 1.0), Math.Min(15, coarse + 1.0), 0.2, out double fineScore);
+
+        // Only accept a rotation that actually beats leaving the page alone. On a blank page (or any image
+        // where the score is flat) every candidate ties, and without this the winner is whichever angle was
+        // tried first -- the most negative one -- so a blank scan was rotated -15 degrees for no reason.
+        double uprightScore = ScoreAngle(work, 0);
+        if (Math.Max(coarseScore, fineScore) <= uprightScore) return 0;
+        return fineScore >= coarseScore ? fine : coarse;
+    }
+
+    /// <summary>Row-ink variance of <paramref name="binary"/> rotated by <paramref name="degrees"/>.</summary>
+    private static double ScoreAngle(Image<Rgb24> binary, double degrees)
+    {
+        using var rot = RotateWithWhiteBackground(binary, (float)degrees);
+        return RowInkVariance(rot);
     }
 
     private static double SearchSkew(Image<Rgb24> binary, double from, double to, double step, out double bestScore)
     {
         double best = 0;
-        bestScore = -1;
+        // Negative infinity, not -1: RowInkVariance is >= 0, so a -1 seed combined with the strict '>' below
+        // still picks the first candidate on a tie, but it also silently accepted a score of 0 as "better
+        // than nothing" and hid that the search never found a real maximum.
+        bestScore = double.NegativeInfinity;
         for (double a = from; a <= to + 1e-9; a += step)
         {
-            using var rot = RotateWithWhiteBackground(binary, (float)a);
-            double score = RowInkVariance(rot);
+            double score = ScoreAngle(binary, a);
             if (score > bestScore)
             {
                 bestScore = score;

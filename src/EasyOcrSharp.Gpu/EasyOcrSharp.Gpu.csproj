@@ -6,7 +6,7 @@
 		<Nullable>enable</Nullable>
 		<LangVersion>latest</LangVersion>
 		<PackageId>EasyOcrSharp.Gpu</PackageId>
-		<Version>3.0.0</Version>
+		<Version>3.1.0</Version>
 		<Authors>Farhan Lodi</Authors>
 		<Description>CUDA GPU execution provider for EasyOcrSharp. Adds Microsoft.ML.OnnxRuntime.Gpu so detection and recognition run on NVIDIA GPUs.</Description>
 		<PackageTags>OCR;EasyOCR;ONNX;GPU;CUDA;.NET10</PackageTags>

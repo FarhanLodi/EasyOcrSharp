@@ -81,6 +81,35 @@ public sealed class EasyOcrServiceOptions
     /// </summary>
     public HandwritingOptions? Handwriting { get; set; }
 
+    /// <summary>
+    /// Maximum number of OCR operations allowed to run at once on this service. <c>0</c> (the default)
+    /// means unlimited, which is exactly how the service has always behaved. Set it on a shared server to
+    /// stop a traffic spike from starting more concurrent ONNX runs than the box has cores — past that
+    /// point every request gets slower and none of them finish sooner.
+    /// </summary>
+    public int MaxConcurrentOperations { get; set; }
+
+    /// <summary>
+    /// How long a call waits for a free slot once <see cref="MaxConcurrentOperations"/> is reached before
+    /// it is shed with <see cref="OcrBusyException"/>. <see cref="Timeout.InfiniteTimeSpan"/> (the default)
+    /// waits indefinitely; <see cref="TimeSpan.Zero"/> rejects immediately, which is what a load-shedding
+    /// front end wants so it can answer 503 while the queue is still short. Ignored when
+    /// <see cref="MaxConcurrentOperations"/> is 0.
+    /// </summary>
+    public TimeSpan QueueTimeout { get; set; } = Timeout.InfiniteTimeSpan;
+
+    /// <summary>
+    /// Wall-clock budget for a single operation, starting once it has a slot; on expiry the call throws
+    /// <see cref="OcrTimeoutException"/>. <see cref="TimeSpan.Zero"/> (the default) means no timeout and
+    /// leaves the caller's own <see cref="CancellationToken"/> untouched. Enforced at the pipeline's
+    /// cancellation checkpoints, so a call already inside a single native inference run ends when that run
+    /// does rather than mid-instruction.
+    /// </summary>
+    public TimeSpan OperationTimeout { get; set; }
+
+    /// <summary>Builds the concurrency/timeout gate for a service configured by these options.</summary>
+    internal OperationGovernor CreateGovernor() => new(MaxConcurrentOperations, QueueTimeout, OperationTimeout);
+
     /// <summary>Maps the public options to the engine's internal configuration record.</summary>
     internal EngineOptions ToEngineOptions()
     {

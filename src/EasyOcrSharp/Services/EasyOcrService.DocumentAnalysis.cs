@@ -1,3 +1,4 @@
+﻿using EasyOcrSharp.Diagnostics;
 using EasyOcrSharp.Models;
 using Microsoft.Extensions.Logging;
 using EasyOcrSharp.Structure;
@@ -19,64 +20,89 @@ public sealed partial class EasyOcrService
     private readonly object _documentAnalyzerLock = new();
 
     /// <inheritdoc cref="IEasyOcrService.AnalyzeDocumentAsync(string, DocumentAnalysisOptions?, CancellationToken)" />
-    public async Task<StructureResult> AnalyzeDocumentAsync(
+    public Task<StructureResult> AnalyzeDocumentAsync(
         string imagePath,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        using var op = BeginOperation();
-        var analyzer = GetOrCreateDocumentAnalyzer();
-        return await analyzer.AnalyzeDocumentAsync(imagePath, ToStructureOptions(options, _logger), cancellationToken).ConfigureAwait(false);
+        // Validate before the gate: without this a null path waited for a governor slot and built the whole
+        // StructureService -- ONNX session options, possibly a model download -- only to fail deep inside
+        // the engine with a message naming none of the caller's parameters. Every OCR entry point
+        // validates here, and a malformed request must not consume capacity a real one is queued for.
+        ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
+        return AnalyzeGatedAsync(options, cancellationToken, (analyzer, structure, token)
+            => analyzer.AnalyzeDocumentAsync(imagePath, structure, token));
     }
 
     /// <inheritdoc cref="IEasyOcrService.AnalyzeDocumentAsync(Stream, DocumentAnalysisOptions?, CancellationToken)" />
-    public async Task<StructureResult> AnalyzeDocumentAsync(
+    public Task<StructureResult> AnalyzeDocumentAsync(
         Stream imageStream,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        using var op = BeginOperation();
-        var analyzer = GetOrCreateDocumentAnalyzer();
-        return await analyzer.AnalyzeDocumentAsync(imageStream, ToStructureOptions(options, _logger), cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(imageStream);
+        return AnalyzeGatedAsync(options, cancellationToken, (analyzer, structure, token)
+            => analyzer.AnalyzeDocumentAsync(imageStream, structure, token));
     }
 
     /// <inheritdoc cref="IEasyOcrService.AnalyzeDocumentAsync(byte[], DocumentAnalysisOptions?, CancellationToken)" />
-    public async Task<StructureResult> AnalyzeDocumentAsync(
+    public Task<StructureResult> AnalyzeDocumentAsync(
         byte[] imageBytes,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        using var op = BeginOperation();
-        var analyzer = GetOrCreateDocumentAnalyzer();
-        return await analyzer.AnalyzeDocumentAsync(imageBytes, ToStructureOptions(options, _logger), cancellationToken).ConfigureAwait(false);
+        ArgumentNullException.ThrowIfNull(imageBytes);
+        return AnalyzeGatedAsync(options, cancellationToken, (analyzer, structure, token)
+            => analyzer.AnalyzeDocumentAsync(imageBytes, structure, token));
     }
 
     /// <inheritdoc cref="IEasyOcrService.AnalyzeDocumentAsync(ReadOnlyMemory{byte}, DocumentAnalysisOptions?, CancellationToken)" />
-    public async Task<StructureResult> AnalyzeDocumentAsync(
+    public Task<StructureResult> AnalyzeDocumentAsync(
         ReadOnlyMemory<byte> imageBytes,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        using var op = BeginOperation();
-        var analyzer = GetOrCreateDocumentAnalyzer();
-        return await analyzer.AnalyzeDocumentAsync(imageBytes, ToStructureOptions(options, _logger), cancellationToken).ConfigureAwait(false);
+        if (imageBytes.IsEmpty) throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
+        return AnalyzeGatedAsync(options, cancellationToken, (analyzer, structure, token)
+            => analyzer.AnalyzeDocumentAsync(imageBytes, structure, token));
     }
 
     /// <inheritdoc cref="IEasyOcrService.AnalyzeDocumentAsync(Image{Rgb24}, DocumentAnalysisOptions?, CancellationToken)" />
-    public async Task<StructureResult> AnalyzeDocumentAsync(
+    public Task<StructureResult> AnalyzeDocumentAsync(
         Image<Rgb24> image,
         DocumentAnalysisOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
-        var analyzer = GetOrCreateDocumentAnalyzer();
 
         // The structure engine is part of this library now and shares its pixel types, so the decoded
         // image goes straight in — no PNG round-trip. The engine treats the image as caller-owned: it
         // clones before pre-processing rather than mutating, and never disposes it.
-        return await analyzer.AnalyzeDocumentAsync(image, ToStructureOptions(options, _logger), cancellationToken).ConfigureAwait(false);
+        return AnalyzeGatedAsync(options, cancellationToken, (analyzer, structure, token)
+            => analyzer.AnalyzeDocumentAsync(image, structure, token));
     }
+
+    /// <summary>
+    /// Runs one document analysis under the concurrency/timeout governor with metrics and a span — the
+    /// single place the five input overloads share, so one public call never takes two slots.
+    /// </summary>
+    private Task<StructureResult> AnalyzeGatedAsync(
+        DocumentAnalysisOptions? options,
+        CancellationToken cancellationToken,
+        Func<EasyOcrSharp.Structure.Engine.Services.StructureService, StructureOptions, CancellationToken, Task<StructureResult>> analyze)
+        => RunGatedAsync(
+            EasyOcrDiagnostics.OperationNames.AnalyzeDocument,
+            "EasyOcr.AnalyzeDocument",
+            async (recorder, _, token) =>
+            {
+                using var op = BeginOperation();
+                recorder.WithLanguages(options?.Languages);
+                var analyzer = GetOrCreateDocumentAnalyzer();
+                var result = await analyze(analyzer, ToStructureOptions(options, _logger), token).ConfigureAwait(false);
+                recorder.AddPages(1);
+                return result;
+            },
+            cancellationToken);
 
     /// <summary>
     /// Creates the underlying structure service on first use (double-checked lock). Creation is
@@ -157,6 +183,24 @@ public sealed partial class EasyOcrService
             TableModel = options.TableModel == DocumentTableModel.SlaNeXt
                 ? TableRecognitionModel.SlaNeXt
                 : TableRecognitionModel.SlanetPlus,
+            LayoutScoreThreshold = options.LayoutScoreThreshold,
+            FilterOverlappingRegions = options.FilterOverlappingRegions,
+            LayoutNms = options.LayoutNms,
+            LayoutUnclipRatio = options.LayoutUnclipRatio,
+            LayoutMergeMode = options.LayoutMergeMode switch
+            {
+                DocumentLayoutMergeMode.Union => LayoutMergeMode.Union,
+                DocumentLayoutMergeMode.Large => LayoutMergeMode.Large,
+                DocumentLayoutMergeMode.Small => LayoutMergeMode.Small,
+                _ => LayoutMergeMode.None,
+            },
+            ReadingOrder = options.ReadingOrder switch
+            {
+                DocumentReadingOrder.XyCut => LayoutReadingOrder.XyCut,
+                DocumentReadingOrder.Model => LayoutReadingOrder.Model,
+                _ => LayoutReadingOrder.Auto,
+            },
+            RightToLeft = Internal.ScriptDirection.IsRightToLeft(options.ReadingDirection, options.Languages),
         };
 
         if (options.Languages is { Count: > 0 })

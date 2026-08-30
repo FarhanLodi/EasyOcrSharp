@@ -94,6 +94,14 @@ internal static class OoxmlHtmlTable
         return -1;
     }
 
+    /// <summary>
+    /// Upper bound on a single <c>colspan</c>/<c>rowspan</c>. The grid builder allocates
+    /// <c>rowCount &#215; maxCols</c> arrays from the summed spans, so an unclamped attribute
+    /// (<c>colspan="100000000"</c>) is an immediate <see cref="OutOfMemoryException"/> in
+    /// <c>SaveAsDocx</c>/<c>SaveAsXlsx</c>. Mirrors <c>TableHtmlParser.MaxSpan</c>.
+    /// </summary>
+    private const int MaxSpan = 512;
+
     private static int ReadSpan(string tag, string attr)
     {
         int idx = tag.IndexOf(attr, StringComparison.OrdinalIgnoreCase);
@@ -106,7 +114,8 @@ internal static class OoxmlHtmlTable
         int start = j;
         while (j < tag.Length && char.IsDigit(tag[j])) j++;
         if (j == start) return 1;
-        return int.TryParse(tag.AsSpan(start, j - start), out int v) && v > 0 ? v : 1;
+        if (!int.TryParse(tag.AsSpan(start, j - start), out int v) || v <= 0) return 1;
+        return Math.Min(v, MaxSpan);
     }
 
     /// <summary>

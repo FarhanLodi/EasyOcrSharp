@@ -59,8 +59,10 @@ internal static class CharacterDictionary
     /// Builds the CTC vocabulary so that its length equals the recognizer's output class count, auto-detecting
     /// which blank/space convention the dictionary file follows. Community PP-OCRv5 exports are inconsistent:
     /// the default <c>ppocrv5_dict.txt</c> is the <em>complete</em> class list already (index 0 is the blank),
-    /// while the per-language dicts omit the blank (and sometimes the trailing space). Matching the file's
-    /// line count against <paramref name="numClasses"/> picks the right construction and avoids the
+    /// the per-script dicts (<c>cyrillic_dict.txt</c>, <c>latin_dict.txt</c>, …) carry the blank as an empty
+    /// first line but leave the trailing space off, and a plain upstream <c>ppocr</c> dict omits both.
+    /// Matching the file's line count against <paramref name="numClasses"/> — and, when it is short by exactly
+    /// one class, sniffing whether the first line is empty — picks the right construction and avoids the
     /// off-by-one that shifts every decoded character.
     /// </summary>
     /// <param name="lines">Raw dictionary lines (see <see cref="LoadLines"/>).</param>
@@ -77,11 +79,28 @@ internal static class CharacterDictionary
         if (lines.Count == numClasses)
             return new List<string>(lines);
 
-        // File omits only the leading blank class.
+        // The file is one class short of the network. Two different dictionary shapes land here, and
+        // confusing them shifts every decoded character by one class:
+        //   * the per-script PP-OCRv5 dicts (latin, cyrillic, arabic, devanagari, korean, japan, th, el,
+        //     te, ta, eslav) begin with an *empty* line, which is the blank slot itself — so the class they
+        //     omit is the trailing space, not the blank; and
+        //   * a dictionary whose first line is a real token omits only the leading blank.
+        // The first line tells the two apart.
         if (lines.Count + 1 == numClasses)
         {
             var v = new List<string>(numClasses) { Blank };
-            v.AddRange(lines);
+            if (lines.Count > 0 && lines[0].Length == 0)
+            {
+                // Blank slot already occupies index 0: keep classes 1..N-1 aligned with the file and add the
+                // trailing space class the file leaves off.
+                for (int i = 1; i < lines.Count; i++)
+                    v.Add(lines[i]);
+                v.Add(" ");
+            }
+            else
+            {
+                v.AddRange(lines);
+            }
             return v;
         }
 

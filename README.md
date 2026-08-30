@@ -217,6 +217,32 @@ var result = await ocr.ExtractTextFromImage("street_sign.png", new[] { "en", "ch
 
 Each additional script family loads its own model, so request only the scripts you expect.
 
+### Right-to-left scripts
+
+Arabic, Persian, Urdu, Uyghur and Hebrew pages are assembled right-to-left automatically — the right-most
+column is read first, and within a row the right-most fragment leads:
+
+```csharp
+// Auto: every requested language is right-to-left, so the page is ordered right-to-left.
+var result = await ocr.ExtractTextFromImage("invoice_ar.png", new[] { "ar" });
+```
+
+A **mixed** request stays left-to-right, since such a page is usually Latin-majority. Force the direction
+when a bilingual page really does flow right-to-left:
+
+```csharp
+var result = await ocr.ExtractTextFromImage("form_ar_en.png", new[] { "ar", "en" }, new RecognitionOptions
+{
+    ReadingDirection = TextReadingDirection.RightToLeft,
+});
+```
+
+`DocumentAnalysisOptions.ReadingDirection` does the same for `AnalyzeDocumentAsync`.
+
+> This orders **boxes** — which column and which line comes first. It is not the Unicode Bidirectional
+> Algorithm, and does not need to be: each recognized line is already a logical-order string, so bidi stays
+> your renderer's job and this output is correct input for one.
+
 ### Automatic language detection
 
 Don't know the language? Let the engine detect it — pass no codes and set `AutoDetectLanguage`:
@@ -438,6 +464,26 @@ var doc = await ocr.AnalyzeDocumentAsync("scan.jpg", new DocumentAnalysisOptions
 });
 ```
 
+The layout detector's own behaviour is tunable too. It emits a fixed top-k of candidate boxes with no
+NMS, so the same area of a page is routinely proposed several times under different labels; the
+duplicate filter is on by default and matters more the further you lower the confidence floor:
+
+```csharp
+var doc = await ocr.AnalyzeDocumentAsync("scan.jpg", new DocumentAnalysisOptions
+{
+    LayoutScoreThreshold = 0.25f,           // confidence floor, default 0.5; lower keeps faint regions
+    FilterOverlappingRegions = true,        // collapse duplicate/near-duplicate regions (default on)
+    LayoutNms = true,                       // additionally run NMS over the regions (default off)
+    LayoutUnclipRatio = 1.05f,              // grow each region 5% before recognition (default: none)
+    LayoutMergeMode = DocumentLayoutMergeMode.Large,  // keep the enclosing block of a nested pair
+    ReadingOrder = DocumentReadingOrder.XyCut,        // ignore the model's predicted order
+});
+```
+
+`ReadingOrder` defaults to `Auto`: PP-DocLayoutV3 predicts a reading-order index alongside each box
+and that is what orders the blocks; models that emit no such column fall back to the geometric XY-cut
+orderer, which `XyCut` selects unconditionally.
+
 The analyzer shares the service's execution provider, thread limits, cache path (when set) and
 download-resilience settings, loads lazily on first use, and is disposed with the service. Regular
 OCR calls never touch it.
@@ -543,7 +589,19 @@ string json = result.ToJson(indented: true);                              // AOT
 ```
 
 `ToJson` uses a source-generated `EasyOcrJsonContext`, so it works in trimmed / Native-AOT apps with
-no reflection warnings.
+no reflection warnings. Recognized text is written verbatim in every script — Cyrillic, Greek, Arabic,
+CJK and the rest stay readable in a plain text editor instead of turning into `\uXXXX` escapes —
+while HTML-sensitive characters (`< > & ' +`) are still escaped, since a block's `TableHtml` may end up
+embedded in a page. Pass your own `JsonSerializerOptions` for a different encoder, indentation or naming
+policy (`StructureResult.ToJson` takes the same overload), and the exporter stays reflection-free:
+
+```csharp
+string strict = result.ToJson(new JsonSerializerOptions
+{
+    Encoder = JavaScriptEncoder.Default,   // back to \uXXXX escaping for every non-ASCII character
+    WriteIndented = true,
+});
+```
 
 ### Recognize from known boxes
 
@@ -876,8 +934,30 @@ nobody is listening:
 
 ```csharp
 builder.Services.AddOpenTelemetry()
-    .WithMetrics(m => m.AddMeter(EasyOcrDiagnostics.MeterName))   // operations, duration, lines, model loads/bytes
+    .WithMetrics(m => m.AddMeter(EasyOcrDiagnostics.MeterName))
     .WithTracing(t => t.AddSource(EasyOcrDiagnostics.ActivitySourceName));
+```
+
+| Instrument | What it tells you |
+|---|---|
+| `easyocr.operations` | operation count — **including failures**, so an erroring deployment shows a rising error rate rather than going quiet |
+| `easyocr.duration` | wall-clock latency per operation (ms) |
+| `easyocr.lines` / `easyocr.pages` | throughput: lines recognized, pages/frames processed |
+| `easyocr.operations.active` / `.queued` | live saturation — how many are executing vs waiting for a slot |
+| `easyocr.queue.wait` | how long operations wait for a slot before running or being shed |
+| `easyocr.model.loads` / `.download_bytes` | ONNX sessions created, model bytes fetched |
+
+Every operation instrument is tagged, so a dashboard can slice latency and error rate by
+`easyocr.operation` (`extract`, `extract_stream`, `recognize`, `detect`, `handwriting`,
+`analyze_document`, `pdf`, `multi_frame`, …), `easyocr.outcome` (`success`, `error`, `canceled`,
+`timeout`, `shed`), `easyocr.languages`, `easyocr.provider` (`Cpu` / `Cuda` / …) and — on failures —
+`error.type`. The constants are public (`EasyOcrDiagnostics.TagNames`, `.Outcomes`, `.OperationNames`), so
+alert rules can reference them instead of hard-coded strings:
+
+```csharp
+// error rate, excluding client cancellations
+sum(rate(easyocr_operations_total{easyocr_outcome=~"error|timeout"}[5m]))
+  / sum(rate(easyocr_operations_total[5m]))
 ```
 
 Add a readiness probe that reports whether the models for your languages are cached (so the first real
@@ -887,6 +967,25 @@ request won't block on a download):
 builder.Services.AddHealthChecks()
     .AddEasyOcrHealthCheck(languages: new[] { "en" });
 ```
+
+That check is a file-presence check, which cannot catch a model that is present but **broken** — a
+truncated download, a half-copied cache, or a GPU whose provider fails at session init. All three report
+Healthy and then fail every request. Opt into a **deep probe** that actually runs a tiny synthetic page
+through the real pipeline once, caches the verdict, and reports the provider that genuinely resolved:
+
+```csharp
+builder.Services.AddEasyOcrWarmUp("en");        // IHostedService: loads models off the startup path
+
+builder.Services.AddHealthChecks()
+    .AddEasyOcrHealthCheck(languages: ["en"], name: "easyocr-live")                    // shallow: liveness
+    .AddEasyOcrHealthCheck(new EasyOcrHealthCheckOptions { DeepProbe = true },
+                           languages: ["en"], name: "easyocr-ready");                  // deep: readiness
+```
+
+The probe never triggers a download — if the models aren't cached it reports that instead, so `Offline`
+deployments behave unchanged. When `AddEasyOcrWarmUp` is registered, readiness stays **not ready** until
+warm-up finishes, so an orchestrator won't route traffic to a pod that is still loading. Warm-up failure
+is never fatal: it is logged and surfaced through the check, and models still load lazily on first use.
 
 ### Dependency injection
 
@@ -931,6 +1030,50 @@ Failures surface as **typed exceptions** (all derive `EasyOcrSharpException`, so
 | `ModelDownloadException` | download failed, or a non-HTTPS / malformed model source |
 | `ModelChecksumException` | downloaded model failed (or lacks) SHA256 verification |
 | `OfflineModelMissingException` | model not cached and `Offline = true` |
+| `OcrBusyException` | at `MaxConcurrentOperations` and no slot freed within `QueueTimeout` |
+| `OcrTimeoutException` | a single operation exceeded `OperationTimeout` |
+
+### Concurrency, back-pressure & operation timeouts
+
+ONNX sessions are thread-safe to share, but **every concurrent run allocates its own tensors** — so
+concurrency, not session count, is what sets peak memory. An ungoverned service handed fifty 12 MP scans
+at once doesn't get slower in a straight line: every request crawls, all of them eventually time out, and
+the working set grows until the container is OOM-killed. Both guards are **off by default**, so nothing
+changes until you opt in:
+
+```csharp
+await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
+{
+    MaxConcurrentOperations = Environment.ProcessorCount,  // 0 (default) = unlimited
+    QueueTimeout            = TimeSpan.FromSeconds(30),    // then shed with OcrBusyException
+    OperationTimeout        = TimeSpan.FromMinutes(2),     // 0 (default) = no cap
+});
+```
+
+`QueueTimeout` defaults to `Timeout.InfiniteTimeSpan` — a concurrency limit on its own bounds *memory*
+but still queues everything, so **shedding is a second, deliberate opt-in**. Set it to enable back-pressure;
+`TimeSpan.Zero` refuses the moment the limit is saturated. Waits longer than ~49.7 days (the platform's
+timer ceiling) are treated as "wait forever" rather than throwing.
+
+Once it is set, operations past the limit wait up to `QueueTimeout` for a slot and are then **refused
+promptly** rather than queued without bound — a caller told "busy" in 30 seconds can retry or fail over,
+one silently queued for four minutes cannot. Map it straight onto HTTP:
+
+```csharp
+catch (OcrBusyException ex)    { return Results.Json(..., statusCode: 503); }  // + Retry-After
+catch (OcrTimeoutException ex) { return Results.Json(..., statusCode: 504); }
+```
+
+`OperationTimeout` exists because a `CancellationToken` only helps when something signals it — a
+pathological page (thousands of detected boxes, an image that defeats the detector) otherwise occupies a
+worker forever, and a handful of those take a fixed-size pool down. The cap is **cooperative**: it cancels
+the pipeline at its next checkpoint rather than aborting a thread, so set it comfortably above your p99
+page time. Note a multi-page PDF is *one* operation, not one per page.
+
+`OcrTimeoutException` is deliberately distinct from `OperationCanceledException`: the first means *this
+input* was too slow and should be quarantined, the second means your own caller hung up. Only the primitive
+per-image operations take a slot; PDF, multi-frame and batch runs are gated per page as they go, so a long
+document can't hold a slot hostage for its whole duration.
 
 **Warm-up (remove cold-start latency).** Preload the detector and recognizer packs so the first real
 request doesn't pay model-download + session-init latency — ideal for serverless / scale-out:

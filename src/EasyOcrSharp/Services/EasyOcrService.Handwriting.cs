@@ -26,6 +26,11 @@ public sealed partial class EasyOcrService
     private volatile TrOcrRecognizer? _handwriting;
     private readonly object _handwritingLock = new();
 
+    // Handwriting calls in flight. UnloadHandwritingModels swaps the field out and then waits on this before
+    // disposing, so it can never free an encoder/decoder session a concurrent Recognize is running on --
+    // which would be an AccessViolationException inside onnxruntime, not a catchable .NET exception.
+    private int _handwritingInFlight;
+
     /// <summary>
     /// Whether this service was configured for handwriting — i.e. whether
     /// <see cref="EasyOcrServiceOptions.Handwriting"/> was set. When false, every
@@ -47,17 +52,28 @@ public sealed partial class EasyOcrService
     /// <param name="cancellationToken">Cancels detection and generation.</param>
     /// <returns>Lines in reading order, with boxes in <paramref name="image"/>'s coordinates.</returns>
     /// <exception cref="InvalidOperationException"><see cref="EasyOcrServiceOptions.Handwriting"/> was not configured.</exception>
-    public async Task<OcrResult> RecognizeHandwritingAsync(
+    public Task<OcrResult> RecognizeHandwritingAsync(
         Image<Rgb24> image,
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
+        => RunGatedAsync(
+            EasyOcrDiagnostics.OperationNames.Handwriting,
+            "EasyOcr.Handwriting",
+            (recorder, activity, token) => DetectAndRecognizeHandwritingAsync(image, options, recorder, activity, token),
+            cancellationToken);
+
+    private async Task<OcrResult> DetectAndRecognizeHandwritingAsync(
+        Image<Rgb24> image,
+        RecognitionOptions? options,
+        OcrOperationRecorder recorder,
+        Activity? activity,
+        CancellationToken cancellationToken)
     {
         using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
         options ??= RecognitionOptions.Default;
         var handwriting = RequireHandwritingOptions();
 
-        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Handwriting", ActivityKind.Internal);
         var sw = Stopwatch.StartNew();
         var languages = new[] { handwriting.Language };
 
@@ -71,7 +87,7 @@ public sealed partial class EasyOcrService
                 var (rx, ry, rw, rh) = roiRegion.Resolve(image.Width, image.Height);
                 if (rw < 2 || rh < 2)
                 {
-                    return BuildResult(Array.Empty<OcrLine>(), languages, sw, activity, image.Width, image.Height);
+                    return BuildResult(Array.Empty<OcrLine>(), languages, sw, activity, image.Width, image.Height, options.ReadingDirection, recorder);
                 }
                 roi = image.Clone(ctx => ctx.Crop(new Rectangle(rx, ry, rw, rh)));
                 working = roi;
@@ -86,7 +102,7 @@ public sealed partial class EasyOcrService
             foreach (var detected in regions) polygons.Add(detected.BoundingPolygon.ToArray());
 
             var lines = await RecognizeHandwrittenPolygonsAsync(working, polygons, options, cancellationToken).ConfigureAwait(false);
-            return BuildResult(TranslateLines(lines, dx, dy), languages, sw, activity, image.Width, image.Height);
+            return BuildResult(TranslateLines(lines, dx, dy), languages, sw, activity, image.Width, image.Height, options.ReadingDirection, recorder);
         }
         finally
         {
@@ -134,30 +150,34 @@ public sealed partial class EasyOcrService
     /// <param name="options">Grouping and confidence options. Detection settings are unused here.</param>
     /// <param name="cancellationToken">Cancels generation between regions.</param>
     /// <exception cref="InvalidOperationException"><see cref="EasyOcrServiceOptions.Handwriting"/> was not configured.</exception>
-    public async Task<OcrResult> RecognizeHandwritingAsync(
+    public Task<OcrResult> RecognizeHandwritingAsync(
         Image<Rgb24> image,
         IEnumerable<IReadOnlyList<OcrPoint>> regions,
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
-    {
-        using var op = BeginOperation();
-        ArgumentNullException.ThrowIfNull(image);
-        ArgumentNullException.ThrowIfNull(regions);
-        options ??= RecognitionOptions.Default;
-        var handwriting = RequireHandwritingOptions();
+        => RunGatedAsync(
+            EasyOcrDiagnostics.OperationNames.Handwriting,
+            "EasyOcr.Handwriting",
+            async (recorder, activity, token) =>
+            {
+                using var op = BeginOperation();
+                ArgumentNullException.ThrowIfNull(image);
+                ArgumentNullException.ThrowIfNull(regions);
+                options ??= RecognitionOptions.Default;
+                var handwriting = RequireHandwritingOptions();
 
-        using var activity = EasyOcrDiagnostics.ActivitySource.StartActivity("EasyOcr.Handwriting", ActivityKind.Internal);
-        var sw = Stopwatch.StartNew();
-        var languages = new[] { handwriting.Language };
+                var sw = Stopwatch.StartNew();
+                var languages = new[] { handwriting.Language };
 
-        var polygons = regions
-            .Where(r => r is { Count: >= 3 })
-            .Select(r => r.ToArray())
-            .ToArray();
+                var polygons = regions
+                    .Where(r => r is { Count: >= 3 })
+                    .Select(r => r.ToArray())
+                    .ToArray();
 
-        var lines = await RecognizeHandwrittenPolygonsAsync(image, polygons, options, cancellationToken).ConfigureAwait(false);
-        return BuildResult(lines, languages, sw, activity, image.Width, image.Height);
-    }
+                var lines = await RecognizeHandwrittenPolygonsAsync(image, polygons, options, token).ConfigureAwait(false);
+                return BuildResult(lines, languages, sw, activity, image.Width, image.Height, options.ReadingDirection, recorder);
+            },
+            cancellationToken);
 
     /// <summary>Reads handwriting inside regions located by a prior <see cref="DetectRegionsAsync(Image{Rgb24}, RecognitionOptions?, CancellationToken)"/> pass.</summary>
     /// <param name="image">The image the regions refer to. Never modified.</param>
@@ -178,12 +198,11 @@ public sealed partial class EasyOcrService
     /// <summary>
     /// Releases the TrOCR sessions if any were loaded, freeing the several hundred megabytes a
     /// transformer pair occupies. The next <c>RecognizeHandwritingAsync</c> call transparently reloads
-    /// them. Do not call it while a handwriting call is in flight.
+    /// them. Safe to call concurrently with handwriting calls: it waits for those in flight to finish.
     /// </summary>
     /// <remarks>
-    /// Handwriting models are loaded on demand and are <b>not</b> released by
-    /// <see cref="DisposeAsync"/>, so a long-lived process that creates and drops many services with
-    /// handwriting enabled should call this before letting each one go.
+    /// Handwriting models are loaded on demand. <see cref="DisposeAsync"/> now releases them too, so this is
+    /// only needed to reclaim the memory of a service you intend to keep using.
     /// </remarks>
     public void UnloadHandwritingModels()
     {
@@ -193,7 +212,17 @@ public sealed partial class EasyOcrService
             recognizer = _handwriting;
             _handwriting = null;
         }
-        recognizer?.Dispose();
+        if (recognizer is null) return;
+
+        // The field swap above stops NEW calls resolving this instance; calls already inside Recognize are
+        // still running native inference on it. Wait for them before disposing.
+        var spin = new SpinWait();
+        while (Volatile.Read(ref _handwritingInFlight) > 0)
+        {
+            spin.SpinOnce();
+        }
+
+        recognizer.Dispose();
     }
 
     /// <summary>
@@ -207,7 +236,17 @@ public sealed partial class EasyOcrService
         if (polygons.Count == 0) return Array.Empty<OcrLine>();
 
         var recognizer = await GetOrCreateHandwritingRecognizerAsync(cancellationToken).ConfigureAwait(false);
-        var recognized = recognizer.Recognize(image, polygons, cancellationToken);
+
+        IReadOnlyList<OcrLine> recognized;
+        Interlocked.Increment(ref _handwritingInFlight);
+        try
+        {
+            recognized = recognizer.Recognize(image, polygons, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _handwritingInFlight);
+        }
 
         var kept = new List<OcrLine>(recognized.Count);
         foreach (var line in recognized)
@@ -220,7 +259,10 @@ public sealed partial class EasyOcrService
         _logger?.LogInformation("Handwriting: read {Kept} of {Total} regions with TrOCR.", kept.Count, polygons.Count);
 
         return options.Grouping == TextGrouping.Paragraph
-            ? ParagraphGrouper.Merge(kept, options.GroupingOptions)
+            ? ParagraphGrouper.Merge(
+                kept,
+                options.GroupingOptions,
+                ScriptDirection.IsRightToLeft(options.ReadingDirection, [RequireHandwritingOptions().Language]))
             : kept;
     }
 
