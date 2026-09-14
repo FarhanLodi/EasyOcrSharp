@@ -8,9 +8,11 @@ namespace EasyOcrSharp.Models;
 /// <para>
 /// This governs <b>geometric</b> reading order only: the sequence in which detected boxes are concatenated
 /// into <see cref="OcrResult.FullText"/> and into paragraph groups. It is not the Unicode Bidirectional
-/// Algorithm. Each recognized line is already a logical-order string — the recognizer emits the characters
-/// in the order they are read, not the order they are painted — so applying bidi is the renderer's job, and
-/// text this library returns is correct input for one.
+/// Algorithm. Each recognized line is returned as a logical-order string. A CTC recognizer emits glyphs in
+/// the order they are painted, so — exactly as Python EasyOCR does with <c>get_display</c> — readings of the
+/// built-in Arabic-script pack (<c>ar</c>, <c>fa</c>, <c>ur</c>, <c>ug</c>) are passed through the Unicode
+/// Bidirectional Algorithm before they are returned. Rendering that text is then the display layer's job,
+/// and text this library returns is correct input for one.
 /// </para>
 /// <para>
 /// What it fixes: an Arabic or Hebrew page is read right-to-left, so the physically <i>right-most</i> column

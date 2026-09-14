@@ -16,6 +16,7 @@ namespace EasyOcrSharp.Structure;
 ///   <item><see cref="TableHtml"/> — recovered HTML for a <see cref="StructureBlockType.Table"/>.</item>
 ///   <item><see cref="Latex"/> — recovered LaTeX for a <see cref="StructureBlockType.Formula"/>.</item>
 ///   <item><see cref="Lines"/> — the underlying recognized OCR lines (text/seal blocks), when available.</item>
+///   <item><see cref="CellBounds"/> — per-cell rectangles for a <see cref="StructureBlockType.Table"/>.</item>
 /// </list>
 /// <see cref="Score"/> is the block's overall confidence (defaults to 1 for blocks with no meaningful score).
 /// </summary>
@@ -35,4 +36,13 @@ public sealed record StructureBlock(
     string? TableHtml = null,
     string? Latex = null,
     IReadOnlyList<OcrLine>? Lines = null,
-    float Score = 1);
+    float Score = 1)
+{
+    /// <summary>
+    /// Per-cell rectangles of a recognized <see cref="StructureBlockType.Table"/>, axis-aligned and in
+    /// source-image (page) pixel coordinates, in the table structure's cell order. Populated by the engine
+    /// when the table recognizer recovers cell geometry; <c>null</c> for non-table blocks or when no cell
+    /// boxes were produced.
+    /// </summary>
+    public IReadOnlyList<OcrBoundingBox>? CellBounds { get; init; }
+}

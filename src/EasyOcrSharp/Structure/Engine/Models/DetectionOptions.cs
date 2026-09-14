@@ -9,17 +9,28 @@ namespace EasyOcrSharp.Structure.Engine.Models;
 internal sealed record DetectionOptions
 {
     /// <summary>
-    /// Maximum size (px) of the longest side fed to the detector; larger images are scaled down to fit,
-    /// then results are mapped back. PaddleOCR's <c>det_limit_side_len</c>. Default 960.
+    /// Target side length (px) for the detector resize; PaddleOCR's <c>det_limit_side_len</c>. How it is
+    /// applied depends on <see cref="LimitTypeMax"/>. Default 64 with <c>limit_type=min</c>, matching the
+    /// Python PaddleOCR 3.x pipeline (<c>OCR.yaml</c>): detection runs at near-native resolution — the
+    /// shortest side is only upscaled when below 64 — capped by <see cref="MaxSideLimit"/>. For the older
+    /// downscale-to-960 behavior use 960 with <see cref="LimitTypeMax"/> = <c>true</c>.
     /// </summary>
-    public int LimitSideLen { get; init; } = 960;
+    public int LimitSideLen { get; init; } = 64;
 
     /// <summary>
-    /// Resize policy for <see cref="LimitSideLen"/>. When <c>true</c> (PaddleOCR's <c>limit_type=max</c>,
-    /// the default) the longest side is capped at <see cref="LimitSideLen"/>; when <c>false</c>
-    /// (<c>limit_type=min</c>) the shortest side is brought up to it. Default true.
+    /// Resize policy for <see cref="LimitSideLen"/>. When <c>true</c> (PaddleOCR's <c>limit_type=max</c>)
+    /// the longest side is capped at <see cref="LimitSideLen"/>; when <c>false</c> (<c>limit_type=min</c>,
+    /// the default, matching Python PaddleOCR 3.x) the shortest side is brought up to it and the image is
+    /// otherwise left at native resolution (subject to <see cref="MaxSideLimit"/>). Default false.
     /// </summary>
-    public bool LimitTypeMax { get; init; } = true;
+    public bool LimitTypeMax { get; init; } = false;
+
+    /// <summary>
+    /// After the <see cref="LimitSideLen"/> policy is applied, the longest resized side is capped at this
+    /// many pixels (aspect preserved) — prevents enormous inputs under <c>limit_type=min</c>. PaddleX's
+    /// <c>max_side_limit</c>. Default 4000; values &lt;= 0 fall back to 4000.
+    /// </summary>
+    public int MaxSideLimit { get; init; } = 4000;
 
     /// <summary>
     /// Pixel-level binarization threshold (0–1) applied to the DB probability map. Pixels above this are
@@ -51,9 +62,14 @@ internal sealed record DetectionOptions
     /// </summary>
     public bool UseDilation { get; init; }
 
-    // TODO(box-type-poly): PaddleOCR's det_box_type ("quad" vs "poly") is not yet exposed. Adding it
-    // means emitting many-point polygons (poly mode) instead of 4-point quads, which ripples into the
-    // shared output models (TextQuad / DetectedRegion) owned by other code. Deferred to a dedicated task.
+    /// <summary>
+    /// Output geometry of detection post-processing — PaddleOCR's <c>det_box_type</c>.
+    /// <see cref="DetectionBoxType.Quad"/> (the default) fits a min-area quadrilateral to every text
+    /// region; <see cref="DetectionBoxType.Poly"/> keeps each region's simplified outer contour as an
+    /// N-point polygon, which preserves curved text outlines (seal arcs). Poly mode is currently honored
+    /// by the seal-recognition pipeline only; the general OCR detection path emits quads regardless.
+    /// </summary>
+    public DetectionBoxType BoxType { get; init; } = DetectionBoxType.Quad;
 
     /// <summary>
     /// Discard detected boxes smaller than this side length (px). PaddleOCR's <c>det_db_min_size</c>. Default 3.
@@ -62,9 +78,11 @@ internal sealed record DetectionOptions
 
     /// <summary>
     /// Non-maximum-suppression IoU threshold (0–1) for de-duplicating overlapping detected boxes: when two
-    /// boxes overlap by more than this (axis-aligned IoU), the smaller is dropped. Default 0.6. Set to 0 to disable.
+    /// boxes overlap by more than this (axis-aligned IoU), the smaller is dropped. 0 or negative disables
+    /// NMS entirely — the default, matching Python PaddleOCR, which has no post-detection NMS (nested or
+    /// adjacent boxes may legitimately overlap). Set e.g. 0.6 to opt into de-duplication.
     /// </summary>
-    public double NmsIouThreshold { get; init; } = 0.6;
+    public double NmsIouThreshold { get; init; }
 
     /// <summary>
     /// The default detection thresholds (match PaddleOCR).

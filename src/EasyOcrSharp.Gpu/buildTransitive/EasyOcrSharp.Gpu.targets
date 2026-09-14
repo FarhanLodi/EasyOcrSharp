@@ -1,0 +1,68 @@
+<Project>
+
+  <!--
+    Makes the GPU build of ONNX Runtime the one that actually gets deployed.
+
+    EasyOcrSharp depends on Microsoft.ML.OnnxRuntime (the CPU native package) and this package adds
+    Microsoft.ML.OnnxRuntime.Gpu, so a consumer's graph contains both. Both ship the same asset path -
+    runtimes/win-x64/native/onnxruntime.dll (and runtimes/linux-x64/native/libonnxruntime.so) - and
+    NuGet awards that single slot to exactly one of them: the CPU package. The result is an output
+    folder holding the ~175 MB onnxruntime_providers_cuda.dll next to a core runtime that has no CUDA
+    support compiled in and so never loads it. OrtEnv.GetAvailableProviders() then reports only
+    CPU/Azure, provider auto-detection resolves to CPU, and nothing throws or logs.
+
+    The GPU package's own core runtime is still on disk in the NuGet cache, right beside the CUDA
+    provider that did win a slot. After the build (and after publish) we copy it over the CPU copy at
+    the same path, so deps.json and the item graph stay exactly as NuGet computed them and only the
+    bytes at that path change. Set EasyOcrSharpGpuPreferGpuRuntime=false to opt out.
+  -->
+
+  <PropertyGroup>
+    <EasyOcrSharpGpuPreferGpuRuntime Condition="'$(EasyOcrSharpGpuPreferGpuRuntime)' == ''">true</EasyOcrSharpGpuPreferGpuRuntime>
+  </PropertyGroup>
+
+  <!--
+    Locates the GPU build's core runtime for every RID the GPU packages contributed to, by deriving it
+    from the CUDA provider asset that NuGet did resolve: onnxruntime_providers_cuda.dll sits next to
+    onnxruntime.dll, and libonnxruntime_providers_cuda.so next to libonnxruntime.so. DestinationSubDirectory
+    is carried across unchanged so the copy lands wherever that RID's natives land - runtimes/<rid>/native/
+    for a portable build, the output root for a RID-specific one.
+  -->
+  <Target Name="_EasyOcrSharpGpuCollectCoreRuntime">
+
+    <ItemGroup>
+      <_EasyOcrSharpGpuCudaProvider Include="@(RuntimeTargetsCopyLocalItems);@(NativeCopyLocalItems)"
+                                    Condition="$([System.String]::Copy('%(Filename)').EndsWith('_providers_cuda')) AND '%(Extension)' != '.lib'" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <_EasyOcrSharpGpuCoreRuntimeCandidate Include="%(_EasyOcrSharpGpuCudaProvider.RootDir)%(_EasyOcrSharpGpuCudaProvider.Directory)$([System.String]::Copy('%(_EasyOcrSharpGpuCudaProvider.Filename)').Replace('_providers_cuda', ''))%(_EasyOcrSharpGpuCudaProvider.Extension)">
+        <DestinationSubDirectory>%(_EasyOcrSharpGpuCudaProvider.DestinationSubDirectory)</DestinationSubDirectory>
+      </_EasyOcrSharpGpuCoreRuntimeCandidate>
+    </ItemGroup>
+
+    <ItemGroup>
+      <_EasyOcrSharpGpuCoreRuntime Include="@(_EasyOcrSharpGpuCoreRuntimeCandidate)" Condition="Exists('%(Identity)')" />
+    </ItemGroup>
+
+  </Target>
+
+  <Target Name="EasyOcrSharpGpuPreferGpuRuntimeInBuild"
+          AfterTargets="Build"
+          DependsOnTargets="_EasyOcrSharpGpuCollectCoreRuntime"
+          Condition="'$(EasyOcrSharpGpuPreferGpuRuntime)' == 'true'">
+    <Copy SourceFiles="@(_EasyOcrSharpGpuCoreRuntime)"
+          DestinationFiles="@(_EasyOcrSharpGpuCoreRuntime->'$(OutDir)%(DestinationSubDirectory)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="EasyOcrSharpGpuPreferGpuRuntimeInPublish"
+          AfterTargets="Publish"
+          DependsOnTargets="_EasyOcrSharpGpuCollectCoreRuntime"
+          Condition="'$(EasyOcrSharpGpuPreferGpuRuntime)' == 'true'">
+    <Copy SourceFiles="@(_EasyOcrSharpGpuCoreRuntime)"
+          DestinationFiles="@(_EasyOcrSharpGpuCoreRuntime->'$(PublishDir)%(DestinationSubDirectory)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

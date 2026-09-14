@@ -42,6 +42,12 @@ public class ReviewDisposalAndGuardTests
         Assert.Equal(long.MaxValue, DecodeLimits.For(-1).MaxPixels);
         Assert.Equal(100_000_000, DecodeLimits.For(100_000_000).MaxPixels);
 
+        // EasyImageSharp 1.1.0 added a second ceiling summed over all frames (default 2^30 pixels). Left at
+        // its default it would cap a large multi-page TIFF the caller's budget allows, so it is lifted in
+        // both branches; the per-frame budget and the header frame-count guard still bound the decode.
+        Assert.Equal(long.MaxValue, DecodeLimits.For(0).MaxTotalPixels);
+        Assert.Equal(long.MaxValue, DecodeLimits.For(100_000_000).MaxTotalPixels);
+
         // And an ordinary image still decodes with the guard off.
         using var decoded = DecodeLimits.Load(TinyPng(4, 4), 0, "test");
         Assert.Equal(4, decoded.Width);

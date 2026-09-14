@@ -64,6 +64,16 @@ public sealed class EasyOcrServiceOptions
     public bool Quantize { get; set; }
 
     /// <summary>
+    /// Path to a CRAFT detector ONNX file on disk, loaded <b>instead of</b> the registry model — no download
+    /// is attempted and no checksum is verified (the file is trusted as-is), exactly like a
+    /// <see cref="CustomRecognizer"/>. The model must have the stock CRAFT input/output layout. Pair with
+    /// <see cref="ModelDownloadOptions.Offline"/> and custom recognizers to guarantee the process never
+    /// touches the network. EasyOCR's <c>detect_network</c> / <c>model_storage_directory</c>. Null (the
+    /// default) uses the built-in <c>craft_mlt_25k</c> model.
+    /// </summary>
+    public string? DetectorModelPath { get; set; }
+
+    /// <summary>
     /// When <c>true</c>, a one-time startup <b>warning</b> is logged if a usable GPU is physically present
     /// but OCR is running on CPU (it names the exact provider package to install, e.g.
     /// <c>EasyOcrSharp.Gpu</c>). Default <c>false</c> — the hint is silent, so nothing is logged.
@@ -130,6 +140,7 @@ public sealed class EasyOcrServiceOptions
             Download = Download,
             CustomRecognizers = CustomRecognizers.ToArray(),
             Quantize = Quantize,
+            DetectorModelPath = string.IsNullOrWhiteSpace(DetectorModelPath) ? null : Path.GetFullPath(DetectorModelPath),
             LogGpuHint = LogGpuHint,
         };
 

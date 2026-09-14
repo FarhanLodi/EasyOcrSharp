@@ -22,40 +22,46 @@ namespace EasyOcrSharp.Structure.Seal;
 /// <para>
 /// The seal detector is a DB (Differentiable Binarization) segmentation network — the same family as the
 /// main <see cref="DbTextDetector"/>, trained on curved/circular seal text and exported with PaddleOCR's
-/// <c>box_type='poly'</c>. Because seal lines bend around a circle, PaddleOCR emits a free-form polygon per
-/// line; here we <b>approximate each curved line with its minimum-area quad</b> (via
-/// <see cref="DBPostProcess.GetBoxes"/>, which already fits a min-area quad to every connected region) so
-/// the existing <see cref="PerspectiveWarp"/> + <see cref="ITextRecognizer"/> path can be reused unchanged.
-/// This is a pragmatic simplification: a tightly-curved seal arc is straightened only approximately by a
-/// single quad, but for the small, near-horizontal text blocks typical of seals (company name top arc,
-/// code bottom arc, centred star/title) it recovers the text well. A future improvement would unroll the
-/// arc into a strip via per-segment sampling (PaddleOCR's <c>sorted_boxes</c> + polar unwarp); see TODO.
+/// <c>box_type='poly'</c>. Because seal lines bend around a circle, post-processing runs in polygon mode
+/// (<see cref="DBPostProcess.GetPolygons"/>, the <c>polygons_from_bitmap</c> port): each curved line
+/// keeps its free-form N-point outline instead of being flattened to a min-area quad. Each polygon is
+/// then rectified by <see cref="AutoRectifier"/> (the <c>get_poly_rect_crop</c> port) — near-rectangular
+/// polygons (IoU vs their min-area rect ≥ 0.7) take the plain <see cref="PerspectiveWarp"/> quad warp,
+/// while genuinely curved arcs are straightened piecewise: the outline is split into top/bottom edge
+/// chains, resampled, and every segment quad is warped to an upright strip, the strips stitched into one
+/// straight line image for the recognizer.
 /// </para>
 /// <para>
-/// Pre-processing (resize to a multiple of 32 within the detector's side-length cap + ImageNet
-/// normalization) and DB post-processing mirror <see cref="DbTextDetector"/>; refer to that file for the
-/// fully-documented DB pipeline this reuses. Reference: PaddleOCR <c>PP-OCRv4 seal det</c> +
-/// <c>db_postprocess.py</c> (<c>box_type='poly'</c>).
+/// Pre-processing (upscale the SHORT side to 736 — <c>limit_type=min</c>, capped at 4000 px on the long
+/// side — rounded to a multiple of 32, then BGR ImageNet normalization) and DB post-processing mirror
+/// <see cref="DbTextDetector"/>; refer to that file for the fully-documented DB pipeline this reuses.
+/// Reference: PaddleOCR <c>PP-OCRv4 seal det</c> + <c>db_postprocess.py</c> (<c>box_type='poly'</c>).
 /// </para>
 /// </summary>
 internal sealed class SealRecognizer : ISealRecognizer
 {
-    // ImageNet mean/std (PaddleOCR det normalization), applied to pixel/255 in RGB channel order — identical
-    // to DbTextDetector. Seal det uses the same input normalization as the main DB detector.
+    // ImageNet mean/std (PaddleOCR det normalization), applied to pixel/255 in index order over the B,G,R
+    // planes — the seal det model, like the main DB detector, consumes BGR input (DecodeImage img_mode: BGR
+    // in the exported inference config).
     private static readonly float[] Mean = { 0.485f, 0.456f, 0.406f };
     private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
 
-    // Seal text is small and curved, so we relax the box-score floor relative to the main detector's 0.6 to
-    // avoid dropping faint arc segments; the other DB knobs keep their PaddleOCR defaults. det_db_unclip is a
-    // little larger than the main detector's 1.5 because seal glyphs sit in a thin ring and benefit from a
-    // slightly more generous expansion. These are the values PaddleOCR ships in its seal-recognition config.
+    // PaddleX seal-recognition config caps the resized dims at 4000 px (max_side_limit) so the min-side
+    // upscale below cannot blow up on elongated crops.
+    private const int MaxSideLimit = 4000;
+
+    // Seal text is small and curved, so PaddleOCR's seal config relaxes the pixel threshold to 0.2 and
+    // shrinks det_db_unclip_ratio to 0.5 (seal arcs are thin; a smaller ratio avoids merging adjacent arcs).
+    // These are the values PaddleX ships in its seal-recognition config (limit_side_len 736, limit_type min).
     private static readonly DetectionOptions SealDetectionOptions = new()
     {
         LimitSideLen = 736,     // PaddleOCR seal det det_limit_side_len
+        LimitTypeMax = false,   // limit_type=min: the SHORT side is scaled UP to 736 (ComputeResize below)
         DetThreshold = 0.2,     // det_db_thresh (seal)
         BoxThreshold = 0.6,     // det_db_box_thresh
         UnclipRatio = 0.5,      // det_db_unclip_ratio (seal arcs are thin; a smaller ratio avoids merging arcs)
         MinSize = 3,
+        BoxType = DetectionBoxType.Poly, // det_box_type='poly': keep curved outlines (GetPolygons below)
     };
 
     private readonly InferenceSession _sealDetector;
@@ -81,10 +87,14 @@ internal sealed class SealRecognizer : ISealRecognizer
     /// <inheritdoc />
     /// <remarks>
     /// Pipeline: (1) ImageNet-normalize the seal crop and run the DB seal detector to a probability map;
-    /// (2) DB-postprocess that map into scored min-area quads (one per curved line, approximated);
-    /// (3) rectify each quad to an upright strip via <see cref="PerspectiveWarp"/>;
+    /// (2) DB-postprocess that map in polygon mode (<see cref="DBPostProcess.GetPolygons"/>,
+    /// <c>box_type='poly'</c>) into scored N-point outlines already mapped back to the crop's pixel space;
+    /// (3) rectify each polygon via <see cref="AutoRectifier.GetPolyRectCrop"/> — quad warp for straight
+    /// lines, piecewise curved-text unwarp for arcs;
     /// (4) batch-recognize the strips through the shared <see cref="ITextRecognizer"/>;
     /// (5) emit one <see cref="OcrLine"/> per non-empty reading, with its polygon in the crop's pixel space.
+    /// An empty result lets the engine fall back to plain OCR over the whole seal crop (the 2.0.4 safety
+    /// net in <c>StructureEngine</c>).
     /// </remarks>
     public IReadOnlyList<OcrLine> Recognize(Image<Rgb24> sealCrop)
     {
@@ -97,8 +107,10 @@ internal sealed class SealRecognizer : ISealRecognizer
             return Array.Empty<OcrLine>();
         }
 
-        // --- (1) DETECT: resize to a multiple-of-32 within the side cap, ImageNet-normalize, run seal det.
-        var (resizeW, resizeH, ratioW, ratioH) = ComputeResize(origW, origH, SealDetectionOptions.LimitSideLen);
+        // --- (1) DETECT: upscale the short side to 736 (multiple of 32, long side capped at 4000),
+        // BGR ImageNet-normalize, run seal det. (GetPolygons divides the resize back out itself, so the
+        // per-axis ratios are not needed here.)
+        var (resizeW, resizeH, _, _) = ComputeResize(origW, origH, SealDetectionOptions.LimitSideLen);
         var input = BuildInputTensor(sealCrop, resizeW, resizeH);
 
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(_inputName, input) };
@@ -107,40 +119,29 @@ internal sealed class SealRecognizer : ISealRecognizer
         var output = results.First().AsTensor<float>();
         var (prob, mapW, mapH) = ExtractProbabilityMap(output, resizeW, resizeH);
 
-        // --- (2) POSTPROCESS: binarize -> connected regions -> min-area quad (the 'poly' approximation) ->
-        // score -> unclip, all in resized space. Curved seal lines are approximated by their min-area quad.
-        var boxes = DBPostProcess.GetBoxes(prob, mapW, mapH, SealDetectionOptions);
-        if (boxes.Count == 0)
+        // --- (2) POSTPROCESS in polygon mode (polygons_from_bitmap): binarize -> outer contours ->
+        // approxPolyDP -> score -> unclip -> N-point polygons, already mapped back (with clamping) to the
+        // seal-crop's own pixel space (the caller positions the crop in the page).
+        var polygons = DBPostProcess.GetPolygons(prob, mapW, mapH, SealDetectionOptions, origW, origH);
+        if (polygons.Count == 0)
         {
             return Array.Empty<OcrLine>();
         }
 
-        // Map each quad back to the seal-crop's own pixel space (the caller positions the crop in the page).
-        var quads = new List<OcrPoint[]>(boxes.Count);
-        foreach (var box in boxes)
-        {
-            quads.Add(new[]
-            {
-                MapBack(box.Points[0], ratioW, ratioH, origW, origH),
-                MapBack(box.Points[1], ratioW, ratioH, origW, origH),
-                MapBack(box.Points[2], ratioW, ratioH, origW, origH),
-                MapBack(box.Points[3], ratioW, ratioH, origW, origH),
-            });
-        }
-
-        // --- (3) RECTIFY: warp each quad to an upright strip. A null crop means the polygon was degenerate
-        // (sub-2px after rectification); skip it but keep the quad->crop index mapping so recognition results
-        // line back up with their source polygons.
-        var crops = new List<Image<Rgb24>>(quads.Count);
-        var cropQuads = new List<OcrPoint[]>(quads.Count);
+        // --- (3) RECTIFY: straighten each polygon via get_poly_rect_crop — the quad warp when the outline
+        // is near-rectangular, the piecewise curved-text unwarp when it is a genuine arc. A null crop means
+        // even the quad fallback was degenerate (sub-2px); skip it but keep the polygon->crop index mapping
+        // so recognition results line back up with their source polygons.
+        var crops = new List<Image<Rgb24>>(polygons.Count);
+        var cropPolygons = new List<OcrPoint[]>(polygons.Count);
         try
         {
-            foreach (var quad in quads)
+            foreach (var polygon in polygons)
             {
-                var crop = PerspectiveWarp.Rectify(sealCrop, quad);
+                var crop = AutoRectifier.GetPolyRectCrop(sealCrop, polygon.Points);
                 if (crop is null) continue;
                 crops.Add(crop);
-                cropQuads.Add(quad);
+                cropPolygons.Add(polygon.Points);
             }
 
             if (crops.Count == 0) return Array.Empty<OcrLine>();
@@ -155,13 +156,13 @@ internal sealed class SealRecognizer : ISealRecognizer
                 var (text, confidence) = readings[i];
                 if (string.IsNullOrWhiteSpace(text)) continue;
 
-                var quad = cropQuads[i];
+                var polygon = cropPolygons[i];
                 lines.Add(new OcrLine
                 {
                     Text = text,
                     Confidence = confidence,
-                    BoundingPolygon = quad,
-                    BoundingBox = OcrBoundingBox.FromPoints(quad),
+                    BoundingPolygon = polygon,
+                    BoundingBox = OcrBoundingBox.FromPoints(polygon),
                 });
             }
 
@@ -174,29 +175,43 @@ internal sealed class SealRecognizer : ISealRecognizer
     }
 
     /// <summary>
-    /// PaddleOCR's <c>DetResizeForTest</c> (limit_type=max): scale so the longest side is at most
-    /// <paramref name="limitSideLen"/>, then round each dimension to the nearest multiple of 32 (min 32).
+    /// PaddleOCR's <c>DetResizeForTest</c> with the seal pipeline's <c>limit_type=min</c>: scale UP so the
+    /// shortest side reaches <paramref name="limitSideLen"/> (736 — small seal crops must be enlarged for
+    /// DB to see the thin arcs; never scaled down here), cap the resulting longest side at
+    /// <see cref="MaxSideLimit"/> (4000), then round each dimension to the nearest multiple of 32 (min 32).
     /// Returns the resized width/height and the per-axis resize ratios (resized / original). Mirrors
-    /// <see cref="DbTextDetector"/>'s resize so the shared DB post-processing maps back identically.
+    /// PaddleX <c>text_detection/processors.py resize_image_type0</c> exactly, including the int
+    /// truncations before the round-to-32, so the shared DB post-processing maps back identically.
     /// </summary>
-    private static (int Width, int Height, double RatioW, double RatioH) ComputeResize(int origW, int origH, int limitSideLen)
+    internal static (int Width, int Height, double RatioW, double RatioH) ComputeResize(int origW, int origH, int limitSideLen)
     {
         if (limitSideLen <= 0)
         {
             limitSideLen = 736;
         }
 
+        // limit_type=min: scale up only when the shortest side is below the limit.
         double ratio = 1.0;
-        int maxSide = Math.Max(origW, origH);
-        if (maxSide > limitSideLen)
+        int minSide = Math.Min(origW, origH);
+        if (minSide < limitSideLen)
         {
-            ratio = (double)limitSideLen / maxSide;
+            ratio = (double)limitSideLen / minSide;
         }
 
-        int resizeW = (int)Math.Round(origW * ratio / 32.0) * 32;
-        int resizeH = (int)Math.Round(origH * ratio / 32.0) * 32;
-        resizeW = Math.Max(32, resizeW);
-        resizeH = Math.Max(32, resizeH);
+        int resizeW = (int)(origW * ratio);
+        int resizeH = (int)(origH * ratio);
+
+        // max_side_limit: re-shrink when the upscale pushed the longest side past the cap.
+        int maxSide = Math.Max(resizeW, resizeH);
+        if (maxSide > MaxSideLimit)
+        {
+            double cap = (double)MaxSideLimit / maxSide;
+            resizeW = (int)(resizeW * cap);
+            resizeH = (int)(resizeH * cap);
+        }
+
+        resizeW = Math.Max((int)Math.Round(resizeW / 32.0) * 32, 32);
+        resizeH = Math.Max((int)Math.Round(resizeH / 32.0) * 32, 32);
 
         double ratioW = (double)resizeW / origW;
         double ratioH = (double)resizeH / origH;
@@ -205,7 +220,8 @@ internal sealed class SealRecognizer : ISealRecognizer
 
     /// <summary>
     /// Resizes the seal crop to (<paramref name="resizeW"/>, <paramref name="resizeH"/>),
-    /// ImageNet-normalizes <c>(pixel/255 - mean) / std</c> in RGB order, and packs CHW into a
+    /// ImageNet-normalizes <c>(pixel/255 - mean) / std</c> in index order over the <b>B,G,R</b> planes
+    /// (the seal det model consumes BGR, like the main DB detector), and packs CHW into a
     /// <c>[1,3,H,W]</c> float32 tensor — identical to <see cref="DbTextDetector"/>'s input building.
     /// </summary>
     private static DenseTensor<float> BuildInputTensor(Image<Rgb24> image, int resizeW, int resizeH)
@@ -232,9 +248,9 @@ internal sealed class SealRecognizer : ISealRecognizer
                 {
                     var px = row[x];
                     int idx = rowOffset + x;
-                    buffer[idx] = (px.R / 255f - Mean[0]) / Std[0];            // R channel
-                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];     // G channel
-                    buffer[2 * plane + idx] = (px.B / 255f - Mean[2]) / Std[2]; // B channel
+                    buffer[idx] = (px.B / 255f - Mean[0]) / Std[0];            // B plane (BGR input)
+                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];     // G plane
+                    buffer[2 * plane + idx] = (px.R / 255f - Mean[2]) / Std[2]; // R plane
                 }
             }
         });
@@ -278,17 +294,6 @@ internal sealed class SealRecognizer : ISealRecognizer
         }
 
         return (prob, mapW, mapH);
-    }
-
-    /// <summary>
-    /// Maps a point from resized space back to the seal-crop's pixel space by dividing out the per-axis
-    /// resize ratio, then clamps it to the crop bounds.
-    /// </summary>
-    private static OcrPoint MapBack(OcrPoint p, double ratioW, double ratioH, int origW, int origH)
-    {
-        double x = Math.Clamp(p.X / ratioW, 0, origW);
-        double y = Math.Clamp(p.Y / ratioH, 0, origH);
-        return new OcrPoint(x, y);
     }
 
     /// <inheritdoc />

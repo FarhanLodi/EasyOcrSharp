@@ -11,7 +11,8 @@ internal enum TextGrouping
     Word,
 
     /// <summary>
-    /// Adjacent boxes on the same line are merged into one result (the default).
+    /// Adjacent boxes on the same line are merged into one result (the default): boxes whose vertical
+    /// overlap is at least half the smaller box's height are joined left-to-right with single spaces.
     /// </summary>
     Line,
 

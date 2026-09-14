@@ -12,21 +12,26 @@ using OcrBoundingBox = EasyOcrSharp.Models.OcrBoundingBox;
 namespace EasyOcrSharp.Structure.Engine.Detection;
 
 /// <summary>
-/// PaddleOCR DB / DBNet text detector. Resizes the image to a multiple of 32 within
-/// <see cref="DetectionOptions.LimitSideLen"/>, runs the segmentation model to get a per-pixel text
-/// probability map, binarizes it, extracts contours, computes each contour's min-area rectangle, scores
-/// it against the probability map, and "unclips" (expands) the polygon by
-/// <see cref="DetectionOptions.UnclipRatio"/> back to original-image coordinates.
+/// PaddleOCR DB / DBNet text detector. Resizes the image to a multiple of 32 per
+/// <see cref="DetectionOptions.LimitSideLen"/> / <see cref="DetectionOptions.MaxSideLimit"/>, runs the
+/// segmentation model to get a per-pixel text probability map, binarizes it, extracts contours, computes
+/// each contour's min-area rectangle, scores it against the probability map, and "unclips" (expands) the
+/// polygon by <see cref="DetectionOptions.UnclipRatio"/> back to original-image coordinates.
 /// <para>
 /// Pre-processing matches PaddleOCR's <c>DetResizeForTest</c> (limit_type max or min, per
-/// <see cref="DetectionOptions.LimitTypeMax"/>) + ImageNet normalization; post-processing is delegated to
-/// <see cref="DBPostProcess"/>. Polygon unclip uses Clipper2 (Clipper2Lib).
-/// Reference: RapidOcrNet <c>TextDetector.cs</c> (Apache-2.0) and OnnxOCR <c>db_postprocess.py</c>.
+/// <see cref="DetectionOptions.LimitTypeMax"/>, longest side capped at
+/// <see cref="DetectionOptions.MaxSideLimit"/>, tiny inputs zero-padded to ≥32×32) + ImageNet
+/// normalization over BGR planes (the exported model's <c>DecodeImage img_mode</c> is BGR);
+/// post-processing is delegated to <see cref="DBPostProcess"/>. Polygon unclip uses Clipper2
+/// (Clipper2Lib). Reference: RapidOcrNet <c>TextDetector.cs</c> (Apache-2.0) and OnnxOCR
+/// <c>db_postprocess.py</c>.
 /// </para>
 /// </summary>
 internal sealed class DbTextDetector : ITextDetector
 {
-    // ImageNet mean/std (PaddleOCR det normalization), applied to pixel/255 in RGB channel order.
+    // ImageNet mean/std (PaddleOCR det NormalizeImage), applied to pixel/255 in B,G,R plane order —
+    // the mean/std index order stays [0.485,0.456,0.406]/[0.229,0.224,0.225] exactly as in Python,
+    // where the image is already BGR when NormalizeImage runs.
     private static readonly float[] Mean = { 0.485f, 0.456f, 0.406f };
     private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
 
@@ -60,11 +65,18 @@ internal sealed class DbTextDetector : ITextDetector
             return Array.Empty<TextQuad>();
         }
 
-        // PREPROCESS: compute the resized (multiple-of-32) dimensions and the resize ratios per axis.
-        var (resizeW, resizeH, ratioW, ratioH) = ComputeResize(origW, origH, options.LimitSideLen, options.LimitTypeMax);
+        // DetResizeForTest zero-pads tiny inputs (h + w < 64) onto a ≥32×32 canvas before resizing;
+        // boxes still map back against the original dimensions (Python scales by src_w / map_w).
+        using Image<Rgb24>? padded = origW + origH < 64 ? PadTinyImage(image) : null;
+        var source = padded ?? image;
 
-        // Build the [1,3,H,W] float32 input tensor: resize, ImageNet-normalize, RGB, CHW.
-        var input = BuildInputTensor(image, resizeW, resizeH);
+        // PREPROCESS: compute the resized (multiple-of-32) dimensions from the (padded) input.
+        var (resizeW, resizeH) = ComputeResize(source.Width, source.Height, options.LimitSideLen, options.LimitTypeMax, options.MaxSideLimit);
+        double ratioW = (double)resizeW / origW;
+        double ratioH = (double)resizeH / origH;
+
+        // Build the [1,3,H,W] float32 input tensor: resize, ImageNet-normalize, BGR, CHW.
+        var input = BuildInputTensor(source, resizeW, resizeH);
 
         // INFER: single output probability map [1,1,H,W] in [0,1].
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(_inputName, input) };
@@ -95,25 +107,41 @@ internal sealed class DbTextDetector : ITextDetector
     }
 
     /// <summary>
-    /// PaddleOCR's <c>DetResizeForTest</c>: pick a uniform scale from <paramref name="limitSideLen"/> and
-    /// the limit policy, then round each dimension to the nearest multiple of 32 (min 32). With
-    /// <paramref name="limitTypeMax"/> = <c>true</c> (<c>limit_type=max</c>) the longest side is capped at
-    /// <paramref name="limitSideLen"/> (only ever scaling down); with <c>false</c> (<c>limit_type=min</c>)
-    /// the shortest side is brought up to <paramref name="limitSideLen"/> (only ever scaling up). Returns
-    /// the resized width/height and the per-axis resize ratios (resized / original).
+    /// <c>DetResizeForTest</c>'s <c>image_padding</c>: zero-pads an image whose width + height is below 64
+    /// onto a black canvas of at least 32×32 (content anchored top-left).
     /// </summary>
-    private static (int Width, int Height, double RatioW, double RatioH) ComputeResize(int origW, int origH, int limitSideLen, bool limitTypeMax)
+    private static Image<Rgb24> PadTinyImage(Image<Rgb24> image)
+    {
+        var canvas = new Image<Rgb24>(Math.Max(32, image.Width), Math.Max(32, image.Height));
+        canvas.Mutate(c => c.DrawImage(image, new Point(0, 0), 1f));
+        return canvas;
+    }
+
+    /// <summary>
+    /// PaddleOCR's <c>DetResizeForTest</c>: pick a uniform scale from <paramref name="limitSideLen"/> and
+    /// the limit policy, truncate each scaled dimension to int, cap the longest side at
+    /// <paramref name="maxSideLimit"/>, then round each dimension to the nearest multiple of 32 (min 32).
+    /// With <paramref name="limitTypeMax"/> = <c>true</c> (<c>limit_type=max</c>) the longest side is
+    /// capped at <paramref name="limitSideLen"/> (only ever scaling down); with <c>false</c>
+    /// (<c>limit_type=min</c>) the shortest side is brought up to <paramref name="limitSideLen"/> (only
+    /// ever scaling up). Returns the resized width/height.
+    /// </summary>
+    internal static (int Width, int Height) ComputeResize(int srcW, int srcH, int limitSideLen, bool limitTypeMax, int maxSideLimit)
     {
         if (limitSideLen <= 0)
         {
-            limitSideLen = 960;
+            limitSideLen = 64;
+        }
+        if (maxSideLimit <= 0)
+        {
+            maxSideLimit = 4000;
         }
 
         double ratio = 1.0;
         if (limitTypeMax)
         {
             // limit_type=max: scale down only when the longest side exceeds the limit.
-            int maxSide = Math.Max(origW, origH);
+            int maxSide = Math.Max(srcW, srcH);
             if (maxSide > limitSideLen)
             {
                 ratio = (double)limitSideLen / maxSide;
@@ -122,27 +150,37 @@ internal sealed class DbTextDetector : ITextDetector
         else
         {
             // limit_type=min: scale up only when the shortest side is below the limit.
-            int minSide = Math.Min(origW, origH);
+            int minSide = Math.Min(srcW, srcH);
             if (minSide < limitSideLen)
             {
                 ratio = (double)limitSideLen / minSide;
             }
         }
 
-        int resizeW = (int)Math.Round(origW * ratio / 32.0) * 32;
-        int resizeH = (int)Math.Round(origH * ratio / 32.0) * 32;
-        resizeW = Math.Max(32, resizeW);
-        resizeH = Math.Max(32, resizeH);
+        // Python truncates w*ratio / h*ratio to int BEFORE the round-to-32 step.
+        int resizeW = (int)(srcW * ratio);
+        int resizeH = (int)(srcH * ratio);
 
-        double ratioW = (double)resizeW / origW;
-        double ratioH = (double)resizeH / origH;
-        return (resizeW, resizeH, ratioW, ratioH);
+        // max_side_limit: after the limit_type scaling, cap the longest side (matters with limit_type=min).
+        int maxResized = Math.Max(resizeW, resizeH);
+        if (maxResized > maxSideLimit)
+        {
+            double cap = (double)maxSideLimit / maxResized;
+            resizeW = (int)(resizeW * cap);
+            resizeH = (int)(resizeH * cap);
+        }
+
+        // Nearest multiple of 32; Math.Round's banker's rounding matches Python round().
+        resizeW = Math.Max((int)Math.Round(resizeW / 32.0) * 32, 32);
+        resizeH = Math.Max((int)Math.Round(resizeH / 32.0) * 32, 32);
+        return (resizeW, resizeH);
     }
 
     /// <summary>
     /// Resizes <paramref name="image"/> to (<paramref name="resizeW"/>, <paramref name="resizeH"/>),
-    /// ImageNet-normalizes <c>(pixel/255 - mean) / std</c> in RGB order, and packs CHW into a
-    /// <c>[1,3,H,W]</c> float32 tensor.
+    /// ImageNet-normalizes <c>(pixel/255 - mean) / std</c> in BGR plane order (mean/std index order
+    /// unchanged — the model was exported for BGR input), and packs CHW into a <c>[1,3,H,W]</c> float32
+    /// tensor.
     /// </summary>
     private static DenseTensor<float> BuildInputTensor(Image<Rgb24> image, int resizeW, int resizeH)
     {
@@ -150,7 +188,7 @@ internal sealed class DbTextDetector : ITextDetector
         {
             Size = new Size(resizeW, resizeH),
             Mode = ResizeMode.Stretch,
-            Sampler = KnownResamplers.Bicubic,
+            Sampler = KnownResamplers.Triangle, // bilinear (cv2.resize default INTER_LINEAR)
         }));
 
         var tensor = new DenseTensor<float>(new[] { 1, 3, resizeH, resizeW });
@@ -180,9 +218,9 @@ internal sealed class DbTextDetector : ITextDetector
                 {
                     var px = row[x];
                     int idx = rowOffset + x;
-                    buffer[idx] = (px.R / 255f - Mean[0]) / Std[0];            // R channel
-                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];     // G channel
-                    buffer[2 * plane + idx] = (px.B / 255f - Mean[2]) / Std[2]; // B channel
+                    buffer[idx] = (px.B / 255f - Mean[0]) / Std[0];            // B plane
+                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];     // G plane
+                    buffer[2 * plane + idx] = (px.R / 255f - Mean[2]) / Std[2]; // R plane
                 }
             }
         });

@@ -80,9 +80,15 @@ internal static class InfoCommand
         string? gpuHint;
         await using (var service = new EasyOcrService(OptionBinder.BuildServiceOptions(args, console)))
         {
-            provider = service.UseGpu
-                ? available.FirstOrDefault(static p => !p.StartsWith("CPU", StringComparison.OrdinalIgnoreCase)) ?? "GPU"
-                : "CPUExecutionProvider";
+            // The provider actually attached, in ONNX Runtime's naming. (Picking the first non-CPU entry of
+            // the available list would report TensorrtExecutionProvider on the CUDA build, which lists it first.)
+            provider = service.ActiveExecutionProvider switch
+            {
+                OcrExecutionProvider.Cuda => "CUDAExecutionProvider",
+                OcrExecutionProvider.DirectMl => "DmlExecutionProvider",
+                OcrExecutionProvider.CoreMl => "CoreMLExecutionProvider",
+                _ => "CPUExecutionProvider",
+            };
             gpuHint = service.GpuAccelerationHint;
         }
 

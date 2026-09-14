@@ -15,7 +15,8 @@ internal static class DocPreprocessModelRegistry
         "https://huggingface.co/EasyOcrSharp/EasyOcrSharp-models/resolve/main";
 
     /// <summary>
-    /// PP-LCNet_x1_0 document-orientation classifier: input <c>[1,3,224,224]</c>, output <c>[1,4]</c>
+    /// PP-LCNet_x1_0 document-orientation classifier: input <c>[1,3,224,224]</c> (RGB, stretched to
+    /// 224×224, ImageNet-normalized), output <c>[1,4]</c>
     /// logits over {0°, 90°, 180°, 270°} whole-page rotation.
     /// </summary>
     public static readonly ModelAsset DocOrientationClassifier = new(
@@ -24,8 +25,9 @@ internal static class DocPreprocessModelRegistry
         "D85B3185075AFCA1A83157F73EAC2E52B598D72E9D47DD19CC4A2F3605E23E3F");
 
     /// <summary>
-    /// UVDoc document-unwarp (dewarp) network: input <c>[1,3,H,W]</c> (fed at 488×712), output a
-    /// rectified RGB image at the same size.
+    /// UVDoc document-unwarp (dewarp) network: input <c>[1,3,H,W]</c> BGR in [0,1] at the page's own
+    /// resolution (longest side capped at 2000 px, stride-padded to 32), output a
+    /// rectified BGR image at the same size.
     /// </summary>
     public static readonly ModelAsset DocUnwarp = new(
         "UVDoc.onnx",

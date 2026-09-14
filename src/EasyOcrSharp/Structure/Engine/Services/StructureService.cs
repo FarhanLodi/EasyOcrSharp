@@ -35,7 +35,6 @@ internal sealed class StructureService : IStructureService
     private readonly StructureEngineOptions _engineOptions;
     private StructureEngine? _structureEngine;
     private readonly object _structureEngineLock = new();
-    private readonly bool _useGpu;
     private readonly long _maxImagePixels;
     private volatile bool _disposed;
     // Count of OCR operations currently touching the engine's ONNX sessions. DisposeAsync drains this
@@ -74,23 +73,43 @@ internal sealed class StructureService : IStructureService
         var engineOptions = options.ToEngineOptions();
         _engineOptions = engineOptions;
         _engine = new StructureTextEngine(engineOptions, logger);
-        // ResolvedProvider has already turned Auto into a concrete choice based on the installed runtime.
-        _useGpu = _engine.ResolvedProvider != OcrExecutionProvider.Cpu;
     }
 
     /// <summary>
-    /// Gets a value indicating whether a GPU accelerator was selected for this service — either requested
-    /// explicitly or chosen by <see cref="OcrExecutionProvider.Auto"/> detection. (The provider may still
-    /// silently fall back to CPU if the device turns out to be unusable at the first model load.)
+    /// Gets the execution provider the ONNX sessions are actually running on <b>right now</b> —
+    /// <see cref="OcrExecutionProvider.Cpu"/> when a requested accelerator failed to attach or a session
+    /// later degraded to CPU (see <see cref="GpuAccelerationHint"/> for why). This is the truthful, live
+    /// counterpart of <see cref="UseGpu"/>.
     /// </summary>
-    public bool UseGpu => _useGpu;
+    public OcrExecutionProvider ActiveExecutionProvider => _engine.ActiveProvider;
 
     /// <summary>
-    /// When <see cref="OcrExecutionProvider.Auto"/> fell back to CPU but a usable GPU is physically present,
-    /// an actionable message naming the exact provider package to install (<c>EasyOcrSharp.Gpu</c> for an
-    /// NVIDIA GPU). Null when a GPU is already in use, CPU was chosen explicitly, or no GPU was detected.
+    /// Gets a value indicating whether a GPU accelerator is actually in use — equivalent to
+    /// <see cref="ActiveExecutionProvider"/> being a non-CPU provider. Live: an accelerator that was
+    /// requested but failed to attach (or degraded to CPU at a model load) reports <c>false</c>.
+    /// </summary>
+    public bool UseGpu => _engine.ActiveProvider != OcrExecutionProvider.Cpu;
+
+    /// <summary>
+    /// An actionable message explaining why OCR is running on CPU: the requested or auto-selected
+    /// accelerator failed to attach (with the exact fix — e.g. the CUDA-toolkit-major-mismatch hint or the
+    /// provider package to install), or <see cref="OcrExecutionProvider.Auto"/> fell back to CPU while a
+    /// usable GPU is physically present. Populated for explicit provider requests too, not only Auto.
+    /// Null when an accelerator is in use, CPU was chosen explicitly, or no GPU was detected.
     /// </summary>
     public string? GpuAccelerationHint => _engine.GpuHint;
+
+    /// <summary>
+    /// Collects a one-call diagnostic snapshot answering "why is my GPU not used": ONNX Runtime's
+    /// available providers, the requested/resolved/active execution providers, the GPU probe result and
+    /// the acceleration hint. Cheap; safe to log at startup.
+    /// </summary>
+    public OcrRuntimeInfo GetRuntimeInfo()
+        => OcrRuntimeInfo.Describe(
+            _engineOptions.ExecutionProvider,
+            _engine.ResolvedProvider,
+            _engine.ActiveProvider,
+            _engine.GpuHint);
 
     /// <inheritdoc />
     public async Task<OcrResult> ExtractTextFromImage(
@@ -303,11 +322,11 @@ internal sealed class StructureService : IStructureService
         var langs = ResolveLanguages(languages.ToCodes(), allowEmpty: false);
         if (polygons.Length == 0)
         {
-            return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity, image.Width, image.Height);
+            return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity, image.Width, image.Height, grouping: options.Grouping);
         }
 
         var lines = await _engine.RecognizeRegionsAsync(image, langs, polygons, options, cancellationToken).ConfigureAwait(false);
-        return BuildResult(lines, langs, sw, activity, image.Width, image.Height);
+        return BuildResult(lines, langs, sw, activity, image.Width, image.Height, grouping: options.Grouping);
     }
 
     /// <summary>
@@ -415,7 +434,10 @@ internal sealed class StructureService : IStructureService
     }
 
     /// <summary>
-    /// Lazily creates (once) the structure engine, sharing the OCR engine's configuration.
+    /// Lazily creates (once) the structure engine, sharing this service's own <see cref="StructureTextEngine"/>
+    /// (and therefore its det/cls/rec ONNX sessions) instead of letting the structure engine build a
+    /// duplicate. The service retains ownership of the shared engine and disposes it in
+    /// <see cref="DisposeAsync"/> after the structure engine is disposed.
     /// </summary>
     private StructureEngine GetOrCreateStructureEngine()
     {
@@ -423,7 +445,7 @@ internal sealed class StructureService : IStructureService
         if (existing is not null) return existing;
         lock (_structureEngineLock)
         {
-            _structureEngine ??= new StructureEngine(_engineOptions, _logger);
+            _structureEngine ??= new StructureEngine(_engineOptions, _engine, _logger);
             return _structureEngine;
         }
     }
@@ -441,7 +463,7 @@ internal sealed class StructureService : IStructureService
         using var activity = StructureDiagnostics.ActivitySource.StartActivity("Structure.Extract", ActivityKind.Internal);
         var sw = Stopwatch.StartNew();
 
-        (IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected) outcome;
+        (IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected, int Rotation) outcome;
 
         if (options.Preprocessing.DetectOrientation)
         {
@@ -452,19 +474,27 @@ internal sealed class StructureService : IStructureService
             outcome = await CoreAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
         }
 
-        return BuildResult(outcome.Lines, outcome.Languages, sw, activity, image.Width, image.Height, outcome.Detected);
+        return BuildResult(outcome.Lines, outcome.Languages, sw, activity, image.Width, image.Height, outcome.Detected, options.Grouping, outcome.Rotation);
     }
 
     /// <summary>
     /// Sorts into reading order, records metrics/trace tags, and assembles the result.
+    /// <paramref name="appliedRotation"/> is the clockwise rotation the pipeline applied to upright the
+    /// page (0 when none): the returned quads are in the ORIGINAL image's frame, so the reading-order
+    /// sort keys off each line's forward-rotated (uprighted) box — otherwise a 180°-rotated page would
+    /// come out with its text order reversed.
     /// </summary>
-    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0, IReadOnlyList<string>? detectedLanguages = null)
+    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0, IReadOnlyList<string>? detectedLanguages = null, TextGrouping grouping = TextGrouping.Line, int appliedRotation = 0)
     {
-        // Derived from the requested languages: this engine has no per-call direction option, and every
-        // caller reaching it has already resolved its language set.
-        var ordered = SortLinesByReadingOrder(lines, ScriptDirection.IsRightToLeft(languages));
+        // Direction is derived from the requested languages: this engine has no per-call direction option.
+        var ordered = SortLinesByReadingOrder(lines, appliedRotation, sourceWidth, sourceHeight, ScriptDirection.IsRightToLeft(languages));
         sw.Stop();
         _logger?.LogInformation("OCR completed: {Count} lines in {Ms:F0} ms", ordered.Count, sw.Elapsed.TotalMilliseconds);
+
+        // Read the LIVE provider at result-build time: an accelerator that failed to attach (or degraded
+        // to CPU at a model load) must not report UsedGpu = true.
+        var activeProvider = _engine.ActiveProvider;
+        bool usedGpu = activeProvider != OcrExecutionProvider.Cpu;
 
         StructureDiagnostics.Operations.Add(1);
         StructureDiagnostics.Duration.Record(sw.Elapsed.TotalMilliseconds);
@@ -473,33 +503,65 @@ internal sealed class StructureService : IStructureService
         {
             activity.SetTag("paddleocr.languages", string.Join(",", languages));
             activity.SetTag("paddleocr.lines", ordered.Count);
-            activity.SetTag("paddleocr.gpu", _useGpu);
+            activity.SetTag("paddleocr.gpu", usedGpu);
+            activity.SetTag("paddleocr.provider", activeProvider.ToString());
         }
 
         return new OcrResult
         {
-            FullText = BuildFullText(ordered),
+            FullText = BuildFullText(ordered, grouping),
             Lines = ordered,
             Languages = languages,
             DetectedLanguages = detectedLanguages ?? Array.Empty<string>(),
+            // AppliedRotation is the corrective clockwise rotation; the page was DETECTED as rotated by
+            // the inverse (e.g. correction 270 ⇒ the page sat 90° clockwise from upright).
+            DetectedOrientation = (360 - (appliedRotation % 360 + 360) % 360) % 360,
             Duration = sw.Elapsed,
-            UsedGpu = _useGpu,
+            UsedGpu = usedGpu,
+            ExecutionProvider = activeProvider,
             SourceWidth = sourceWidth,
             SourceHeight = sourceHeight,
         };
     }
 
     /// <summary>
-    /// Runs OCR at 0/90/180/270° and keeps the orientation with the strongest result.
+    /// Handles <see cref="PreprocessingOptions.DetectOrientation"/>: the page orientation is decided by
+    /// the PP-LCNet document-orientation classifier in a single pass (the same model-based path Python's
+    /// <c>use_doc_orientation_classify</c> runs, wired through <see cref="StructureTextEngine"/>). Only when
+    /// that classifier model is unavailable (e.g. offline with an empty cache) does it fall back to the
+    /// old brute force: OCR at 0/90/180/270° and keep the orientation with the strongest result.
+    /// Either way the returned quads are mapped back into the original image's orientation and the
+    /// corrective rotation is reported so <see cref="OcrResult.DetectedOrientation"/> can be filled.
     /// </summary>
-    private async Task<(IReadOnlyList<OcrLine>, string[], IReadOnlyList<string>)> RecognizeBestOrientationAsync(
+    private async Task<(IReadOnlyList<OcrLine>, string[], IReadOnlyList<string>, int)> RecognizeBestOrientationAsync(
         Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
     {
         var langsList = languages.ToArray();
-        var noOrient = options with { Preprocessing = options.Preprocessing with { DetectOrientation = false } };
+
+        // ---- model-based path (python parity): one pass with the doc-orientation classifier forced on.
+        if (await _engine.TryEnsureDocOrientationAsync(ct).ConfigureAwait(false))
+        {
+            var clsOptions = options with
+            {
+                Preprocessing = options.Preprocessing with { DetectOrientation = false },
+                UseDocOrientation = true,
+            };
+            return await CoreAsync(image, langsList, clsOptions, ct).ConfigureAwait(false);
+        }
+
+        // ---- brute-force fallback (classifier model unavailable). Doc preprocessing stays off so the
+        // engine never re-rotates the already-rotated candidates.
+        _logger?.LogInformation("Doc-orientation classifier unavailable; falling back to brute-force 4-rotation OCR.");
+        var noOrient = options with
+        {
+            Preprocessing = options.Preprocessing with { DetectOrientation = false },
+            UseDocOrientation = false,
+            UseDocUnwarp = false,
+        };
 
         (IReadOnlyList<OcrLine> Lines, string[] Langs, IReadOnlyList<string> Detected)? best = null;
         double bestScore = double.NegativeInfinity;
+        int bestDegrees = 0;
 
         foreach (var degrees in new[] { 0, 90, 180, 270 })
         {
@@ -507,13 +569,14 @@ internal sealed class StructureService : IStructureService
             Image<Rgb24>? rotated = degrees == 0 ? null : ImagePreprocessor.RotateRightAngle(image, degrees);
             try
             {
-                var (lines, langs, detected) = await CoreAsync(rotated ?? image, langsList, noOrient, ct).ConfigureAwait(false);
+                var (lines, langs, detected, _) = await CoreAsync(rotated ?? image, langsList, noOrient, ct).ConfigureAwait(false);
                 double score = lines.Where(l => !string.IsNullOrWhiteSpace(l.Text)).Sum(l => l.Confidence * l.Text.Length);
                 _logger?.LogInformation("Orientation {Deg}° scored {Score:F1}", degrees, score);
                 if (score > bestScore)
                 {
                     bestScore = score;
                     best = (lines, langs, detected);
+                    bestDegrees = degrees;
                 }
             }
             finally
@@ -522,14 +585,25 @@ internal sealed class StructureService : IStructureService
             }
         }
 
-        return best ?? (Array.Empty<OcrLine>(), langsList, Array.Empty<string>());
+        if (best is not { } winner) return (Array.Empty<OcrLine>(), langsList, Array.Empty<string>(), 0);
+
+        // Map the winning rotation's quads back into the original image's frame (the winning pass ran on
+        // the rotated copy, whose dimensions are swapped for 90/270).
+        var mapped = winner.Lines;
+        if (bestDegrees != 0)
+        {
+            int rotatedWidth = bestDegrees is 90 or 270 ? image.Height : image.Width;
+            int rotatedHeight = bestDegrees is 90 or 270 ? image.Width : image.Height;
+            mapped = Geometry.OrientationMapper.MapLinesToOriginalFrame(mapped, bestDegrees, rotatedWidth, rotatedHeight);
+        }
+        return (mapped, winner.Langs, winner.Detected, bestDegrees);
     }
 
     /// <summary>
     /// Preprocess → resolve languages → region crop → recognize. The recognition itself is delegated to
     /// <see cref="StructureTextEngine.RecognizeAsync"/> (det → cls → rec), whose body the downstream agent fills.
     /// </summary>
-    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected)> CoreAsync(
+    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected, int Rotation)> CoreAsync(
         Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
     {
         // Denoise / deskew / binarize into a working image (orientation handled by the caller).
@@ -540,8 +614,8 @@ internal sealed class StructureService : IStructureService
             // "auto" is a detection trigger, not a recognizer language; allow it to be the only code (it is
             // dropped by the engine's candidate resolution) so callers can pass languages: ["auto"].
             var langs = ResolveLanguages(languages, allowEmpty: IsAutoRequested(languages, options));
-            var (lines, detected) = await RecognizeWithRegionAsync(working, langs, options, ct).ConfigureAwait(false);
-            return (lines, langs, detected);
+            var (lines, detected, rotation) = await RecognizeWithRegionAsync(working, langs, options, ct).ConfigureAwait(false);
+            return (lines, langs, detected, rotation);
         }
         finally
         {
@@ -560,7 +634,7 @@ internal sealed class StructureService : IStructureService
     /// <summary>
     /// Applies the optional region-of-interest crop and translates boxes back to image coordinates.
     /// </summary>
-    private async Task<(IReadOnlyList<OcrLine> Lines, IReadOnlyList<string> Detected)> RecognizeWithRegionAsync(
+    private async Task<(IReadOnlyList<OcrLine> Lines, IReadOnlyList<string> Detected, int Rotation)> RecognizeWithRegionAsync(
         Image<Rgb24> image, string[] langs, RecognitionOptions options, CancellationToken ct)
     {
         if (options.Region is not { } region)
@@ -569,11 +643,11 @@ internal sealed class StructureService : IStructureService
         }
 
         var (rx, ry, rw, rh) = region.Resolve(image.Width, image.Height);
-        if (rw < 2 || rh < 2) return (Array.Empty<OcrLine>(), Array.Empty<string>());
+        if (rw < 2 || rh < 2) return (Array.Empty<OcrLine>(), Array.Empty<string>(), 0);
 
         using var roi = image.Clone(ctx => ctx.Crop(new Rectangle(rx, ry, rw, rh)));
-        var (roiLines, detected) = await _engine.RecognizeWithDetectedLanguagesAsync(roi, langs, options, ct).ConfigureAwait(false);
-        return (TranslateLines(roiLines, rx, ry), detected);
+        var (roiLines, detected, rotation) = await _engine.RecognizeWithDetectedLanguagesAsync(roi, langs, options, ct).ConfigureAwait(false);
+        return (TranslateLines(roiLines, rx, ry), detected, rotation);
     }
 
     // ---- helpers ----
@@ -629,13 +703,44 @@ internal sealed class StructureService : IStructureService
     /// dense small text isn't merged, unlike a fixed pixel tolerance.
     /// </summary>
     internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines, bool rightToLeft = false)
+        => SortByReadingOrder(lines, l => l.BoundingBox, rightToLeft);
+
+    /// <summary>
+    /// Rotation-aware reading order: when the pipeline uprighted the page (document orientation) the
+    /// returned quads are in the ORIGINAL image's frame, so sorting by those coordinates would read a
+    /// 180°-rotated page bottom-up. Instead each line's box is rotated forward into the uprighted frame
+    /// (by <paramref name="appliedRotation"/>° clockwise, the same rotation the pipeline applied) purely
+    /// as the sort key — the emitted lines keep their original-frame coordinates.
+    /// </summary>
+    internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines, int appliedRotation, int sourceWidth, int sourceHeight, bool rightToLeft = false)
+    {
+        if (appliedRotation == 0 || lines.Count <= 1 || sourceWidth <= 0 || sourceHeight <= 0)
+            return SortLinesByReadingOrder(lines, rightToLeft);
+
+        return SortByReadingOrder(lines, l =>
+        {
+            // Rotate the polygon (or, for polygon-less lines, the box's diagonal corners) forward.
+            IReadOnlyList<OcrPoint> poly = l.BoundingPolygon is { Count: > 0 } p
+                ? p
+                : new[] { new OcrPoint(l.BoundingBox.MinX, l.BoundingBox.MinY), new OcrPoint(l.BoundingBox.MaxX, l.BoundingBox.MaxY) };
+            return OcrBoundingBox.FromPoints(
+                Geometry.OrientationMapper.RotatePolygon(poly, appliedRotation, sourceWidth, sourceHeight));
+        }, rightToLeft);
+    }
+
+    /// <summary>
+    /// Core of <see cref="SortLinesByReadingOrder(IReadOnlyList{OcrLine}, bool)"/> with the sort-key box
+    /// supplied by a selector, so the rotation-aware overload can sort in the uprighted frame.
+    /// </summary>
+    private static List<OcrLine> SortByReadingOrder(IReadOnlyList<OcrLine> lines, Func<OcrLine, OcrBoundingBox> boxOf, bool rightToLeft)
     {
         if (lines.Count <= 1) return lines.ToList();
 
-        double medianHeight = Median(lines.Select(l => (double)l.BoundingBox.Height).Where(h => h > 0));
+        var keyed = lines.Select(l => (Line: l, Box: boxOf(l))).ToList();
+        double medianHeight = Median(keyed.Select(k => k.Box.Height).Where(h => h > 0));
         double tol = Math.Max(4.0, 0.5 * medianHeight);
 
-        var columns = DetectColumns(lines, medianHeight);
+        var columns = DetectColumns(keyed, medianHeight);
 
         // A right-to-left page is read starting from the right-most column; within a row band the
         // right-most fragment leads. Mirrors EasyOcrService.SortLinesByReadingOrder exactly.
@@ -644,10 +749,11 @@ internal sealed class StructureService : IStructureService
         var result = new List<OcrLine>(lines.Count);
         foreach (var column in columns)
         {
-            var byRow = column.OrderBy(l => Math.Round(l.BoundingBox.MinY / tol) * tol);
-            result.AddRange(rightToLeft
-                ? byRow.ThenByDescending(l => l.BoundingBox.MaxX)
-                : byRow.ThenBy(l => l.BoundingBox.MinX));
+            var byRow = column.OrderBy(k => Math.Round(k.Box.MinY / tol) * tol);
+            result.AddRange((rightToLeft
+                ? byRow.ThenByDescending(k => k.Box.MaxX)
+                : byRow.ThenBy(k => k.Box.MinX))
+                .Select(k => k.Line));
         }
         return result;
     }
@@ -659,21 +765,22 @@ internal sealed class StructureService : IStructureService
     /// the gutter, collapses everything back to a single column). Conservative — returns one column when no
     /// clean gutter exists.
     /// </summary>
-    private static List<List<OcrLine>> DetectColumns(IReadOnlyList<OcrLine> lines, double medianHeight)
+    private static List<List<(OcrLine Line, OcrBoundingBox Box)>> DetectColumns(
+        IReadOnlyList<(OcrLine Line, OcrBoundingBox Box)> lines, double medianHeight)
     {
-        var sorted = lines.OrderBy(l => l.BoundingBox.MinX).ToList();
+        var sorted = lines.OrderBy(l => l.Box.MinX).ToList();
         double gutter = Math.Max(20.0, 1.5 * medianHeight);
 
-        var columns = new List<List<OcrLine>>();
-        var current = new List<OcrLine> { sorted[0] };
-        double runningMaxX = sorted[0].BoundingBox.MaxX;
+        var columns = new List<List<(OcrLine Line, OcrBoundingBox Box)>>();
+        var current = new List<(OcrLine Line, OcrBoundingBox Box)> { sorted[0] };
+        double runningMaxX = sorted[0].Box.MaxX;
         for (int i = 1; i < sorted.Count; i++)
         {
-            var box = sorted[i].BoundingBox;
+            var box = sorted[i].Box;
             if (box.MinX - runningMaxX > gutter)
             {
                 columns.Add(current);
-                current = new List<OcrLine>();
+                current = new List<(OcrLine Line, OcrBoundingBox Box)>();
                 runningMaxX = box.MaxX;
             }
             else
@@ -695,19 +802,29 @@ internal sealed class StructureService : IStructureService
         return (arr.Length & 1) == 1 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2.0;
     }
 
-    private static string BuildFullText(IEnumerable<OcrLine> lines)
+    /// <summary>
+    /// Concatenates the recognized blocks into <see cref="OcrResult.FullText"/>.
+    /// <para>
+    /// Under <see cref="TextGrouping.Paragraph"/> each block is itself a multi-line paragraph (the merged
+    /// lines are newline-joined by <see cref="ParagraphGrouper"/>), so blocks are separated by a BLANK line:
+    /// with a single newline the paragraph boundary would be indistinguishable from the line breaks inside a
+    /// paragraph, and the grouping would carry no information into the text. Word/line grouping keeps the
+    /// one-newline-per-line layout, where every newline already means the same thing.
+    /// </para>
+    /// </summary>
+    internal static string BuildFullText(IEnumerable<OcrLine> lines, TextGrouping grouping)
     {
+        string separator = grouping == TextGrouping.Paragraph ? "\n\n" : "\n";
+
         var sb = new StringBuilder();
         foreach (var line in lines)
         {
             if (string.IsNullOrEmpty(line.Text)) continue;
-            // LF, not AppendLine's Environment.NewLine. ParagraphGrouper joins merged
-            // lines with "\n" and the multi-frame/PDF aggregates join with
-            // "\n\n", so on Windows a single FullText mixed both separators.
-            // It also inflated CharacterErrorRate by one insertion per line break when
-            // compared against LF ground truth.
-            if (sb.Length > 0) sb.Append('\n');
-            sb.Append(line.Text);
+            // LF-based separators, not AppendLine's Environment.NewLine: ParagraphGrouper joins merged lines
+            // with LF, so on Windows a single FullText would otherwise mix both separators.
+            if (sb.Length > 0) sb.Append(separator);
+            // Trim the block's own trailing newline so the separator is never doubled into a wider gap.
+            sb.Append(line.Text.TrimEnd('\r', '\n'));
         }
         return sb.ToString();
     }

@@ -123,8 +123,8 @@ internal static class XyCutOrderer
     /// of at least <see cref="MinGap"/> along the axis that no block in the group covers. Returns one
     /// sub-group when the projection is solid (no qualifying gap).
     /// </summary>
-    /// <param name="blocks">All blocks on the page, indexed by <paramref name="group"/>.</param>
-    /// <param name="group">Indices into <paramref name="blocks"/> forming the group being cut.</param>
+    /// <param name="blocks">All block bounds, indexed by the values in <paramref name="group"/>.</param>
+    /// <param name="group">Indices into <paramref name="blocks"/> for the blocks being cut.</param>
     /// <param name="horizontal">
     /// When true, project onto Y and cut at empty horizontal gaps (→ top/bottom bands); when false, project
     /// onto X and cut at empty vertical gaps (→ left/right columns).

@@ -33,9 +33,6 @@ public sealed partial class EasyOcrService : IEasyOcrService
     // Concurrency/timeout gate for the outermost public operations. Disabled unless the caller configured
     // it, in which case it is a pass-through that hands the pipeline the caller's own token.
     private readonly OperationGovernor _governor;
-    // Cached: it becomes a tag on every metric point, and ResolvedProvider.ToString() would box the enum
-    // and allocate a string per operation.
-    private readonly string _providerName;
     private volatile bool _disposed;
     // Count of OCR operations currently touching the engine's ONNX sessions. DisposeAsync drains this
     // to zero before disposing the sessions so a session is never freed while a Recognize is in flight
@@ -78,33 +75,67 @@ public sealed partial class EasyOcrService : IEasyOcrService
         _docPreprocess = new DocumentPreprocessHost(engineOptions, logger);
         // ResolvedProvider has already turned Auto into a concrete choice based on the installed runtime.
         _useGpu = _engine.ResolvedProvider != OcrExecutionProvider.Cpu;
-        _providerName = _engine.ResolvedProvider.ToString();
         _governor = options.CreateGovernor();
     }
 
-    /// <summary>The resolved execution provider's name, used as the <c>easyocr.provider</c> metric tag.</summary>
     /// <summary>
-    /// The resolved execution provider (<c>Cpu</c> / <c>Cuda</c> / ...), used as the <c>easyocr.provider</c>
-    /// metric tag. Internal rather than private so the composite extension methods (PDF, multi-frame,
-    /// batch) tag their data points with the SAME value the per-page points carry — a coarse "Gpu" there
-    /// and an exact "Cuda" here would split one deployment across two series on every provider chart.
+    /// The execution provider the sessions are actually running on (<c>Cpu</c> / <c>Cuda</c> / ...), used as
+    /// the <c>easyocr.provider</c> metric tag. Internal rather than private so the composite extension methods
+    /// (PDF, multi-frame, batch) tag their data points with the SAME value the per-page points carry — a
+    /// coarse "Gpu" there and an exact "Cuda" here would split one deployment across two series on every
+    /// provider chart. Returns interned constants, so tagging every operation allocates nothing.
     /// </summary>
-    internal string ProviderName => _providerName;
+    internal string ProviderName => _engine.ActiveProvider switch
+    {
+        OcrExecutionProvider.Cpu => nameof(OcrExecutionProvider.Cpu),
+        OcrExecutionProvider.Cuda => nameof(OcrExecutionProvider.Cuda),
+        OcrExecutionProvider.DirectMl => nameof(OcrExecutionProvider.DirectMl),
+        OcrExecutionProvider.CoreMl => nameof(OcrExecutionProvider.CoreMl),
+        _ => nameof(OcrExecutionProvider.Auto),
+    };
 
     /// <summary>
     /// Gets a value indicating whether a GPU accelerator was selected for this service — either requested
-    /// explicitly or chosen by <see cref="OcrExecutionProvider.Auto"/> detection. (The provider may still
-    /// silently fall back to CPU if the device turns out to be unusable at the first model load.)
+    /// explicitly or chosen by <see cref="OcrExecutionProvider.Auto"/> detection. This is the <i>attempt</i>:
+    /// the accelerator may still fail to attach or to initialize and fall back to CPU. Use
+    /// <see cref="ActiveExecutionProvider"/> (or <see cref="OcrResult.ExecutionProvider"/>) for what is
+    /// actually running.
     /// </summary>
     public bool UseGpu => _useGpu;
 
     /// <summary>
-    /// When <see cref="OcrExecutionProvider.Auto"/> fell back to CPU but a usable GPU is physically present,
-    /// an actionable message naming the exact provider package to install (<c>EasyOcrSharp.Gpu</c> for an
-    /// NVIDIA GPU, <c>EasyOcrSharp.DirectMl</c> otherwise). Null when a GPU is already in use, CPU was
-    /// chosen explicitly, or no GPU was detected. The same text is also logged once at startup as a warning.
+    /// Gets the execution provider the ONNX sessions are actually running on right now —
+    /// <see cref="OcrExecutionProvider.Cpu"/> when the selected accelerator failed to attach or a session
+    /// later failed to initialize on it (see <see cref="GpuAccelerationHint"/> for why). Never
+    /// <see cref="OcrExecutionProvider.Auto"/>.
+    /// </summary>
+    public OcrExecutionProvider ActiveExecutionProvider => _engine.ActiveProvider;
+
+    /// <summary>
+    /// An actionable message explaining why OCR is running on CPU when it could be accelerated, or null when
+    /// there is nothing to fix. It is set when the selected accelerator failed to attach or to initialize
+    /// (for explicit requests as well as <see cref="OcrExecutionProvider.Auto"/> — naming, for example, the
+    /// missing CUDA or cuDNN library); when <c>EasyOcrSharp.Gpu</c> is deployed but the CPU build of ONNX
+    /// Runtime was loaded instead; or when <see cref="OcrExecutionProvider.Auto"/> fell back to CPU while a
+    /// GPU is physically present (naming the package to install). Null when an accelerator is in use, CPU was
+    /// chosen explicitly, or no GPU was detected. Attach and initialization failures are logged as warnings
+    /// (or written once to standard error when no logger is configured); the Auto upgrade hint is only
+    /// logged when <see cref="EasyOcrServiceOptions.LogGpuHint"/> is set.
     /// </summary>
     public string? GpuAccelerationHint => _engine.GpuHint;
+
+    /// <summary>
+    /// Collects a one-call diagnostic snapshot answering "why is my GPU not used": the loaded ONNX Runtime
+    /// version and its available providers, the requested / resolved / active execution providers, the GPU
+    /// probe result and <see cref="GpuAccelerationHint"/>. Cheap (no model is loaded) and safe to log at
+    /// startup; <see cref="OcrRuntimeInfo.ToString"/> renders a readable report.
+    /// </summary>
+    public OcrRuntimeInfo GetRuntimeInfo()
+        => OcrRuntimeInfo.Describe(
+            _engineOptions.ExecutionProvider,
+            _engine.ResolvedProvider,
+            _engine.ActiveProvider,
+            _engine.GpuHint);
 
     /// <inheritdoc />
     public async Task<OcrResult> ExtractTextFromImage(
@@ -490,11 +521,16 @@ public sealed partial class EasyOcrService : IEasyOcrService
         // operation, provider and outcome; emitting them here as well would double-count every call and
         // still miss every failure.
         recorder?.WithLanguages(languages).AddLines(ordered.Count);
+
+        // Read the LIVE provider at result-build time: an accelerator that failed to attach (or fell back to
+        // CPU at a model load) must not report UsedGpu = true.
+        var activeProvider = _engine.ActiveProvider;
+        bool usedGpu = activeProvider != OcrExecutionProvider.Cpu;
         if (activity is not null)
         {
             activity.SetTag("easyocr.languages", string.Join(",", languages));
             activity.SetTag("easyocr.lines", ordered.Count);
-            activity.SetTag("easyocr.gpu", _useGpu);
+            activity.SetTag("easyocr.gpu", usedGpu);
         }
 
         return new OcrResult
@@ -503,7 +539,8 @@ public sealed partial class EasyOcrService : IEasyOcrService
             Lines = ordered,
             Languages = languages,
             Duration = sw.Elapsed,
-            UsedGpu = _useGpu,
+            UsedGpu = usedGpu,
+            ExecutionProvider = activeProvider,
             SourceWidth = sourceWidth,
             SourceHeight = sourceHeight,
         };

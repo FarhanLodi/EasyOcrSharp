@@ -21,9 +21,19 @@ public readonly record struct ModelDownloadProgress(string FileName, long BytesD
 public sealed class ModelDownloadOptions
 {
     /// <summary>
-    /// Hard ceiling, in bytes, on a single model download. Default 512&#160;MB — comfortably above the
-    /// largest asset this library publishes (PP-DocLayoutV3, ~124&#160;MB). Set to 0 to disable the check.
+    /// Hard ceiling, in bytes, on a single model download. Default 2&#160;GB. Set to 0 to disable the check.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The default has to clear the largest asset this library itself publishes, which is the full-precision
+    /// TrOCR handwriting decoder at ~1.11&#160;GB (<c>trocr_base_handwritten_decoder.onnx</c>) — reached by
+    /// <c>HandwritingOptions { Quantize = false }</c>, a configuration the README documents. A ceiling below
+    /// that turns an opt-in feature into a permanent hard failure on any cold cache: the ceiling is checked
+    /// against <c>Content-Length</c> before a byte is written, and the resulting
+    /// <see cref="ModelDownloadException"/> is deliberately non-transient, so nothing retries and nothing
+    /// falls back to the quantized build.
+    /// </para>
+    /// </remarks>
     /// <remarks>
     /// The checksum is verified only after the bytes are on disk, so without a ceiling a
     /// <see cref="BaseUrlOverride"/> (or <c>EASYOCRSHARP_MODEL_BASE_URL</c>) pointing at a hostile or merely
@@ -31,7 +41,7 @@ public sealed class ModelDownloadOptions
     /// verification ever runs. <see cref="HttpClient.Timeout"/> bounds the wall clock, not the volume — and a
     /// caller-supplied <see cref="HttpClientFactory"/> can remove even that.
     /// </remarks>
-    public long MaxDownloadBytes { get; set; } = 512L * 1024 * 1024;
+    public long MaxDownloadBytes { get; set; } = 2048L * 1024 * 1024;
 
     /// <summary>
     /// Number of additional attempts after a transient network/IO failure (exponential backoff).

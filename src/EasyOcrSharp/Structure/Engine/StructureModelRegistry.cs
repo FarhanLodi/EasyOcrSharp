@@ -11,7 +11,7 @@ namespace EasyOcrSharp.Structure.Engine;
 ///         <see cref="ServerRecognizer">server</see> (Chinese / English / Japanese, on <c>ppocrv5_dict.txt</c>);</item>
 ///   <item>the <see cref="TextLineOrientationClassifier">text-line orientation</see> (180° flip) classifier;</item>
 ///   <item>the <see cref="DocOrientationClassifier">document-orientation</see> (0/90/180/270°) classifier;</item>
-///   <item>the per-script recognition language packs (latin, cyrillic, arabic, devanagari, korean, japan,
+///   <item>the per-script recognition language packs (en, latin, cyrillic, arabic, devanagari, korean,
 ///         thai, greek, telugu, tamil, chinese_cht, eslav), each with its matching ppocr dictionary.</item>
 /// </list>
 /// <para>
@@ -72,14 +72,12 @@ internal static class StructureModelRegistry
     private const string DocImageOriFile = "PP-LCNet_x1_0_doc_ori.onnx"; // 4-class document image orientation
     private const string UVDocUnwarpFile = "UVDoc.onnx";
 
-    // Table: a lightweight cls (is-this-table-wired-or-wireless) gate, two SLANet-family structure models
-    // (wired vs wireless), the SLANeXt structure models, the shared structure-token dictionary, and the
-    // RT-DETR cell detectors (wired vs wireless).
+    // Table: a lightweight cls (is-this-table-wired-or-wireless) gate, the SLANet_plus structure model,
+    // the SLANeXt structure models, the shared structure-token dictionary, and the RT-DETR cell detectors
+    // (wired vs wireless; not yet hosted).
     private const string TableClsFile = "PP-LCNet_x1_0_table_cls.onnx";
     // The single SLANet_plus structure model published as ONNX (50-class head); serves the table slot.
     private const string SlanetPlusFile = "SLANet_plus.onnx";
-    private const string SlanetPlusWiredFile = "SLANet_plus_wired.onnx";
-    private const string SlanetPlusWirelessFile = "SLANet_plus_wireless.onnx";
     private const string SlaNeXtWiredFile = "SLANeXt_wired.onnx";
     private const string SlaNeXtWirelessFile = "SLANeXt_wireless.onnx";
     private const string TableStructureDictFile = "table_structure_dict.txt";
@@ -105,11 +103,11 @@ internal static class StructureModelRegistry
     /// Populated from the files published to <see cref="DefaultBaseUrl"/> (regenerate with
     /// <c>tools/stage_and_checksum.py</c> for the core set and <c>tools/stage_structure_models.py</c> for the
     /// structure set). Every entry below is enforced: <see cref="ModelDownloadManager"/> rejects a download
-    /// whose SHA256 does not match. The few assets <i>not</i> listed here (the optional
-    /// <c>table_structure_dict.txt</c>, embedded as a fallback, and the unused <c>SLANet_plus_wired/wireless</c>
-    /// aliases) get a <c>null</c> <see cref="ModelAsset.Sha256"/> from <see cref="Asset"/> and so fail closed
-    /// unless <see cref="Services.ModelDownloadOptions.AllowUnverifiedModels"/> is set. Keys must equal the
-    /// asset <see cref="ModelAsset.FileName"/>.
+    /// whose SHA256 does not match. An asset <i>not</i> listed here gets a <c>null</c>
+    /// <see cref="ModelAsset.Sha256"/> from <see cref="Asset"/> and so fails closed unless
+    /// <see cref="Services.ModelDownloadOptions.AllowUnverifiedModels"/> is set. The
+    /// <c>PP-DocLayout_plus-L</c> and RT-DETR-L cell-det entries are checksums of files that are not
+    /// hosted yet (see the class remarks). Keys must equal the asset <see cref="ModelAsset.FileName"/>.
     /// </para>
     /// </summary>
     private static readonly FrozenDictionary<string, string> Checksums =
@@ -132,10 +130,10 @@ internal static class StructureModelRegistry
             ["arabic_dict.txt"] = "F6B5BAF1335408E6E1FB5CC6E8268A26769F549C2BB37268E72A6804FE269B4C",
             ["devanagari_PP-OCRv5_mobile_rec.onnx"] = "932E2D53FAFDFD929131C4E20133F49901288E8EC1BA03B18317A4780B21F3CE",
             ["devanagari_dict.txt"] = "4BFB5FC511C24DA3B1F3A582AE4E07ECD16601997B70B864BB34E111FC646CFE",
+            ["en_PP-OCRv5_mobile_rec_infer.onnx"] = "1081B104A3C44D103511F150763D997A846994431C5775A800C802254C1124BF",
+            ["ppocrv5_en_dict.txt"] = "C60D46E9E01D500ED6388FE8681051EAC9CF6692E0D57238315BE171927A0A1B",
             ["korean_PP-OCRv5_mobile_rec.onnx"] = "EE0DFDE503D787C91FD0455DAAE2EB85311B4B5BDCDDF85A54D8C1E0ADC157DE",
             ["korean_dict.txt"] = "A3792CBB41215A43E555E16FF4A7F7B18DB5DD80CD058637098F0D872F2DD9D6",
-            ["japan_PP-OCRv5_mobile_rec.onnx"] = "45B0872D8E93EA6293C9F7A5AED101B4C73B94E3C5F9076AC6176BDD0506EF22",
-            ["japan_dict.txt"] = "EF0DEDF763530A436043372CFF6E0886451A40CD203EB8FD9F11384041BBF437",
             ["th_PP-OCRv5_mobile_rec.onnx"] = "6F07AA2AF58713DA04B4BDAF1524588D8051FC734DB5A1AD7B7A65C1E7C7EC18",
             ["th_dict.txt"] = "EAACAE5CF9B0808D9078CE1152C9EA5C6099D1F563750E66B93C12854ACEA31A",
             ["el_PP-OCRv5_mobile_rec.onnx"] = "54235F471B1CA8E356C48673125E0B14E4823496CD7BB583B24FB8808DBCD9C4",
@@ -239,6 +237,8 @@ internal static class StructureModelRegistry
 
     /// <summary>
     /// PP-DocLayout_plus-L layout detector (RT-DETR) ONNX network — the high-accuracy layout model.
+    /// <b>Not currently hosted</b> (the download 404s); no default code path loads it —
+    /// <c>Structure/LayoutModel</c> serves the RT-DETR slot with <see cref="DocLayoutV3"/> instead.
     /// </summary>
     public static readonly ModelAsset DocLayoutPlusL = Asset(DocLayoutPlusLFile);
 
@@ -253,7 +253,8 @@ internal static class StructureModelRegistry
     public static readonly ModelAsset DocLayoutMLabels = Asset(DocLayoutMLabelsFile);
 
     /// <summary>
-    /// Label sidecar (.yml: raw-class-id → label name) for <see cref="DocLayoutPlusL"/>.
+    /// Label sidecar (.yml: raw-class-id → label name) for <see cref="DocLayoutPlusL"/>. Not currently
+    /// hosted, like the network it belongs to.
     /// </summary>
     public static readonly ModelAsset DocLayoutPlusLLabels = Asset(DocLayoutPlusLLabelsFile);
 
@@ -289,19 +290,9 @@ internal static class StructureModelRegistry
     public static readonly ModelAsset TableClassifier = Asset(TableClsFile);
 
     /// <summary>
-    /// SLANet_plus wired-table structure recognizer ONNX network.
-    /// </summary>
-    /// <summary>
     /// The single published SLANet_plus table-structure model (50-class head).
     /// </summary>
     public static readonly ModelAsset SlanetPlus = Asset(SlanetPlusFile);
-
-    public static readonly ModelAsset SlanetPlusWired = Asset(SlanetPlusWiredFile);
-
-    /// <summary>
-    /// SLANet_plus wireless-table structure recognizer ONNX network.
-    /// </summary>
-    public static readonly ModelAsset SlanetPlusWireless = Asset(SlanetPlusWirelessFile);
 
     /// <summary>
     /// SLANeXt wired-table structure recognizer ONNX network.
@@ -314,17 +305,24 @@ internal static class StructureModelRegistry
     public static readonly ModelAsset SlaNeXtWireless = Asset(SlaNeXtWirelessFile);
 
     /// <summary>
-    /// Shared table-structure-token dictionary (HTML tag tokens), one token per line.
+    /// Shared table-structure-token dictionary (HTML tag tokens), one token per line. <b>Local-only</b>:
+    /// the file is not hosted and the embedded 48-token vocab in <c>SlanetTableRecognizer</c> is
+    /// authoritative, so this asset deliberately carries no download URL — resolving it fails fast
+    /// (without a network round-trip) unless the cache is pre-seeded or a base-URL override (which builds
+    /// its own URL from the file name) points at a mirror that hosts it.
     /// </summary>
-    public static readonly ModelAsset TableStructureDict = Asset(TableStructureDictFile);
+    public static readonly ModelAsset TableStructureDict = new(TableStructureDictFile, string.Empty, null);
 
     /// <summary>
-    /// RT-DETR-L wired-table cell-detection ONNX network (per-cell bounding boxes).
+    /// RT-DETR-L wired-table cell-detection ONNX network (per-cell bounding boxes). <b>Not currently
+    /// hosted</b> (the download 404s) and not consumed — the cell-detection leg of the v2 table pipeline
+    /// is unimplemented; the checksum is kept for when the export is published.
     /// </summary>
     public static readonly ModelAsset RtDetrWiredTableCell = Asset(RtDetrWiredCellFile);
 
     /// <summary>
-    /// RT-DETR-L wireless-table cell-detection ONNX network (per-cell bounding boxes).
+    /// RT-DETR-L wireless-table cell-detection ONNX network (per-cell bounding boxes). <b>Not currently
+    /// hosted</b> and not consumed — see <see cref="RtDetrWiredTableCell"/>.
     /// </summary>
     public static readonly ModelAsset RtDetrWirelessTableCell = Asset(RtDetrWirelessCellFile);
 
@@ -370,11 +368,13 @@ internal static class StructureModelRegistry
     /// <summary>
     /// PP-OCRv5 <b>mobile</b> default recognizer: Simplified/Traditional Chinese, English and Japanese on
     /// <c>ppocrv5_dict.txt</c>. The lightweight default — its language list also captures the codes that
-    /// fall through to the default model rather than a dedicated script pack.
+    /// fall through to the default model rather than a dedicated script pack. <c>en</c> stays here until the
+    /// dedicated <see cref="English"/> pack's files are hosted (Python routes lang=en to that pack); the Japanese codes
+    /// live here because upstream ships no Japanese PP-OCRv5 pack (see the note below).
     /// </summary>
     public static readonly RecognizerPack MobileRecognizer = Pack(
         "PP-OCRv5_mobile", MobileRecFile, "ppocrv5_dict.txt",
-        "ch", "ch_sim", "zh", "zh_sim", "en", "ja", "japan_default", "default");
+        "ch", "ch_sim", "zh", "zh_sim", "en", "ja", "japan", "ja_full", "japan_default", "default");
 
     /// <summary>
     /// PP-OCRv5 <b>server</b> default recognizer: same Chinese/English/Japanese coverage and dictionary as
@@ -386,32 +386,47 @@ internal static class StructureModelRegistry
         "PP-OCRv5_server", ServerRecFile, "ppocrv5_dict.txt",
         "ch", "ch_sim", "zh", "zh_sim", "en", "ja");
 
+    /// <summary>
+    /// Dedicated English recognizer (<c>en_PP-OCRv5_mobile_rec</c>, hosted under its exported
+    /// <c>_infer</c> file name) on <c>ppocrv5_en_dict.txt</c> — a small English-only head that Python
+    /// selects for <c>lang="en"</c>. Listed before <see cref="ServerRecognizer"/> in <see cref="All"/> so
+    /// it wins the <c>en</c> code.
+    /// </summary>
+    public static readonly RecognizerPack English = Pack(
+        "en_PP-OCRv5_mobile", "en_PP-OCRv5_mobile_rec_infer.onnx", "ppocrv5_en_dict.txt",
+        "en");
+
     // --- Per-script multilingual language packs (PP-OCRv5 mobile rec + the script's ppocr dict) ---
     // Language code lists follow PaddleOCR's per-script grouping; the first code is the representative.
 
     /// <summary>
-    /// Latin-script pack (en, fr, de, es, it, pt, nl, …) on <c>latin_dict.txt</c>.
+    /// Latin-script pack (fr, de, es, it, pt, nl, …) on <c>latin_dict.txt</c>. The <c>french</c> and
+    /// <c>german</c> codes are upstream aliases of <c>fr</c>/<c>de</c>.
     /// </summary>
     public static readonly RecognizerPack Latin = Pack(
         "latin_PP-OCRv5_mobile", "latin_PP-OCRv5_mobile_rec.onnx", "latin_dict.txt",
-        "latin", "fr", "de", "es", "it", "pt", "nl", "af", "az", "bs", "cs", "cy", "da", "et", "ga",
-        "hr", "hu", "id", "is", "ku", "la", "lt", "lv", "mi", "ms", "mt", "no", "oc", "pi", "pl", "ro",
-        "rs_latin", "sk", "sl", "sq", "sv", "sw", "tl", "tr", "uz", "vi");
+        "latin", "fr", "de", "es", "it", "pt", "nl", "af", "az", "bs", "ca", "cs", "cy", "da", "et",
+        "eu", "fi", "ga", "gl", "hr", "hu", "id", "is", "ku", "la", "lb", "lt", "lv", "mi", "ms", "mt",
+        "no", "oc", "pi", "pl", "qu", "rm", "ro", "rs_latin", "sk", "sl", "sq", "sv", "sw", "tl", "tr",
+        "uz", "vi", "french", "german");
 
     /// <summary>
-    /// Cyrillic-script pack (ru, uk, bg, sr, …) on <c>cyrillic_dict.txt</c>.
+    /// Cyrillic-script pack (bg, sr, mk, kk, …) on <c>cyrillic_dict.txt</c>. The East-Slavic codes
+    /// <c>ru</c>/<c>be</c>/<c>uk</c> belong to <see cref="EastSlavic"/> (Python checks ESLAV_LANGS before
+    /// the Cyrillic group). <c>tjk</c> is kept as a legacy alias of the upstream <c>tg</c> (Tajik) code.
     /// </summary>
     public static readonly RecognizerPack Cyrillic = Pack(
         "cyrillic_PP-OCRv5_mobile", "cyrillic_PP-OCRv5_mobile_rec.onnx", "cyrillic_dict.txt",
-        "cyrillic", "ru", "rs_cyrillic", "be", "bg", "uk", "mn", "abq", "ady", "kbd", "ava", "dar",
-        "inh", "che", "lbe", "lez", "tab", "tjk");
+        "cyrillic", "rs_cyrillic", "bg", "mn", "abq", "ady", "kbd", "ava", "dar",
+        "inh", "che", "lbe", "lez", "tab", "kk", "ky", "tg", "tjk", "mk", "tt", "cv", "ba", "mhr",
+        "mo", "udm", "kv", "os", "bua", "xal", "tyv", "sah", "kaa");
 
     /// <summary>
-    /// Arabic-script pack (ar, fa, ur, ug) on <c>arabic_dict.txt</c>.
+    /// Arabic-script pack (ar, fa, ur, ug, ps, sd, bal) on <c>arabic_dict.txt</c>.
     /// </summary>
     public static readonly RecognizerPack Arabic = Pack(
         "arabic_PP-OCRv5_mobile", "arabic_PP-OCRv5_mobile_rec.onnx", "arabic_dict.txt",
-        "arabic", "ar", "fa", "ug", "ur");
+        "arabic", "ar", "fa", "ug", "ur", "ps", "sd", "bal");
 
     /// <summary>
     /// Devanagari-script pack (hi, mr, ne, sa, …) on <c>devanagari_dict.txt</c>.
@@ -427,12 +442,10 @@ internal static class StructureModelRegistry
         "korean_PP-OCRv5_mobile", "korean_PP-OCRv5_mobile_rec.onnx", "korean_dict.txt",
         "korean", "ko");
 
-    /// <summary>
-    /// Japanese pack on <c>japan_dict.txt</c>.
-    /// </summary>
-    public static readonly RecognizerPack Japanese = Pack(
-        "japan_PP-OCRv5_mobile", "japan_PP-OCRv5_mobile_rec.onnx", "japan_dict.txt",
-        "japan", "ja_full");
+    // No dedicated Japanese pack: upstream ships no Japanese PP-OCRv5 recognizer (the previously
+    // registered japan_PP-OCRv5_mobile_rec.onnx is byte-identical to the PP-OCRv3 japan model and stays
+    // hosted but unreferenced). Python routes lang=japan to PP-OCRv5_server_rec, whose ppocrv5_dict.txt
+    // the default recognizers share — so ja/japan/ja_full map to MobileRecognizer (server is opt-in).
 
     /// <summary>
     /// Thai pack on <c>th_dict.txt</c>.
@@ -472,27 +485,35 @@ internal static class StructureModelRegistry
         "chinese_cht", "ch_tra", "zh_tra", "cht");
 
     /// <summary>
-    /// East-Slavic pack on <c>ppocrv5_eslav_dict.txt</c> (the PP-OCRv5 East-Slavic dictionary).
+    /// East-Slavic pack on <c>ppocrv5_eslav_dict.txt</c> (the PP-OCRv5 East-Slavic dictionary). Owns the
+    /// plain <c>ru</c>/<c>be</c>/<c>uk</c> codes — Python's ESLAV_LANGS take priority over the Cyrillic
+    /// group — plus the explicit <c>*_eslav</c> aliases.
     /// </summary>
     public static readonly RecognizerPack EastSlavic = Pack(
         "eslav_PP-OCRv5_mobile", "eslav_PP-OCRv5_mobile_rec.onnx", "ppocrv5_eslav_dict.txt",
-        "eslav", "ru_eslav", "uk_eslav", "be_eslav");
+        "eslav", "ru", "be", "uk", "ru_eslav", "uk_eslav", "be_eslav");
 
     /// <summary>
-    /// Every recognizer pack in the catalogue. The default mobile/server recognizers come first so the
-    /// Chinese/English/Japanese codes they share resolve to the mobile default (server is opt-in).
+    /// Every recognizer pack in the catalogue. The mobile default comes first so the Chinese/Japanese
+    /// codes it shares with the server pack resolve to it (server is opt-in). <see cref="English"/> is
+    /// defined but not routed yet — see the comment in the list.
     /// </summary>
     public static readonly IReadOnlyList<RecognizerPack> All = new[]
     {
+        // English is deliberately NOT in the routing list yet: en_PP-OCRv5_mobile_rec_infer.onnx and
+        // ppocrv5_en_dict.txt are not published to the EasyOcrSharp model repo (404), so routing `en` to
+        // them would break every cold-cache English analysis. `en` stays on MobileRecognizer (whose
+        // ppocrv5_dict.txt covers English) until the files are uploaded; then add English back here.
         MobileRecognizer, ServerRecognizer,
-        Latin, Cyrillic, Arabic, Devanagari, Korean, Japanese, Thai, Greek,
+        Latin, Cyrillic, Arabic, Devanagari, Korean, Thai, Greek,
         Telugu, Tamil, ChineseTraditional, EastSlavic,
     };
 
     /// <summary>
     /// Language-string → (recognition model asset + dictionary asset) map, materialized as the owning
     /// <see cref="RecognizerPack"/> (which bundles both). The first pack to claim a code wins, so the
-    /// order of <see cref="All"/> matters: the mobile default takes the shared ch/en/ja codes.
+    /// order of <see cref="All"/> matters: the mobile default takes the shared ch/en/ja codes. The <c>ka</c> (Kannada) code is unsupported — its upstream model
+    /// (ka_PP-OCRv3_mobile_rec) has no hosted ONNX export.
     /// </summary>
     private static readonly FrozenDictionary<string, RecognizerPack> ByLanguage = BuildLanguageIndex();
 
@@ -503,7 +524,7 @@ internal static class StructureModelRegistry
         {
             foreach (var lang in pack.Languages)
             {
-                // First pack wins for a shared code: MobileRecognizer (listed first) keeps ch/en/ja so the
+                // First pack wins for a shared code: MobileRecognizer (listed first) keeps ch/ja so the
                 // default mobile model serves them rather than the heavier server pack.
                 dict.TryAdd(lang, pack);
             }

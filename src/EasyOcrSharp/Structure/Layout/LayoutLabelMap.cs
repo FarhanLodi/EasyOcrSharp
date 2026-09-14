@@ -182,12 +182,16 @@ internal static class LayoutLabelMap
             "table" => StructureBlockType.Table,
             "table_caption" or "table_title" => StructureBlockType.TableCaption,
             "figure" or "image" or "picture" => StructureBlockType.Figure,
-            "figure_caption" or "figure_title" or "image_caption" => StructureBlockType.FigureCaption,
+            // chart_title is a caption, not a chart: PaddleX treats it as a vision-title label whose text
+            // flows through the OCR/text path (setting.py vision_title_labels), while the Chart type is
+            // picture-like and never OCR'd — mapping it to Chart silently lost every chart caption.
+            "figure_caption" or "figure_title" or "image_caption" or "chart_title"
+                => StructureBlockType.FigureCaption,
             "formula" or "equation" or "isolate_formula" or "interline_equation"
                 or "display_formula" or "inline_formula" => StructureBlockType.Formula,
             "formula_number" or "formula_caption" or "equation_number" => StructureBlockType.FormulaNumber,
             "seal" or "stamp" => StructureBlockType.Seal,
-            "chart" or "chart_title" => StructureBlockType.Chart,
+            "chart" => StructureBlockType.Chart,
             "header" or "page_header" or "header_image" => StructureBlockType.Header,
             "footer" or "page_footer" or "footer_image" => StructureBlockType.Footer,
             "reference" or "references" or "reference_content" => StructureBlockType.Reference,

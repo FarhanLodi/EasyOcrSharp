@@ -471,12 +471,21 @@ internal static class StructureDocxExporter
     }
 
     /// <summary>
-    /// Emits a run that preserves significant whitespace (<c>xml:space="preserve"</c>) so leading/trailing
-    /// spaces inside cells/paragraphs survive the round-trip.
+    /// Emits the text of one paragraph, preserving significant whitespace (<c>xml:space="preserve"</c>) so
+    /// leading/trailing spaces inside cells/paragraphs survive the round-trip, and turning embedded newlines
+    /// into <c>&lt;w:br/&gt;</c>. Word renders a literal newline inside <c>&lt;w:t&gt;</c> as a space, so a
+    /// multi-line block or table cell would otherwise collapse onto one line.
     /// </summary>
     private static void AppendRun(StringBuilder sb, string text)
     {
-        sb.Append("<w:r><w:t xml:space=\"preserve\">").Append(Xml(text)).Append("</w:t></w:r>");
+        // Normalize CRLF/CR to LF first so a mixed-ending string cannot produce doubled breaks.
+        var lines = text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n');
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (i > 0) sb.Append("<w:r><w:br/></w:r>");
+            if (lines[i].Length == 0) continue;
+            sb.Append("<w:r><w:t xml:space=\"preserve\">").Append(Xml(lines[i])).Append("</w:t></w:r>");
+        }
     }
 
     // ---- tables ----------------------------------------------------------------------------------------

@@ -23,13 +23,19 @@
 
 	<ItemGroup>
 		<ProjectReference Include="../EasyOcrSharp/EasyOcrSharp.csproj" />
-		<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.29.0" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime.Gpu" Version="1.30.0" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<None Include="../../README.md" Pack="true" PackagePath="" />
 		<None Include="../../NOTICE" Pack="true" PackagePath="" />
 		<None Include="../EasyOcrSharp/Assets/icon.png" Pack="true" PackagePath="icon.png" />
+		<!--
+			Imported into the consuming project by NuGet. Ensures the GPU build of onnxruntime.dll is the
+			copy that reaches the output folder, instead of the CPU one EasyOcrSharp's own ONNX Runtime
+			dependency contributes (see the comment in the targets file).
+		-->
+		<None Include="buildTransitive/EasyOcrSharp.Gpu.targets" Pack="true" PackagePath="buildTransitive/" />
 	</ItemGroup>
 
 </Project>

@@ -29,6 +29,24 @@ internal static class GpuProbe
         catch { return GpuVendor.None; }
     }
 
+    /// <summary>
+    /// One-line human-readable probe summary for diagnostics. Unlike <see cref="Detect"/> (whose
+    /// <see cref="GpuVendor.None"/> conflates "no GPU" with "could not look"), this distinguishes a
+    /// host where the probe cannot run — non-Windows returns "unknown" instead of denying a GPU exists.
+    /// </summary>
+    public static string Describe()
+    {
+        if (!OperatingSystem.IsWindows()) return "unknown (GPU probe supports Windows only)";
+        return Detect() switch
+        {
+            GpuVendor.Nvidia => "NVIDIA GPU detected",
+            GpuVendor.Amd => "AMD GPU detected",
+            GpuVendor.Intel => "Intel GPU detected",
+            GpuVendor.Other => "GPU detected (unrecognized vendor)",
+            _ => "no GPU detected",
+        };
+    }
+
     // The Display device-class GUID; its numeric subkeys ("0000", "0001", ...) are installed adapters.
     private const string DisplayClassKey =
         @"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";

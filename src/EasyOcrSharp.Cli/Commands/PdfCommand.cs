@@ -109,7 +109,7 @@ internal static class PdfCommand
 
         await using var service = new EasyOcrService(OptionBinder.BuildServiceOptions(args, console));
         console.Info($"easyocrsharp: {input} -> {output}, languages [{string.Join(", ", languages)}]"
-            + (service.UseGpu ? ", GPU" : ", CPU"));
+            + (service.ActiveExecutionProvider != OcrExecutionProvider.Cpu ? ", GPU" : ", CPU"));
 
         try
         {

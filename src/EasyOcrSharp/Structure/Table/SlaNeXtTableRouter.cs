@@ -10,10 +10,12 @@ namespace EasyOcrSharp.Structure.Table;
 
 /// <summary>
 /// The PP-StructureV3 "table recognition v2" path: an <see cref="ITableClassifier"/> decides whether each
-/// table crop is wired (ruled/bordered) or wireless (borderless), then delegates to the matching SLANeXt
-/// structure recognizer. SLANeXt is architecturally identical to SLANet (the same <c>[.,.,8]</c> location +
-/// <c>[.,.,50]</c> structure heads), so both recognizers are ordinary <see cref="SlanetTableRecognizer"/>
-/// instances built at SLANeXt's 512×512 input. Owns and disposes the classifier and both recognizers.
+/// table crop is wired (ruled/bordered) or wireless (borderless), then delegates to the matching structure
+/// recognizer — SLANeXt_wired for wired tables and SLANet_plus for wireless ones, the model pairing
+/// PP-StructureV3.yaml ships. SLANeXt is architecturally identical to SLANet (the same <c>[.,.,8]</c>
+/// location + <c>[.,.,50]</c> structure heads), so both legs are ordinary
+/// <see cref="SlanetTableRecognizer"/> instances (512×512 content-normalized for the wired leg, 488×488
+/// canvas-normalized for the wireless one). Owns and disposes the classifier and both recognizers.
 /// </summary>
 internal sealed class SlaNeXtTableRouter : ITableRecognizer
 {

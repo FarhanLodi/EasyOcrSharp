@@ -13,7 +13,9 @@ namespace EasyOcrSharp.Structure.Export;
 /// <para>
 /// The package is built by hand (an <c>.xlsx</c> is a ZIP of XML parts) using only the BCL, keeping the
 /// library dependency-free and Native-AOT safe. Cell strings are emitted inline (<c>t="inlineStr"</c>) to
-/// avoid maintaining a shared-strings table, and all text is XML-escaped.
+/// avoid maintaining a shared-strings table, and all text is XML-escaped. A cell carrying more than one line
+/// (the table recognizer separates a cell's visual lines, which arrive here as <c>\n</c>) is written with the
+/// wrap-text style so Excel shows the break instead of running the lines together.
 /// </para>
 /// </summary>
 internal static class StructureXlsxExporter
@@ -71,6 +73,7 @@ internal static class StructureXlsxExporter
         StructureDocxExporter.WriteEntry(zip, "_rels/.rels", RootRelsXml());
         StructureDocxExporter.WriteEntry(zip, "xl/workbook.xml", WorkbookXml(sheets));
         StructureDocxExporter.WriteEntry(zip, "xl/_rels/workbook.xml.rels", WorkbookRelsXml(sheets.Count));
+        StructureDocxExporter.WriteEntry(zip, "xl/styles.xml", StylesXml());
 
         for (int s = 0; s < sheets.Count; s++)
         {
@@ -189,6 +192,7 @@ internal static class StructureXlsxExporter
         sb.Append("<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>");
         sb.Append("<Default Extension=\"xml\" ContentType=\"application/xml\"/>");
         sb.Append("<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>");
+        sb.Append("<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>");
         for (int s = 1; s <= sheetCount; s++)
         {
             sb.Append("<Override PartName=\"/xl/worksheets/sheet").Append(s)
@@ -236,9 +240,42 @@ internal static class StructureXlsxExporter
               .Append("\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" ")
               .Append("Target=\"worksheets/sheet").Append(s).Append(".xml\"/>");
         }
+
+        // The styles part goes last so the sheet relationship ids stay 1..sheetCount, which WorkbookXml
+        // assumes when it wires each <sheet r:id>.
+        sb.Append("<Relationship Id=\"rId").Append(sheetCount + 1)
+          .Append("\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" ")
+          .Append("Target=\"styles.xml\"/>");
         sb.Append("</Relationships>");
         return sb.ToString();
     }
+
+    /// <summary>
+    /// The index into <c>cellXfs</c> of the wrap-text format. Index 0 is the required default format; index 1
+    /// is the same format with <c>wrapText</c>, applied to any cell whose text spans more than one line.
+    /// </summary>
+    private const int WrapTextStyleIndex = 1;
+
+    /// <summary>
+    /// The minimal styles part: the fonts/fills/borders/cellStyleXfs collections Excel requires to be present,
+    /// plus two cell formats — the default, and one that wraps text and top-aligns it so a multi-line cell
+    /// shows every line.
+    /// </summary>
+    private static string StylesXml() =>
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+        "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">" +
+        "<fonts count=\"1\"><font><sz val=\"11\"/><name val=\"Calibri\"/></font></fonts>" +
+        // Excel requires the first two fills to be "none" and "gray125"; it repairs the file otherwise.
+        "<fills count=\"2\"><fill><patternFill patternType=\"none\"/></fill>" +
+        "<fill><patternFill patternType=\"gray125\"/></fill></fills>" +
+        "<borders count=\"1\"><border><left/><right/><top/><bottom/><diagonal/></border></borders>" +
+        "<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>" +
+        "<cellXfs count=\"2\">" +
+        "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>" +
+        "<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\" applyAlignment=\"1\">" +
+        "<alignment vertical=\"top\" wrapText=\"1\"/></xf>" +
+        "</cellXfs>" +
+        "</styleSheet>";
 
     // ---- worksheet -------------------------------------------------------------------------------------
 
@@ -308,7 +345,13 @@ internal static class StructureXlsxExporter
             return;
         }
 
-        sb.Append("<c r=\"").Append(reference).Append("\" t=\"inlineStr\"><is><t xml:space=\"preserve\">")
+        sb.Append("<c r=\"").Append(reference).Append("\"");
+        // Excel keeps the newline in the string either way, but only renders it when the cell wraps.
+        if (text.AsSpan().IndexOfAny('\n', '\r') >= 0)
+        {
+            sb.Append(" s=\"").Append(WrapTextStyleIndex).Append("\"");
+        }
+        sb.Append(" t=\"inlineStr\"><is><t xml:space=\"preserve\">")
           .Append(StructureDocxExporter.Xml(text)).Append("</t></is></c>");
     }
 

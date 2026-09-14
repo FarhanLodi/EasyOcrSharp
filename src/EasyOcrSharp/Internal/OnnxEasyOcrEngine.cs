@@ -40,49 +40,75 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         _options = options;
         _logger = logger;
         ResolvedProvider = ExecutionProviderResolver.Resolve(options.ExecutionProvider, logger);
-        _activeProvider = ResolvedProvider;
-        _detectorSessionOptions = ExecutionProviderResolver.BuildSessionOptions(ResolvedProvider, options, logger, perBoxParallel: false);
-        _recognizerSessionOptions = ExecutionProviderResolver.BuildSessionOptions(ResolvedProvider, options, logger, perBoxParallel: true);
-        GpuHint = BuildGpuHint(options.ExecutionProvider, ResolvedProvider, options.LogGpuHint, logger);
+        // BuildSessionOptionsWithStatus reports whether the accelerator actually attached: when the append
+        // fails the options are CPU-only and the active provider says so, so the engine never claims a GPU
+        // while running on CPU.
+        var detectorBuild = ExecutionProviderResolver.BuildSessionOptionsWithStatus(ResolvedProvider, options, logger, perBoxParallel: false);
+        _detectorSessionOptions = detectorBuild.Options;
+        _activeProvider = detectorBuild.ActiveProvider;
+        // A failed append would fail identically (and warn again) for the recognizer, so it only retries the
+        // accelerator when the detector's attached; otherwise it gets real CPU options (intra-op capped).
+        _recognizerSessionOptions = ExecutionProviderResolver.BuildSessionOptions(detectorBuild.ActiveProvider, options, logger, perBoxParallel: true);
+        _gpuHint = BuildGpuHint(options.ExecutionProvider, ResolvedProvider, detectorBuild.ProviderFailureHint, options.LogGpuHint, logger);
         _customByLanguage = BuildCustomIndex(options.CustomRecognizers);
     }
 
     /// <summary>
     /// The accelerator EasyOcrSharp resolved to attempt at startup — <see cref="OcrExecutionProvider.Auto"/>
-    /// is resolved to a concrete provider here. A non-CPU value may still degrade to CPU at the first
-    /// model load if the device turns out to be unusable; this property reflects the initial attempt.
+    /// is resolved to a concrete provider here. This reflects the initial attempt only; see
+    /// <see cref="ActiveProvider"/> for what the sessions are actually running on.
     /// </summary>
     public OcrExecutionProvider ResolvedProvider { get; }
 
     /// <summary>
-    /// A one-time, actionable message naming the exact provider package to install, set only when
-    /// <see cref="OcrExecutionProvider.Auto"/> fell back to CPU yet a usable GPU is physically present.
-    /// Null whenever a GPU is already in use, CPU was chosen explicitly, or no GPU was detected.
+    /// The provider the ONNX sessions are actually running on right now: <see cref="ResolvedProvider"/>
+    /// when it attached, <see cref="OcrExecutionProvider.Cpu"/> when the append failed, and CPU permanently
+    /// once an accelerated session fails to initialize at model load.
     /// </summary>
-    public string? GpuHint { get; }
+    public OcrExecutionProvider ActiveProvider => _activeProvider;
+
+    private volatile string? _gpuHint;
 
     /// <summary>
-    /// When auto-detection landed on CPU but the host actually has a GPU, builds the package-specific
-    /// upgrade hint. The string is always returned (and exposed via <see cref="GpuHint"/>); it is only
-    /// logged as a startup warning when <paramref name="logHint"/> is true (off by default, so the
-    /// library stays silent). The provider package can't be added at runtime, so the most we can do is
-    /// tell the user precisely which one to install.
+    /// An actionable message explaining why OCR is running on CPU when it could be accelerated: the
+    /// resolved accelerator failed to attach or to initialize its first session (whether it was requested
+    /// explicitly or chosen by Auto), the CUDA provider is deployed but the CPU runtime displaced the GPU one,
+    /// or <see cref="OcrExecutionProvider.Auto"/> fell back to CPU while a GPU is physically present. Null
+    /// when an accelerator is in use, CPU was chosen explicitly, or there is nothing to suggest.
     /// </summary>
-    private static string? BuildGpuHint(OcrExecutionProvider requested, OcrExecutionProvider resolved, bool logHint, ILogger? logger)
+    public string? GpuHint => _gpuHint;
+
+    /// <summary>
+    /// Builds the "why is OCR on CPU" hint. A provider-append failure always wins; it was already logged (or
+    /// written to stderr) where it happened. Otherwise, when auto-detection landed on CPU, the displaced
+    /// GPU runtime is diagnosed first — from the deployed files, so it works where the hardware probe cannot
+    /// run — and then the package-specific upgrade hint for a GPU that is physically present. Those two are
+    /// only logged as a startup warning when <paramref name="logHint"/> is true (off by default, so the
+    /// library stays silent).
+    /// </summary>
+    private static string? BuildGpuHint(OcrExecutionProvider requested, OcrExecutionProvider resolved, string? providerFailureHint, bool logHint, ILogger? logger)
     {
-        // Only nudge when WE chose CPU via Auto. An explicit Cpu request is a deliberate choice (don't
-        // nag); an explicit GPU request that's missing its package is already warned about at append time.
+        if (providerFailureHint is not null) return providerFailureHint;
+
+        // Only nudge when WE chose CPU via Auto. An explicit Cpu request is a deliberate choice (don't nag).
         if (requested != OcrExecutionProvider.Auto || resolved != OcrExecutionProvider.Cpu) return null;
+
+        var displaced = ExecutionProviderResolver.CudaProviderDisplacedHint();
+        if (displaced is not null)
+        {
+            if (logHint) logger?.LogWarning("{GpuHint}", displaced);
+            return displaced;
+        }
 
         var vendor = GpuProbe.Detect();
         if (vendor == GpuProbe.GpuVendor.None) return null;
 
         var message = vendor == GpuProbe.GpuVendor.Nvidia
             ? "EasyOcrSharp: an NVIDIA GPU was detected but OCR is running on CPU. Install the " +
-              "'EasyOcrSharp.Gpu' NuGet package for CUDA acceleration. It is then used automatically — " +
-              "no code change needed."
+              "'EasyOcrSharp.Gpu' NuGet package for CUDA acceleration (it needs the CUDA 13 runtime and " +
+              "cuDNN 9). It is then used automatically — no code change needed."
             : $"EasyOcrSharp: a GPU ({vendor}) was detected but OCR is running on CPU. GPU acceleration is " +
-              "currently available for NVIDIA GPUs via the 'EasyOcrSharp.Gpu' package (CUDA 12+).";
+              "currently available for NVIDIA GPUs via the 'EasyOcrSharp.Gpu' package (CUDA 13 with cuDNN 9).";
 
         if (logHint) logger?.LogWarning("{GpuHint}", message);
         return message;
@@ -136,9 +162,12 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         {
             if (_detectorCpuFallback is null)
             {
-                _logger?.LogWarning(cause,
-                    "{Provider} session initialization failed at model load; falling back to CPU for all sessions.",
-                    _activeProvider);
+                var hint = ExecutionProviderResolver.ComposeSessionInitFailureHint(
+                    _activeProvider,
+                    cause.Message,
+                    _activeProvider == OcrExecutionProvider.Cuda ? GpuProbe.Detect() : GpuProbe.GpuVendor.None);
+                ExecutionProviderResolver.Warn(_logger, cause, hint);
+                _gpuHint = hint;
                 _detectorCpuFallback = ExecutionProviderResolver.BuildSessionOptions(OcrExecutionProvider.Cpu, _options, _logger, perBoxParallel: false);
                 _recognizerCpuFallback = ExecutionProviderResolver.BuildSessionOptions(OcrExecutionProvider.Cpu, _options, _logger, perBoxParallel: true);
                 _activeProvider = OcrExecutionProvider.Cpu;
@@ -199,7 +228,13 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         {
             var recognizer = await GetOrLoadRecognizerAsync(spec, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            perPackResults.Add(recognizer.Recognize(image, polygons, run));
+            var lines = recognizer.Recognize(image, polygons, run);
+
+            // EasyOCR's Reader.recognize runs get_display over every reading of its arabic pack: the CTC
+            // head emits glyphs in painted (left-to-right) order, which for Arabic is the reverse of the
+            // reading order. Custom recognizers are left alone — their training convention is unknown.
+            if (IsArabicPack(spec)) lines = BidiDisplay.Apply(lines);
+            perPackResults.Add(lines);
         }
 
         // Pick the best reading per polygon. With one pack it's simply that pack's output. With multiple
@@ -311,6 +346,10 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
     private static bool Contains(OcrBoundingBox outer, OcrBoundingBox inner)
         => inner.MinX >= outer.MinX - 0.5 && inner.MinY >= outer.MinY - 0.5
         && inner.MaxX <= outer.MaxX + 0.5 && inner.MaxY <= outer.MaxY + 0.5;
+
+    /// <summary>Whether <paramref name="spec"/> is the built-in Arabic-script pack (float or int8).</summary>
+    internal static bool IsArabicPack(RecognizerSpec spec)
+        => !spec.IsLocal && spec.Name.StartsWith(ModelRegistry.Arabic.Name, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Resolves the distinct recognizer packs (custom first, then built-in) for the languages.</summary>
     private Dictionary<string, RecognizerSpec> ResolvePacks(IReadOnlyList<string> languages)
@@ -443,7 +482,17 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         try
         {
             if (_detector is not null) return _detector;
-            var path = await ModelDownloadManager.EnsureModelAsync(ModelRegistry.Detector, _options.ModelCachePath, _options.Download, _logger, cancellationToken).ConfigureAwait(false);
+            string path;
+            if (_options.DetectorModelPath is { } localDetector)
+            {
+                if (!File.Exists(localDetector))
+                    throw new EasyOcrSharpException($"Detector model not found at '{localDetector}' (EasyOcrServiceOptions.DetectorModelPath).");
+                path = localDetector;
+            }
+            else
+            {
+                path = await ModelDownloadManager.EnsureModelAsync(ModelRegistry.Detector, _options.ModelCachePath, _options.Download, _logger, cancellationToken).ConfigureAwait(false);
+            }
             _detector = CreateSessionBacked(so => new CraftDetector(path, so), recognizer: false);
             EasyOcrDiagnostics.ModelLoads.Add(1, new KeyValuePair<string, object?>("model", "craft"));
             _logger?.LogInformation("CRAFT detector loaded from {Path}", path);

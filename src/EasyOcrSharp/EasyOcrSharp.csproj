@@ -30,11 +30,11 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.11" />
-		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.11" />
-		<PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.11" />
-		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.11" />
-		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.29.0" />
+		<PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
+		<PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="10.0.12" />
+		<PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.12" />
+		<PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+		<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.30.0" />
 		<!-- Polygon offsetting (unclip) for the DB detection post-processing in the structure engine. -->
 		<PackageReference Include="Clipper2" Version="2.0.0" />
 		<!-- PDFium-based PDF rasterization for the built-in PDF input / searchable-PDF output. -->
@@ -55,7 +55,7 @@
 	  in step with a CHANGELOG entry, rather than floated.
 	-->
 	<ItemGroup>
-		<PackageReference Include="EasyImageSharp" Version="1.0.1" />
+		<PackageReference Include="EasyImageSharp" Version="1.1.0" />
 	</ItemGroup>
 
 	<ItemGroup>

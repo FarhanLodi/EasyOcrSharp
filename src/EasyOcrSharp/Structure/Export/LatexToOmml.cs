@@ -503,8 +503,9 @@ internal static class LatexToOmml
         /// immediately following <c>^</c>/<c>_</c> scripts and emit the appropriate
         /// <c>sSup</c>/<c>sSub</c>/<c>sSubSup</c> element — or just the base run when there is no script.
         /// </summary>
-        /// <param name="sb">Destination buffer the OMML is appended to.</param>
-        /// <param name="baseContent">The base run this script attaches to.</param>
+        /// <param name="sb">Destination buffer the emitted OMML is appended to.</param>
+        /// <param name="baseContent">The base the script attaches to: raw OMML or XML-escaped text, per
+        /// <paramref name="baseIsRawOmml"/>.</param>
         /// <param name="baseIsRawOmml">When true, <paramref name="baseContent"/> is already OMML; otherwise it
         /// is XML-escaped text that should be wrapped in a run.</param>
         /// <param name="baseAlreadyConsumed">When true, the script operator is at the current position and the

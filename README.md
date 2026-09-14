@@ -76,7 +76,7 @@ dotnet add package EasyOcrSharp
 ```
 
 PDF input and searchable-PDF output are **built in** — no extra package. For NVIDIA GPU acceleration
-(Windows/Linux x64, CUDA 12+):
+(Windows/Linux x64, CUDA 13 + cuDNN 9 — see [Running on a CUDA 12 machine](#running-on-a-cuda-12-machine)):
 
 ```bash
 dotnet add package EasyOcrSharp.Gpu
@@ -138,7 +138,8 @@ public sealed record OcrResult
     public IReadOnlyList<OcrLine> Lines { get; }
     public IReadOnlyList<string> Languages { get; }
     public TimeSpan Duration { get; }
-    public bool UsedGpu { get; }
+    public bool UsedGpu { get; }                    // true only if an accelerator actually ran this result
+    public OcrExecutionProvider ExecutionProvider { get; } // the provider that really ran (Cpu after a fallback)
     public int SourceWidth { get; }                 // dimensions OCR ran on (0 if unknown) — handy for exporters
     public int SourceHeight { get; }
 }
@@ -877,7 +878,7 @@ none. You don't pick a provider — you just install the package for the hardwar
 | Install this package | What `Auto` enables |
 |---|---|
 | `EasyOcrSharp` (base) | CPU only |
-| `EasyOcrSharp.Gpu` | NVIDIA CUDA (needs CUDA 12+ on PATH) |
+| `EasyOcrSharp.Gpu` | NVIDIA CUDA (needs the CUDA 13 runtime and cuDNN 9 on PATH) |
 
 > Why a separate package? The ONNX Runtime variants ship the *same* `onnxruntime.dll` compiled with
 > different providers, so only one can be referenced at a time — and the CUDA build is several hundred
@@ -904,12 +905,75 @@ await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
 |---|---|---|
 | `Auto` | (any) | **Default.** Probes the runtime; uses the best installed accelerator, else CPU |
 | `Cpu` | (built-in) | Always available |
-| `Cuda` | `EasyOcrSharp.Gpu` | NVIDIA, CUDA 12+ on PATH |
+| `Cuda` | `EasyOcrSharp.Gpu` | NVIDIA GPU, CUDA 13 runtime + cuDNN 9 on PATH |
 | `CoreMl` | CoreML-enabled ORT build | macOS / Apple Silicon |
 
-Any non-CPU provider **falls back to CPU automatically** (with a logged warning) if its runtime is
-missing or the device fails to initialize — your app keeps working. The legacy `useGpu: true` flag
-still works and forces CUDA. Check `ocr.UseGpu` to see whether an accelerator was selected.
+Any non-CPU provider **falls back to CPU automatically** (with a warning — logged, or written once to
+stderr when no logger is configured) if its runtime is missing or the device fails to initialize — your
+app keeps working. The legacy `useGpu: true` flag still works and forces CUDA. `ocr.UseGpu` says whether
+an accelerator was *selected*; `ocr.ActiveExecutionProvider` and `result.ExecutionProvider` /
+`result.UsedGpu` say what is *actually running*.
+
+#### CUDA requirements
+
+`EasyOcrSharp.Gpu` brings in ONNX Runtime's GPU build, which targets **CUDA 13** (ONNX Runtime 1.27 and
+later; 1.21 – 1.26 targeted CUDA 12):
+
+| ONNX Runtime | CUDA | cuDNN |
+|---|---|---|
+| 1.27.x and later (what `EasyOcrSharp.Gpu` 2.3+ uses) | 13.x | 9.x |
+| 1.21.x – 1.26.x | 12.x | 9.x |
+
+You need an NVIDIA GPU with a current driver, the CUDA 13 runtime (cuBLAS / cuBLASLt `…64_13.dll`,
+`libcublasLt.so.13`) and cuDNN 9 for CUDA 13, all on `PATH` / the loader path. On macOS this package has
+nothing to contribute — use the base package.
+
+#### Running on a CUDA 12 machine
+
+On a machine with only CUDA 12, the runtime looks for `cublasLt64_13.dll` (`libcublasLt.so.13`), the CUDA
+provider fails to attach and OCR runs on CPU. `GpuAccelerationHint` names the missing library and the CUDA
+major that was wanted. Your options:
+
+1. **Install the CUDA 13 runtime (and cuDNN 9 for CUDA 13) next to CUDA 12.** The majors coexist — their
+   libraries are suffixed `_12` / `_13` — so existing CUDA 12 workloads are unaffected. No project changes.
+2. **Use an EasyOcrSharp.Gpu release built on a CUDA 12 runtime** (2.2.2 and older use ONNX Runtime 1.26).
+   Pinning `Microsoft.ML.OnnxRuntime(.Gpu)` 1.26 *under a current EasyOcrSharp* does **not** work: the library
+   is compiled against its own ONNX Runtime version and fails to load with an older managed assembly.
+3. **Use DirectML instead (Windows).** Any DirectX 12 GPU, no CUDA toolkit — install
+   `Microsoft.ML.OnnxRuntime.DirectML` instead of `EasyOcrSharp.Gpu` (once a DirectML build matching
+   EasyOcrSharp's ONNX Runtime version is published); `Auto` prefers DirectML on Windows.
+
+#### Diagnosing a CPU fallback
+
+```csharp
+await using var ocr = new EasyOcrService();
+Console.WriteLine(ocr.GetRuntimeInfo());
+```
+
+```
+EasyOcrSharp runtime:
+  ONNX Runtime:        1.30.0
+  Available providers: TensorrtExecutionProvider, CUDAExecutionProvider, CPUExecutionProvider
+  Requested provider:  Auto
+  Resolved provider:   Cuda
+  Active provider:     Cpu
+  GPU probe:           NVIDIA GPU detected
+  Hint:                EasyOcrSharp: the CUDA execution provider could not be attached, ...
+```
+
+**Available providers** is fixed at build time by the installed package — if `CUDAExecutionProvider` is
+missing there, no runtime setting brings it back. **Resolved** is what EasyOcrSharp attempted, **Active** is
+what really runs; when they differ, **Hint** says why.
+
+> **The native-asset conflict (fixed in 3.1.0).** `EasyOcrSharp` depends on `Microsoft.ML.OnnxRuntime` (CPU)
+> and `EasyOcrSharp.Gpu` adds `Microsoft.ML.OnnxRuntime.Gpu`. Both ship `runtimes/win-x64/native/onnxruntime.dll`
+> (`libonnxruntime.so` on Linux) and NuGet gives that slot to the CPU package, so before 3.1.0 the CUDA
+> provider was deployed next to a runtime that could not load it: providers were only
+> `AzureExecutionProvider, CPUExecutionProvider`, `Auto` chose CPU and nothing was logged. `EasyOcrSharp.Gpu`
+> now ships an MSBuild target that copies the GPU runtime over the CPU copy after build and publish. To opt
+> out, set `<EasyOcrSharpGpuPreferGpuRuntime>false</EasyOcrSharpGpuPreferGpuRuntime>`. On an older
+> `EasyOcrSharp.Gpu`, the manual fix is
+> `<PackageReference Include="Microsoft.ML.OnnxRuntime" Version="(same version)" ExcludeAssets="native" />`.
 
 **GPU upgrade hint.** When `Auto` runs on CPU but a real NVIDIA GPU is physically present, EasyOcrSharp
 detects it and can tell you the *exact* package to add — `EasyOcrSharp.Gpu`. It's **silent by default**:

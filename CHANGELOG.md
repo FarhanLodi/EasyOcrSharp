@@ -2,6 +2,130 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## Unreleased
+
+### Document structure engine — mirrors PaddleOcrNet 2.0.3, 2.0.4 and 2.1.0
+
+The PP-StructureV3 engine behind `AnalyzeDocumentAsync` is shared source with PaddleOcrNet; its three
+releases since the 3.0.1 mirror are merged in. Plain `ExtractText*` OCR (the EasyOCR pipeline) is not
+affected by this section.
+
+- **Whole-page OCR + line-to-block matching.** The page is OCR'd once and each line is assigned to the
+  layout block it overlaps most; lines straddling several blocks are cropped at the borders and
+  re-recognized. Formulas are recognized first, masked out, and spliced back as `$…$` spans.
+- **XY-Cut++ reading order** (`LayoutReadingOrder.Auto` now resolves to it), per-class layout thresholds
+  and merge modes from `PP-StructureV3.yaml`, layout NMS on by default, footnote relabel and lone-title
+  promotion.
+- **Accuracy parity with Python PaddleOCR 3.x:** BGR model inputs, vertical-crop rotation before
+  recognition, near-native detection resolution, the 320 px recognition batch width, bicubic
+  rectification, 8-connected DB post-processing, a guarded text-line orientation classifier, fixed
+  document-orientation preprocessing and page-resolution UVDoc unwarp.
+- **Seals:** polygon-mode detection and curved-text rectification, plus a plain-OCR fallback when the seal
+  recognizer returns nothing (previously the stamp's text was silently dropped).
+- **Tables:** multi-line cells keep their line breaks (`<br>`), which now survive into DOCX (`<w:br/>`) and
+  XLSX (wrap-text); `ToHtml()` no longer degrades every real table to plain text; SLANeXt cell boxes use
+  the right coordinate convention and its borderless leg runs SLANet_plus; sideways tables are uprighted.
+- **Markdown:** new public `MarkdownRenderOptions`. Page furniture (headers, footers, page numbers,
+  footnotes) is omitted by default, as in Python; consecutive text runs merge into paragraphs; numbered
+  titles map to heading levels.
+- Arabic-script output is reordered for display; `ru`/`uk`/`be` use the East-Slavic recognizer; `ja` uses
+  the PP-OCRv5 default recognizer (the old "Japanese" pack was a PP-OCRv3 model).
+- **Kept different from PaddleOcrNet:** `en` stays on the default PP-OCRv5 recognizer. The dedicated
+  English pack (`en_PP-OCRv5_mobile_rec_infer.onnx`, `ppocrv5_en_dict.txt`) is not yet published to the
+  EasyOcrSharp model repository; routing to it would fail on a cold cache. Our right-to-left reading order,
+  thread-safe per-call recognizer filters, keyed model caches and the 4096 px recognition-width cap are
+  preserved. The engine's CUDA-mismatch message does not repeat PaddleOcrNet's advice to pin an older
+  `Microsoft.ML.OnnxRuntime.Gpu`: EasyOcrSharp is compiled against its own ONNX Runtime version and fails
+  to load with an older one, so the message says to install the matching CUDA runtime side by side instead.
+
+- **`DocumentAnalysisOptions.LayoutNms` now defaults to `true`**, matching `layout_nms: True` in
+  PP-StructureV3.yaml. The public option is passed to the engine explicitly, so without this change the
+  engine's new default would never have reached `AnalyzeDocumentAsync`. Set it to `false` for the previous
+  behaviour.
+- **`DocumentReadingOrder.Auto` now means XY-Cut++**, not "the model's order when it has one". Use
+  `DocumentReadingOrder.Model` for the old behaviour. Right-to-left documents keep the direction-aware XY-cut
+  they had in 3.1.0, because XY-Cut++ only reads left to right; right-to-left reading order also still
+  applies under `XyCut` and the `Model` fallback.
+
+### Fixed — GPU
+
+- **`EasyOcrSharp.Gpu` did not use the GPU for portable builds and publishes.** `EasyOcrSharp` depends on
+  `Microsoft.ML.OnnxRuntime` (CPU) and `EasyOcrSharp.Gpu` adds `Microsoft.ML.OnnxRuntime.Gpu`. Both ship
+  `runtimes/win-x64/native/onnxruntime.dll` (`libonnxruntime.so` on Linux), and NuGet gives that slot to
+  the CPU package. The CUDA provider was deployed next to a runtime that cannot load it:
+  `GetAvailableProviders()` returned only `AzureExecutionProvider, CPUExecutionProvider`, `Auto` chose
+  CPU, and nothing was logged. This was measured on ONNX Runtime 1.29.0 and 1.30.0; RID-specific
+  publishes were unaffected. The package now ships a `buildTransitive` target that copies the GPU runtime
+  over the CPU copy after build and publish. Verified for portable build, incremental rebuild, portable
+  publish and `-r win-x64` publish. Opt out with
+  `<EasyOcrSharpGpuPreferGpuRuntime>false</EasyOcrSharpGpuPreferGpuRuntime>`.
+- **`OcrResult.UsedGpu` reported the requested accelerator, not the one used.** When the CUDA provider failed
+  to attach, OCR fell back to CPU while `UsedGpu` stayed `true`. `UsedGpu` now reflects the provider that
+  produced the result, and so do the `easyocr.gpu` trace tag, the `easyocr.provider` metric tag, the deep
+  health check's `executionProvider`, and the CLI's `info` / `scan` / `pdf` output. `EasyOcrService.UseGpu`
+  is unchanged: it is documented as the *selected* accelerator.
+- **GPU fallback diagnostics pointed at the wrong fix.** An attach failure always said "install the package".
+  It now tells apart:
+  - a missing provider package;
+  - a GPU runtime displaced by the CPU one;
+  - a CUDA major-version mismatch, naming the missing library (e.g. `cublasLt64_13.dll`) even when ONNX
+    Runtime's exception does not;
+  - a missing cuDNN 9;
+  - a host with no NVIDIA GPU.
+
+  Without an `ILogger`, the explanation is written once to standard error instead of being lost.
+
+### Fixed — plain OCR
+
+- **Whole paragraphs could be merged into one unreadable box.** The tilted-line rule in line grouping let a
+  box join a line whenever the connecting slope was gentle. It never bounded the vertical gap, so on a wide
+  page the first word of each line chained onto the last word of the line above, and the side-by-side merge
+  collapsed the paragraph into a single box. The recognizer then read the whole block as noise: `=2` at 0.09
+  confidence, on a clean synthetic test page. EasyOCR's `slope_ths` never joins boxes across lines. A box
+  must now also be less than one line height below its neighbour, so tilted lines still join and stacked
+  lines no longer do.
+- **Arabic-script readings are reordered for display**, as Python EasyOCR does with `get_display`, for the
+  built-in `ar`, `fa`, `ur` and `ug` recognizers. The CTC recognizer emits glyphs in painted order, so these
+  lines previously came back visually reversed. This changes the returned text for those languages.
+- The streaming path's `easyocr.gpu` span tag reports whether a GPU is actually in use, not whether one was
+  requested.
+
+### Added
+
+- `EasyOcrServiceOptions.DetectorModelPath` loads a CRAFT detector ONNX file from disk instead of the
+  registry model, with no download and no checksum — EasyOCR's `detect_network` /
+  `model_storage_directory`. Pair it with custom recognizers and `ModelDownloadOptions.Offline` to keep a
+  process fully offline.
+- A 100-image synthetic accuracy benchmark (`OcrDatasetBenchmarkTests`, integration-tagged, about 14
+  minutes) that asserts recovered strings per category. It found the grouping bug above. One page
+  (`005_plain_text.png`) still has its body merged into one box after the fix; it is listed as a known
+  failure in the test until grouping handles that layout.
+
+### Fixed — document preprocessing (`PreprocessingOptions`)
+
+- **`DocumentUnwarp` fed the UVDoc model RGB instead of BGR** and read its BGR output back as RGB. The
+  tensor is now BGR and the output is flipped back, as in PaddleX.
+- **`DocumentUnwarp` no longer blurs the page.** UVDoc ran through a fixed 488×712 round trip; it now runs
+  at the page's own resolution, padded to a multiple of 32 and cropped back, with the longest side capped at
+  2000 px for memory. Mean OCR confidence after unwarp rose on every page measured (e.g. 0.19 → 0.53,
+  0.22 → 0.80). Unwarp is slower on large pages as a result. The option stays off by default.
+- Document preprocessing now observes the cancellation token between model passes.
+- **Deliberately unchanged:** `DocumentOrientation` keeps stretching the page to 224×224. PaddleX's
+  resize-short-256 + center-crop-224 was implemented and measured on the 100-page test corpus at
+  0/90/180/270: 383/400 correct against 395/400 for the stretch, because the crop lands on column gutters of
+  multi-column pages. (The structure engine's own copy follows PaddleOcrNet 2.1.0 and uses the crop.)
+- **Multi-page images are no longer capped by the new imaging default.** EasyImageSharp 1.1.0 added a
+  2^30-pixel budget summed over all frames; left alone, it would reject a large multi-page TIFF that
+  `MaxImagePixels` / `MultiFrameOcrOptions` allow, even with the guard set to 0. It is lifted; per-frame
+  budgets and the header frame-count guard still apply.
+
+### Dependencies
+
+- EasyImageSharp 1.0.1 → 1.1.0 (APNG, BigTIFF decode, a total-pixel budget across frames).
+- Microsoft.ML.OnnxRuntime / .Gpu 1.29.0 → 1.30.0.
+- Microsoft.Extensions.* 10.0.11 → 10.0.12.
+- Tests: Microsoft.NET.Test.Sdk 18.10.0, xunit.runner.visualstudio 4.0.0, Xunit.SkippableFact 1.5.85.
+
 ## 3.1.0
 
 Two bodies of work ship together here. A **production-operations pass** — the library can now be *run*,

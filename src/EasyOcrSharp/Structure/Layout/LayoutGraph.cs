@@ -220,7 +220,10 @@ internal static class LayoutGraph
 
     /// <summary>
     /// Thresholds, class-maps, and scales the fused detections into <see cref="LayoutRegion"/>s. Each row is
-    /// kept when its score exceeds <paramref name="scoreThreshold"/>; its box corners are scaled by
+    /// kept when its score exceeds its class's confidence floor — the per-class
+    /// <paramref name="classThresholds"/> entry for the row's raw label when one is supplied,
+    /// <paramref name="scoreThreshold"/> otherwise (mirroring PaddleX's dict-typed <c>threshold</c> in
+    /// <c>DetPostProcess.apply</c>); its box corners are scaled by
     /// (<paramref name="scaleX"/>, <paramref name="scaleY"/>) into source-image space (1,1 when the graph
     /// already emitted source pixels) and clamped to <paramref name="origW"/>×<paramref name="origH"/>; and
     /// its raw class id is mapped via <paramref name="classMap"/> (unmapped ids resolve to
@@ -228,6 +231,15 @@ internal static class LayoutGraph
     /// label name is carried through on the region. Rows wider than six columns also carry the model's
     /// predicted reading-order index (column 6). Zero-area boxes are dropped.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="classThresholds"/> is keyed by normalized label name (see
+    /// <see cref="LayoutLabelMap.Normalize"/>) and resolved through <paramref name="labelNames"/>; rows whose
+    /// class id has no label name fall back to <paramref name="scoreThreshold"/>. Callers typically pass
+    /// <see cref="LayoutPostProcessor.EffectiveClassThresholds"/>. Detectors that do not pass the dictionary
+    /// stay correct as long as their <paramref name="scoreThreshold"/> is no higher than any class floor
+    /// (<see cref="LayoutPostProcessor.DetectionScoreFloor"/>) — <see cref="LayoutPostProcessor.Apply"/>
+    /// re-thresholds each region at its exact class floor.
+    /// </remarks>
     public static IReadOnlyList<LayoutRegion> BuildRegions(
         Detections detections,
         IReadOnlyDictionary<int, StructureBlockType> classMap,
@@ -236,7 +248,8 @@ internal static class LayoutGraph
         float scaleY,
         int origW,
         int origH,
-        IReadOnlyDictionary<int, string>? labelNames = null)
+        IReadOnlyDictionary<int, string>? labelNames = null,
+        IReadOnlyDictionary<string, float>? classThresholds = null)
     {
         var data = detections.Data;
         int rowWidth = detections.RowWidth;
@@ -245,13 +258,23 @@ internal static class LayoutGraph
         for (int i = 0; i < detections.Rows; i++)
         {
             int baseIdx = i * rowWidth;
+            int rawClassId = (int)MathF.Round(data[baseIdx]);
+
+            // Per-class floor first (resolved via the row's raw label name), global floor otherwise.
+            float floor = scoreThreshold;
+            if (classThresholds is not null
+                && labelNames is not null
+                && labelNames.TryGetValue(rawClassId, out var labelForThreshold)
+                && classThresholds.TryGetValue(labelForThreshold, out float perClassFloor))
+            {
+                floor = perClassFloor;
+            }
+
             float score = data[baseIdx + 1];
-            if (score <= scoreThreshold)
+            if (score <= floor)
             {
                 continue;
             }
-
-            int rawClassId = (int)MathF.Round(data[baseIdx]);
 
             // Scale box corners from the graph's output space into source-image pixels, then clamp.
             float x1 = data[baseIdx + 2] * scaleX;

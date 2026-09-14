@@ -43,10 +43,15 @@ internal sealed record StructureOptions
 
     /// <summary>
     /// Confidence floor (0-1) for layout detections: a region whose model score is at or below this is
-    /// discarded. Default 0.5 — the confidence floor both PP-DocLayoutV3 and PP-DocLayout-S/M ship in their
-    /// own model configs. Lower it to keep faint regions the detector is unsure about (at the cost of false
-    /// positives), raise it to keep only confident ones. Applies to whichever <see cref="LayoutModel"/> is
-    /// selected.
+    /// discarded. Default 0.5 — the confidence floor both PP-DocLayoutV3 and PP-DocLayout-S/M ship in
+    /// their own model configs. Lower it to keep faint
+    /// regions the detector is unsure about (at the cost of false positives), raise it to keep only
+    /// confident ones. Applies to whichever <see cref="LayoutModel"/> is selected.
+    /// <para>
+    /// This is the <i>global</i> floor: classes named in <see cref="LayoutClassThresholds"/> (or, when that
+    /// dictionary is null, in the built-in PP-StructureV3 per-class defaults) use their own floor instead —
+    /// see <see cref="LayoutClassThresholds"/>.
+    /// </para>
     /// </summary>
     /// <remarks>
     /// Every kept region carries its own <see cref="LayoutRegion.Score"/>, so callers that prefer to filter
@@ -76,22 +81,42 @@ internal sealed record StructureOptions
     public const float DefaultLayoutScoreThreshold = 0.5f;
 
     /// <summary>
-    /// Drop near-duplicate layout regions before returning them. The layout detectors emit a fixed top-k of
-    /// candidates with no NMS, so the same area of the page is routinely proposed several times under
-    /// different labels; this collapses each cluster to one region, drops sub-6px slivers, and removes
-    /// <c>reference</c> markers whose text is carried by the neighbouring <c>reference_content</c> block.
-    /// Barely visible at the default <see cref="LayoutScoreThreshold"/> — duplicates rarely score that high —
-    /// and increasingly important as you lower it. Default true.
+    /// Per-class confidence floors keyed by the model's own (paddle) label name — e.g.
+    /// <c>"paragraph_title"</c>, <c>"text"</c>, <c>"seal"</c> — overriding
+    /// <see cref="LayoutScoreThreshold"/> for the named classes; classes absent from the dictionary keep
+    /// using the global threshold. Mirrors PaddleX's dict-typed <c>threshold</c>
+    /// (<c>object_detection/processors.py</c>, <c>DetPostProcess.apply</c>).
+    /// <para>
+    /// Default <c>null</c>: the engine applies the PP-StructureV3 pipeline's per-class defaults
+    /// (<c>PP-StructureV3.yaml</c>) — <c>paragraph_title</c> 0.3, <c>text</c> 0.4, <c>formula</c> 0.3
+    /// (also applied to the PP-DocLayoutV3 vocabulary's <c>display_formula</c> / <c>inline_formula</c>) and
+    /// <c>seal</c> 0.45; every other class uses <see cref="LayoutScoreThreshold"/>, exactly as the yaml's
+    /// remaining classes all sit at its 0.5 global. These defaults are active for <b>all</b> layout models.
+    /// Pass an empty dictionary to disable the per-class defaults and threshold every class at
+    /// <see cref="LayoutScoreThreshold"/> alone. Label names are matched case/format-insensitively
+    /// (normalized to lower-case <c>snake_case</c>).
+    /// </para>
+    /// </summary>
+    public IReadOnlyDictionary<string, float>? LayoutClassThresholds { get; init; }
+
+    /// <summary>
+    /// Drop overlapping layout regions before returning them, mirroring PaddleX's
+    /// <c>remove_overlap_blocks</c> (<c>layout_parsing/utils.py</c>, PP-StructureV3 runs it with
+    /// <c>threshold=0.5, smaller=True</c>): when two regions overlap by more than 50% of the
+    /// <b>smaller</b> region's area, the smaller region is dropped — except when exactly one of the pair is
+    /// labelled <c>image</c>, in which case the image region loses regardless of size (a text/table block
+    /// detected on top of a picture wins over the picture). Default true.
     /// </summary>
     public bool FilterOverlappingRegions { get; init; } = true;
 
     /// <summary>
-    /// Additionally run non-maximum suppression over the layout regions, suppressing a lower-scoring region
-    /// that overlaps a kept one by more than 0.6 IoU when both share a class, or 0.98 when they do not.
+    /// Run non-maximum suppression over the layout regions, suppressing a lower-scoring region that
+    /// overlaps a kept one by more than 0.6 IoU when both share a class, or 0.98 when they do not.
     /// Complements <see cref="FilterOverlappingRegions"/>, which measures overlap against the smaller box
-    /// rather than the union. Default false — none of the shipped PP-DocLayout model configs enable it.
+    /// rather than the union. Default <b>true</b> — the PP-StructureV3 pipeline config ships
+    /// <c>layout_nms: True</c> for its layout model.
     /// </summary>
-    public bool LayoutNms { get; init; }
+    public bool LayoutNms { get; init; } = true;
 
     /// <summary>
     /// Grow every layout region about its own centre by this ratio before recognition: 1.1 adds 10% to the
@@ -118,16 +143,41 @@ internal sealed record StructureOptions
     private readonly float? _layoutUnclipRatio;
 
     /// <summary>
-    /// How nested layout regions are resolved — keep the enclosing block, the inner blocks, or both.
-    /// Default <see cref="Structure.LayoutMergeMode.None"/>: both are kept.
+    /// How nested layout regions are resolved <i>uniformly across all classes</i> — keep the enclosing
+    /// block, the inner blocks, or both. Default <see cref="LayoutMergeMode.None"/>, which (together with a
+    /// null <see cref="LayoutClassMergeModes"/>) activates the PP-StructureV3 <i>per-class</i> defaults
+    /// instead — see <see cref="LayoutClassMergeModes"/>. Set <see cref="LayoutMergeMode.Union"/> to
+    /// explicitly keep every nested region, or <see cref="LayoutMergeMode.Large"/> /
+    /// <see cref="LayoutMergeMode.Small"/> to force one uniform strategy. Ignored when
+    /// <see cref="LayoutClassMergeModes"/> is non-null.
     /// </summary>
     public LayoutMergeMode LayoutMergeMode { get; init; } = LayoutMergeMode.None;
 
     /// <summary>
+    /// Per-class containment-merge strategies keyed by the model's own (paddle) label name, mirroring
+    /// PaddleX's dict-typed <c>layout_merge_bboxes_mode</c>: for a class mapped to
+    /// <see cref="LayoutMergeMode.Large"/> every region contained (≥ 90% of its own area) inside a region
+    /// of that class is dropped; for <see cref="LayoutMergeMode.Small"/> a region containing a region of
+    /// that class is dropped unless it is itself contained; <see cref="LayoutMergeMode.Union"/> (or absence
+    /// from the dictionary) leaves the class's nesting alone.
+    /// <para>
+    /// Default <c>null</c>: when <see cref="LayoutMergeMode"/> is also left at
+    /// <see cref="LayoutMergeMode.None"/> the engine applies the PP-StructureV3 pipeline defaults
+    /// (<c>PP-StructureV3.yaml</c>) — <c>"large"</c> for <c>paragraph_title</c>, <c>image</c>,
+    /// <c>formula</c> (also applied to <c>display_formula</c> / <c>inline_formula</c>) and <c>chart</c>,
+    /// union for every other class — for <b>all</b> layout models. Pass an empty dictionary to disable
+    /// containment merging entirely. Label names are matched case/format-insensitively (normalized to
+    /// lower-case <c>snake_case</c>).
+    /// </para>
+    /// </summary>
+    public IReadOnlyDictionary<string, LayoutMergeMode>? LayoutClassMergeModes { get; init; }
+
+    /// <summary>
     /// Which source decides the reading order written into <see cref="StructureBlock.Order"/>. Default
-    /// <see cref="LayoutReadingOrder.Auto"/>: the model's own predicted order when the layout model emits one
-    /// (PP-DocLayoutV3 does), otherwise the geometric XY-cut orderer. Set
-    /// <see cref="LayoutReadingOrder.XyCut"/> to always use XY-cut.
+    /// <see cref="LayoutReadingOrder.Auto"/> resolves to <see cref="LayoutReadingOrder.XyCutEnhanced"/>
+    /// (the XY-Cut++ orderer PP-StructureV3 uses). Set <see cref="LayoutReadingOrder.Model"/> to trust the
+    /// layout model's own predicted order (PP-DocLayoutV3 emits one), or
+    /// <see cref="LayoutReadingOrder.XyCut"/> for the legacy plain XY-cut.
     /// </summary>
     public LayoutReadingOrder ReadingOrder { get; init; } = LayoutReadingOrder.Auto;
 
@@ -150,6 +200,21 @@ internal sealed record StructureOptions
     /// downloads three extra models on first use. Only consulted when <see cref="RecognizeTables"/> is true.
     /// </summary>
     public TableRecognitionModel TableModel { get; init; } = TableRecognitionModel.SlanetPlus;
+
+    /// <summary>
+    /// Classify each table crop's orientation (0/90/180/270°) with the document-orientation classifier and
+    /// rotate it upright before table-structure recognition, so sideways tables recognize correctly.
+    /// Mirrors PP-StructureV3's <c>use_table_orientation_classify</c> (default true there too). Only
+    /// consulted when <see cref="RecognizeTables"/> is true. Default true.
+    /// </summary>
+    public bool UseTableOrientationClassification { get; init; } = true;
+
+    /// <summary>
+    /// Text-recognition options applied to the OCR passes the structure engine runs (block text, table
+    /// cells, captions, seal text) — batch size, drop score, text-line orientation, crop padding, etc.
+    /// Default <c>null</c>: the engine uses its own defaults for structure OCR.
+    /// </summary>
+    public RecognitionOptions? Recognition { get; init; }
 
     /// <summary>
     /// Recognition languages passed through to the text recognizer for text/caption/seal regions. Takes

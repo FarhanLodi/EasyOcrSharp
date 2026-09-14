@@ -1,4 +1,4 @@
-namespace EasyOcrSharp.Structure.Engine.Models;
+﻿namespace EasyOcrSharp.Structure.Engine.Models;
 
 /// <summary>
 /// Tunable options for a recognition call. Pass to
@@ -20,22 +20,79 @@ internal sealed record RecognitionOptions
     /// <summary>
     /// Number of text boxes fed through the recognizer in a single ONNX run. PaddleOCR's
     /// <c>rec_batch_num</c>. Boxes of similar aspect ratio are batched together for throughput
-    /// (especially on GPU). Default 6. If the model cannot run a batch, it falls back to per-box inference.
+    /// (especially on GPU). Default 6; values &lt;= 0 fall back to the default. Applied per call —
+    /// changing it never reloads the cached recognizer session.
     /// </summary>
     public int BatchSize { get; init; } = 6;
 
     /// <summary>
-    /// Drop recognized lines whose confidence is below this threshold (0–1). PaddleOCR's <c>drop_score</c>.
-    /// Default 0.5.
+    /// Drop recognized lines whose confidence is below this threshold (0–1). PaddleOCR's
+    /// <c>drop_score</c> / PaddleX's <c>text_rec_score_thresh</c>. Default 0.0 — everything is returned,
+    /// matching the Python OCR pipeline. Deliberate deviation: lines whose text is empty or
+    /// whitespace-only are still dropped (Python keeps them), since an empty reading carries no
+    /// information for callers.
     /// </summary>
-    public double DropScore { get; init; } = 0.5;
+    public double DropScore { get; init; } = 0.0;
 
     /// <summary>
     /// Run the text-line orientation classifier (180° flip detection) before recognition, rotating boxes
-    /// that the classifier marks as upside-down. PaddleOCR's <c>use_textline_orientation</c>. Default false.
-    /// When false, the classifier model is never loaded.
+    /// that the classifier marks as upside-down. PaddleOCR's <c>use_textline_orientation</c>. Default true
+    /// (the Python pipeline default). When false, the classifier model is never loaded for this call.
     /// </summary>
-    public bool UseTextLineOrientation { get; init; }
+    public bool UseTextLineOrientation { get; init; } = true;
+
+    /// <summary>
+    /// Minimum confidence the text-line orientation classifier's 180° label must reach before a crop is
+    /// actually flipped. PaddleOCR 2.x's <c>cls_thresh</c>; PaddleX 3.x dropped it and rotates on plain
+    /// <c>argmax</c>. Default 0.9 — a deliberate deviation, because an ungated argmax measurably destroys
+    /// upright text: on a Devanagari page the classifier flipped most lines (mean recognition confidence
+    /// 0.97 with the classifier off versus 0.83 with it on, the affected lines reading as transliterated
+    /// gibberish), and the same misfire hit 5 of 17 lines on an upright multi-column English page. The
+    /// misfires are low-confidence, so gating removes them while genuine upside-down lines — which score
+    /// very close to 1.0 — are still corrected. Set 0 for exact PaddleX 3.x parity.
+    /// </summary>
+    public double TextLineOrientationThreshold { get; init; } = 0.9;
+
+    /// <summary>
+    /// Confirm the text-line orientation classifier's 180° verdicts by recognizing the flagged crop in
+    /// both orientations and keeping the more confident reading. Default true — the classifier misfires
+    /// on upright lines even at high confidence, and acting on a wrong verdict replaces a clean reading
+    /// with gibberish, whereas recognition confidence tells the two apart reliably. Costs one extra
+    /// recognition per flagged line only. Set false for PaddleX 3.x behavior (act on the verdict).
+    /// </summary>
+    public bool VerifyOrientationByRecognition { get; init; } = true;
+
+    /// <summary>
+    /// Run the whole-document orientation classifier (PP-LCNet doc-ori, 0/90/180/270°) before detection
+    /// and rotate the page upright, so dense rotated scans are read correctly. PaddleX's
+    /// <c>use_doc_orientation_classify</c> (part of <c>use_doc_preprocessor</c>) — Python's OCR pipeline
+    /// default is on, and so is ours: default <c>true</c>. The classifier model is downloaded/loaded
+    /// lazily on first use; if it cannot be obtained, the pipeline logs a warning and proceeds without it.
+    /// Applies to detection-based OCR only (full-page or region-of-interest); caller-supplied region
+    /// polygons (<c>RecognizeRegionsAsync</c>) are never re-oriented. The detected page rotation is
+    /// reported via <see cref="OcrResult.DetectedOrientation"/>, and all returned coordinates are mapped
+    /// back to the <b>original</b> image's orientation (a deliberate deviation from Python, which reports
+    /// them in the rotated frame).
+    /// </summary>
+    public bool UseDocOrientation { get; init; } = true;
+
+    /// <summary>
+    /// Run the UVDoc document unwarp (dewarp) model on the page before detection — PaddleX's
+    /// <c>use_doc_unwarping</c>. <b>Documented deviation:</b> Python's OCR pipeline defaults this to on
+    /// (both doc-preprocessor stages true); here it defaults to <c>false</c> for performance, since the
+    /// near-full-resolution UVDoc pass is expensive and flat scans/screenshots don't need it. Enable it
+    /// for photographed or warped pages. When unwarping ran, returned coordinates stay in the
+    /// <b>unwarped</b> frame (there is no closed-form inverse of the dewarp; Python behaves the same).
+    /// </summary>
+    public bool UseDocUnwarp { get; init; }
+
+    /// <summary>
+    /// White border (px) added around each rectified text-line crop before orientation classification and
+    /// recognition — some tight detections read better with a little breathing room (10–20 px). Default 0
+    /// (no padding). Note: Python PaddleOCR does not pad crops; the parity-true lever for tight boxes is
+    /// <see cref="DetectionOptions.UnclipRatio"/> (grow the detected boxes themselves).
+    /// </summary>
+    public int CropPadding { get; init; } = 0;
 
     /// <summary>
     /// Automatically detect the script/language of the image instead of trusting the requested language
@@ -136,7 +193,8 @@ internal sealed record RecognitionOptions
     public DetectionOptions Detection { get; init; } = DetectionOptions.Default;
 
     /// <summary>
-    /// The default options (line grouping, full parallelism, drop_score 0.5).
+    /// The default options (line grouping, full parallelism, drop_score 0.0, text-line orientation on,
+    /// document orientation on, document unwarp off).
     /// </summary>
     public static RecognitionOptions Default { get; } = new();
 }

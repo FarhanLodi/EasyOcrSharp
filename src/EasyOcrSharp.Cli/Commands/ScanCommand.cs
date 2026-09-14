@@ -132,7 +132,7 @@ internal static class ScanCommand
         await using var service = new EasyOcrService(serviceOptions);
 
         console.Info($"easyocrsharp: {inputs.Count} input(s), languages [{string.Join(", ", languages)}]"
-            + (service.UseGpu ? ", GPU" : ", CPU"));
+            + (service.ActiveExecutionProvider != OcrExecutionProvider.Cpu ? ", GPU" : ", CPU"));
 
         int completed = 0;
         int failures = 0;

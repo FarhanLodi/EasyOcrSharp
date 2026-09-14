@@ -65,12 +65,19 @@ internal static class TextBoxGrouper
             // Additive slope tolerance (EasyOCR's slope_ths): a box that fails the vertical-centre test
             // can still join the line if it is horizontally separated and the connecting slope is gentle
             // — this keeps gently tilted lines together without ever splitting clean horizontal text.
+            //
+            // The dy < meanHeight bound is load-bearing. Boxes arrive sorted by y-centre, so on a wide page the
+            // first word of the NEXT line can sit ~1100 px left of the previous line's last word; the slope test
+            // alone then admits ~110 px of vertical gap against ~55 px line spacing, every line chains onto the
+            // one above, and the side-by-side merge below collapses a whole paragraph into one box that the
+            // recognizer reads as noise ("=2" at 0.09 confidence on the benchmark's plain-text pages). A tilted
+            // line drifts well under one line height between neighbouring words; the next line never does.
             if (!sameLine)
             {
                 var last = current[^1];
                 double dx = Math.Abs(box.XCenter - last.XCenter);
                 double dy = Math.Abs(box.YCenter - last.YCenter);
-                if (dx > meanHeight && dy <= slopeThreshold * dx)
+                if (dx > meanHeight && dy < meanHeight && dy <= slopeThreshold * dx)
                 {
                     sameLine = true;
                 }

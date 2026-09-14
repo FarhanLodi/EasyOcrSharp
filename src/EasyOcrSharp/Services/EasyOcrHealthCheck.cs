@@ -330,7 +330,7 @@ public sealed class EasyOcrHealthCheck : IHealthCheck
                 Success: true,
                 At: at,
                 Duration: TimeProvider.System.GetElapsedTime(timestamp),
-                Provider: DescribeProvider(result.UsedGpu),
+                Provider: DescribeProvider(result),
                 Error: null,
                 Timestamp: timestamp);
         }
@@ -372,15 +372,29 @@ public sealed class EasyOcrHealthCheck : IHealthCheck
     }
 
     /// <summary>
-    /// Names the provider the engine actually ended up on. <see cref="OcrResult.UsedGpu"/> reflects what
-    /// the engine resolved (Auto has already become a concrete provider by then), so a CPU fallback is
-    /// reported as CPU even when a GPU was requested.
+    /// Names the provider the engine actually ended up on. <see cref="OcrResult.ExecutionProvider"/> is
+    /// the provider the probe really ran on, so an accelerator that failed to attach is reported as CPU.
     /// </summary>
+    private string DescribeProvider(OcrResult result)
+    {
+        if (result.ExecutionProvider != OcrExecutionProvider.Cpu)
+        {
+            return result.ExecutionProvider.ToString();
+        }
+
+        // A custom IEasyOcrService may set only the older UsedGpu flag; fall back to naming the provider
+        // the options resolve to rather than reporting CPU for a service that says it used a GPU.
+        return DescribeProvider(result.UsedGpu);
+    }
+
+    /// <summary>Names the provider when all that is known is whether a GPU was used.</summary>
     private string DescribeProvider(bool usedGpu)
     {
         if (!usedGpu)
         {
-            return nameof(OcrExecutionProvider.Cpu);
+            return _ocr is EasyOcrService concrete
+                ? concrete.ActiveExecutionProvider.ToString()
+                : nameof(OcrExecutionProvider.Cpu);
         }
 
         // Mirrors EasyOcrServiceOptions.ToEngineOptions: the legacy UseGpu flag means "force CUDA"

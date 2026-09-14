@@ -1,7 +1,8 @@
 namespace EasyOcrSharp.Structure.Engine.Geometry;
 
 /// <summary>
-/// 4-connected component labeling on a binary mask using two-pass union-find.
+/// 8-connected component labeling on a binary mask using two-pass union-find (diagonally-touching
+/// pixels join one region, matching cv2.findContours contour/region semantics).
 /// Returns labels[y*w+x] = component id (0 = background) plus per-component stats.
 /// </summary>
 internal static class ConnectedComponents
@@ -34,7 +35,8 @@ internal static class ConnectedComponents
             sizes[a] += sizes[b];
         }
 
-        // First pass: provisional labels.
+        // First pass: provisional labels over the four already-visited 8-neighbors
+        // (left, up-left, up, up-right).
         for (int y = 0; y < height; y++)
         {
             for (int x = 0; x < width; x++)
@@ -42,24 +44,26 @@ internal static class ConnectedComponents
                 int idx = y * width + x;
                 if (mask[idx] == 0) continue;
 
-                int up = (y > 0) ? labels[idx - width] : 0;
                 int left = (x > 0) ? labels[idx - 1] : 0;
+                int up = (y > 0) ? labels[idx - width] : 0;
+                int upLeft = (x > 0 && y > 0) ? labels[idx - width - 1] : 0;
+                int upRight = (x < width - 1 && y > 0) ? labels[idx - width + 1] : 0;
 
-                if (up == 0 && left == 0)
+                if (left == 0 && up == 0 && upLeft == 0 && upRight == 0)
                 {
                     int newLabel = parents.Count;
                     parents.Add(newLabel);
                     sizes.Add(1);
                     labels[idx] = newLabel;
                 }
-                else if (up != 0 && left != 0 && up != left)
-                {
-                    Union(up, left);
-                    labels[idx] = Find(up);
-                }
                 else
                 {
-                    labels[idx] = (up != 0) ? up : left;
+                    int assigned = left != 0 ? left : up != 0 ? up : upLeft != 0 ? upLeft : upRight;
+                    if (left != 0 && left != assigned) Union(assigned, left);
+                    if (up != 0 && up != assigned) Union(assigned, up);
+                    if (upLeft != 0 && upLeft != assigned) Union(assigned, upLeft);
+                    if (upRight != 0 && upRight != assigned) Union(assigned, upRight);
+                    labels[idx] = Find(assigned);
                 }
             }
         }

@@ -11,52 +11,75 @@ namespace EasyOcrSharp.Structure.Engine.Geometry;
 
 /// <summary>
 /// Rectifies a (possibly rotated) quadrilateral text region into an upright rectangle —
-/// the equivalent of PaddleOCR's <c>get_rotate_crop_image</c> / four-point transform. Axis-aligned
-/// quads take a fast crop path; genuinely rotated quads are warped with a homography + bilinear
-/// sampling so slanted text is straightened before recognition.
+/// the equivalent of PaddleOCR's <c>get_rotate_crop_image</c> / four-point transform. Perfectly
+/// axis-aligned quads take a fast crop path; every other quad (small tilts included) is warped with
+/// a homography + bicubic sampling (OpenCV's <c>INTER_CUBIC</c> kernel with <c>BORDER_REPLICATE</c>
+/// edge handling) so slanted text is straightened before recognition.
 /// </summary>
 internal static class PerspectiveWarp
 {
-    public static Image<Rgb24>? Rectify(Image<Rgb24> source, OcrPoint[] quad)
+    /// <summary>
+    /// Rectifies <paramref name="quad"/> out of <paramref name="source"/> into an upright crop.
+    /// When <paramref name="rotateVertical"/> is set and the crop is tall (height/width ≥ 1.5), it
+    /// is rotated 90° counter-clockwise — PaddleOCR's <c>np.rot90</c> heuristic that lets vertical
+    /// text lines reach the recognizer horizontally. Returns null for degenerate (sub-2px) regions.
+    /// </summary>
+    public static Image<Rgb24>? Rectify(Image<Rgb24> source, OcrPoint[] quad, bool rotateVertical = false)
+    {
+        var crop = RectifyUpright(source, quad);
+        if (crop is null) return null;
+
+        if (rotateVertical && crop.Height / (double)crop.Width >= 1.5)
+        {
+            crop.Mutate(ctx => ctx.Rotate(RotateMode.Rotate270)); // 270° CW == 90° CCW == np.rot90
+        }
+        return crop;
+    }
+
+    private static Image<Rgb24>? RectifyUpright(Image<Rgb24> source, OcrPoint[] quad)
     {
         if (quad.Length < 4) return AxisAlignedCrop(source, quad);
 
         // Order corners as top-left, top-right, bottom-right, bottom-left.
         var (tl, tr, br, bl) = OrderCorners(quad);
 
-        double widthTop = Distance(tl, tr), widthBottom = Distance(bl, br);
-        double heightLeft = Distance(tl, bl), heightRight = Distance(tr, br);
-        int dstW = (int)Math.Round(Math.Max(widthTop, widthBottom));
-        int dstH = (int)Math.Round(Math.Max(heightLeft, heightRight));
+        // Python sizes the destination rect by truncating the edge norms (int(), not round).
+        int dstW = (int)Math.Max(Distance(tl, tr), Distance(bl, br));
+        int dstH = (int)Math.Max(Distance(tl, bl), Distance(tr, br));
         if (dstW < 2 || dstH < 2) return null;
 
-        // If the quad is essentially an axis-aligned rectangle, the cheap crop is identical.
+        // Only a perfectly axis-aligned rectangle may skip the warp; any tilt, however small,
+        // must be deskewed (Python always warps).
         if (IsAxisAligned(tl, tr, br, bl))
         {
             return AxisAlignedCrop(source, quad);
         }
 
-        // Homography mapping destination rectangle corners -> source quad corners.
+        // Homography mapping destination rectangle corners -> source quad corners. cv2's pts_std
+        // places the far corners at (W,0),(W,H),(0,H) — not (W-1,H-1).
         var dst = new[]
         {
-            new OcrPoint(0, 0), new OcrPoint(dstW - 1, 0),
-            new OcrPoint(dstW - 1, dstH - 1), new OcrPoint(0, dstH - 1),
+            new OcrPoint(0, 0), new OcrPoint(dstW, 0),
+            new OcrPoint(dstW, dstH), new OcrPoint(0, dstH),
         };
         var src = new[] { tl, tr, br, bl };
         var h = ComputeHomography(dst, src);
         if (h is null) return AxisAlignedCrop(source, quad);
 
-        // Copy only the source bounding box of the quad (plus a 1px halo for bilinear sampling), not the
-        // whole frame — a slanted box on a 2560² page otherwise copied ~20 MB per region. Homography
-        // sample coordinates are in full-image space, so subtract the sub-rect origin before sampling.
+        // Copy only the source bounding box of the quad (plus a 2px halo for the 4×4 bicubic
+        // support), not the whole frame — a slanted box on a 2560² page otherwise copied ~20 MB per
+        // region. Homography sample coordinates are in full-image space, so subtract the sub-rect
+        // origin before sampling. Tap clamping inside BicubicSample replicates edge pixels
+        // (BORDER_REPLICATE); samples stay inside the quad, so the sub-rect edge is only ever
+        // replicated where it coincides with the image edge.
         double qMinX = Math.Min(Math.Min(tl.X, tr.X), Math.Min(br.X, bl.X));
         double qMinY = Math.Min(Math.Min(tl.Y, tr.Y), Math.Min(br.Y, bl.Y));
         double qMaxX = Math.Max(Math.Max(tl.X, tr.X), Math.Max(br.X, bl.X));
         double qMaxY = Math.Max(Math.Max(tl.Y, tr.Y), Math.Max(br.Y, bl.Y));
-        int ox = Math.Max(0, (int)Math.Floor(qMinX) - 1);
-        int oy = Math.Max(0, (int)Math.Floor(qMinY) - 1);
-        int ex = Math.Min(source.Width, (int)Math.Ceiling(qMaxX) + 1);
-        int ey = Math.Min(source.Height, (int)Math.Ceiling(qMaxY) + 1);
+        int ox = Math.Max(0, (int)Math.Floor(qMinX) - 2);
+        int oy = Math.Max(0, (int)Math.Floor(qMinY) - 2);
+        int ex = Math.Min(source.Width, (int)Math.Ceiling(qMaxX) + 2);
+        int ey = Math.Min(source.Height, (int)Math.Ceiling(qMaxY) + 2);
         int sw = ex - ox, sh = ey - oy;
         if (sw < 2 || sh < 2) return AxisAlignedCrop(source, quad);
 
@@ -79,11 +102,11 @@ internal static class PerspectiveWarp
                 if (Math.Abs(denom) < 1e-9) continue;
                 double sx = (h[0] * u + h[1] * v + h[2]) / denom;
                 double sy = (h[3] * u + h[4] * v + h[5]) / denom;
-                // A degenerate homography yields NaN/Infinity here. BilinearSample's range clamps are both
+                // A degenerate homography yields NaN/Infinity here. The sampler's range clamps are both
                 // false for NaN, so it would sample at NaN and silently write black; leave the pixel at the
                 // buffer default instead.
                 if (!double.IsFinite(sx) || !double.IsFinite(sy)) continue;
-                dstBuf[v * dstW + u] = BilinearSample(srcBuf, sw, sh, sx - ox, sy - oy);
+                dstBuf[v * dstW + u] = BicubicSample(srcBuf, sw, sh, sx - ox, sy - oy);
             }
         }
         return Image.LoadPixelData<Rgb24>(dstBuf, dstW, dstH);
@@ -106,25 +129,53 @@ internal static class PerspectiveWarp
         return source.Clone(ctx => ctx.Crop(new Rectangle(x, y, w, h)));
     }
 
-    private static Rgb24 BilinearSample(Rgb24[] buf, int w, int h, double x, double y)
+    /// <summary>
+    /// Samples <paramref name="buf"/> at (<paramref name="x"/>, <paramref name="y"/>) over the 4×4
+    /// neighborhood with OpenCV's <c>INTER_CUBIC</c> convolution kernel, clamping out-of-range taps
+    /// to the nearest edge pixel (<c>BORDER_REPLICATE</c>).
+    /// </summary>
+    private static Rgb24 BicubicSample(Rgb24[] buf, int w, int h, double x, double y)
     {
-        if (x < 0) x = 0; else if (x > w - 1) x = w - 1;
-        if (y < 0) y = 0; else if (y > h - 1) y = h - 1;
         int x0 = (int)Math.Floor(x), y0 = (int)Math.Floor(y);
-        int x1 = Math.Min(x0 + 1, w - 1), y1 = Math.Min(y0 + 1, h - 1);
-        double fx = x - x0, fy = y - y0;
+        Span<double> wx = stackalloc double[4];
+        Span<double> wy = stackalloc double[4];
+        CubicWeights(x - x0, wx);
+        CubicWeights(y - y0, wy);
 
-        Rgb24 p00 = buf[y0 * w + x0], p10 = buf[y0 * w + x1], p01 = buf[y1 * w + x0], p11 = buf[y1 * w + x1];
+        double r = 0, g = 0, b = 0;
+        for (int j = 0; j < 4; j++)
+        {
+            int sy = Math.Clamp(y0 - 1 + j, 0, h - 1);
+            int rowOffset = sy * w;
+            for (int i = 0; i < 4; i++)
+            {
+                int sx = Math.Clamp(x0 - 1 + i, 0, w - 1);
+                double weight = wy[j] * wx[i];
+                Rgb24 p = buf[rowOffset + sx];
+                r += weight * p.R;
+                g += weight * p.G;
+                b += weight * p.B;
+            }
+        }
 
-        byte Lerp(byte a, byte b, byte c, byte d) =>
-            (byte)Math.Clamp(
-                a * (1 - fx) * (1 - fy) + b * fx * (1 - fy) + c * (1 - fx) * fy + d * fx * fy + 0.5,
-                0, 255);
-
+        // The cubic kernel has negative lobes, so channel sums can over/undershoot [0,255].
         return new Rgb24(
-            Lerp(p00.R, p10.R, p01.R, p11.R),
-            Lerp(p00.G, p10.G, p01.G, p11.G),
-            Lerp(p00.B, p10.B, p01.B, p11.B));
+            (byte)Math.Clamp(r + 0.5, 0, 255),
+            (byte)Math.Clamp(g + 0.5, 0, 255),
+            (byte)Math.Clamp(b + 0.5, 0, 255));
+    }
+
+    /// <summary>
+    /// OpenCV's cubic convolution weights (<c>interpolateCubic</c>, A = −0.75) for the four taps at
+    /// offsets −1..2 around the sample, where <paramref name="t"/> is the fractional position.
+    /// </summary>
+    private static void CubicWeights(double t, Span<double> w)
+    {
+        const double a = -0.75;
+        w[0] = ((a * (t + 1) - 5 * a) * (t + 1) + 8 * a) * (t + 1) - 4 * a;
+        w[1] = ((a + 2) * t - (a + 3)) * t * t + 1;
+        w[2] = ((a + 2) * (1 - t) - (a + 3)) * (1 - t) * (1 - t) + 1;
+        w[3] = 1 - w[0] - w[1] - w[2];
     }
 
     /// <summary>
@@ -142,21 +193,21 @@ internal static class PerspectiveWarp
     /// </summary>
     private static (OcrPoint tl, OcrPoint tr, OcrPoint br, OcrPoint bl) OrderCorners(OcrPoint[] quad)
     {
-        var pts = (OcrPoint[])quad.Clone();
-        Array.Sort(pts, (a, b) => a.X.CompareTo(b.X));
-
-        var (leftTop, leftBottom) = pts[0].Y <= pts[1].Y ? (pts[0], pts[1]) : (pts[1], pts[0]);
-        var (rightTop, rightBottom) = pts[2].Y <= pts[3].Y ? (pts[2], pts[3]) : (pts[3], pts[2]);
-
-        return (leftTop, rightTop, rightBottom, leftBottom);
+        // get_minarea_rect_crop's rule: stable-sort by x; the two leftmost points ordered by y give
+        // TL/BL and the two rightmost give TR/BR (crop_image_regions.py:144-161). Equal-y pairs
+        // follow Python's strict "y >" comparison.
+        var byX = quad.OrderBy(p => p.X).ToArray();
+        OcrPoint left0 = byX[0], left1 = byX[1], right0 = byX[^2], right1 = byX[^1];
+        var (tl, bl) = left1.Y > left0.Y ? (left0, left1) : (left1, left0);
+        var (tr, br) = right1.Y > right0.Y ? (right0, right1) : (right1, right0);
+        return (tl, tr, br, bl);
     }
 
     private static bool IsAxisAligned(OcrPoint tl, OcrPoint tr, OcrPoint br, OcrPoint bl)
     {
-        // Near-zero slope on top/bottom edges => treat as axis-aligned.
-        double topSlope = Math.Abs(tr.Y - tl.Y) / Math.Max(1.0, Math.Abs(tr.X - tl.X));
-        double botSlope = Math.Abs(br.Y - bl.Y) / Math.Max(1.0, Math.Abs(br.X - bl.X));
-        return Math.Max(topSlope, botSlope) < 0.02;
+        // Only an exactly axis-aligned rectangle qualifies for the bbox-crop fast path; Python
+        // always warps, so even a fraction of a degree of tilt must be deskewed here.
+        return tl.Y == tr.Y && bl.Y == br.Y && tl.X == bl.X && tr.X == br.X;
     }
 
     private static double Distance(OcrPoint a, OcrPoint b)

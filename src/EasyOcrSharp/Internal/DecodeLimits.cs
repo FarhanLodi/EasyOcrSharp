@@ -25,11 +25,18 @@ namespace EasyOcrSharp.Internal;
 internal static class DecodeLimits
 {
     /// <summary>No ceiling — what "set to 0 to disable" has to mean once the budget reaches the decoder.</summary>
-    private static readonly DecoderOptions Unlimited = new() { MaxPixels = long.MaxValue };
+    private static readonly DecoderOptions Unlimited = new() { MaxPixels = long.MaxValue, MaxTotalPixels = long.MaxValue };
 
     /// <summary>Decoder limits for a pixel budget; 0 (or less) means unlimited.</summary>
+    /// <remarks>
+    /// <c>MaxTotalPixels</c> is lifted in both branches. EasyImageSharp 1.1.0 introduced it with a default of
+    /// 2^30 pixels summed over every frame, which would silently cap a multi-page TIFF that the caller's own
+    /// budget allows (a few hundred A4 pages at 300 dpi), even with the guard set to 0. Frames are already
+    /// bounded here: per frame by <paramref name="maxPixels"/>, and by count through
+    /// <c>MultiFrameOcrOptions.MaxFrames</c> checked against the header before decoding.
+    /// </remarks>
     internal static DecoderOptions For(long maxPixels)
-        => maxPixels > 0 ? new DecoderOptions { MaxPixels = maxPixels } : Unlimited;
+        => maxPixels > 0 ? new DecoderOptions { MaxPixels = maxPixels, MaxTotalPixels = long.MaxValue } : Unlimited;
 
     public static async Task<Image<Rgb24>> LoadAsync(string path, long maxPixels, string optionName, CancellationToken ct)
     {

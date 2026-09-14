@@ -10,7 +10,10 @@ public enum OcrExecutionProvider
     /// <summary>Pure CPU. Always available.</summary>
     Cpu = 0,
 
-    /// <summary>NVIDIA CUDA. Requires the <c>EasyOcrSharp.Gpu</c> package and CUDA 12+ on PATH.</summary>
+    /// <summary>
+    /// NVIDIA CUDA. Requires the <c>EasyOcrSharp.Gpu</c> package, an NVIDIA GPU, and the CUDA 13 runtime with
+    /// cuDNN 9 on PATH (the CUDA major the referenced ONNX Runtime GPU build targets).
+    /// </summary>
     Cuda = 1,
 
     /// <summary>

@@ -2,13 +2,15 @@ namespace EasyOcrSharp.Structure;
 
 /// <summary>
 /// How nested layout regions are resolved. A region counts as nested when at least 90% of its own area falls
-/// inside another. Formulas are never absorbed by a non-formula region. Default <see cref="None"/>: nesting
-/// is left alone, which is what the shipped PP-DocLayout model configs ask for.
+/// inside another. Formulas are never absorbed by a non-formula region. Default <see cref="None"/>: the
+/// PP-StructureV3 per-class merge modes apply (<c>large</c> for titles/images/formulas/charts, union
+/// otherwise) unless <see cref="StructureOptions.LayoutClassMergeModes"/> overrides them.
 /// </summary>
 internal enum LayoutMergeMode
 {
     /// <summary>
-    /// Leave nested regions alone — both the container and the contained block are returned. The default.
+    /// No uniform mode chosen — the per-class defaults (or
+    /// <see cref="StructureOptions.LayoutClassMergeModes"/>) decide. The default.
     /// </summary>
     None = 0,
 

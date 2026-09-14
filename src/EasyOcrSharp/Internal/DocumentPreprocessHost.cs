@@ -45,7 +45,7 @@ internal sealed class DocumentPreprocessHost : IDisposable
         // its constructor); we intentionally do NOT dispose it so the shared sessions survive for the
         // next call — this host owns and disposes the sessions itself.
         var preprocessor = new DocPreprocessor(_orientation, _unwarp);
-        return preprocessor.Apply(image, orientation, unwarp);
+        return preprocessor.Apply(image, orientation, unwarp, cancellationToken);
     }
 
     /// <summary>Downloads and opens the session for each requested stage that isn't loaded yet.</summary>

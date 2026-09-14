@@ -33,7 +33,7 @@ internal enum OcrExecutionProvider
     /// use it, falling back to CPU when none is present. The choice depends entirely on which provider
     /// package the consumer installed (only one ONNX Runtime native package can be referenced at a
     /// time): with <c>EasyOcrSharp.Gpu</c> a working CUDA GPU lights up CUDA; with
-    /// <c>EasyOcrSharp.DirectMl</c> any DirectX 12 GPU lights up DirectML; with the base package only,
+    /// <c>Microsoft.ML.OnnxRuntime.DirectML</c> any DirectX 12 GPU lights up DirectML; with the base package only,
     /// this always resolves to <see cref="Cpu"/>.
     /// </summary>
     Auto = 4,

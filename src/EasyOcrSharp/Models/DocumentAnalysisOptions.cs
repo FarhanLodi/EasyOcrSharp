@@ -49,20 +49,28 @@ public enum DocumentLayoutMergeMode
 public enum DocumentReadingOrder
 {
     /// <summary>
-    /// The model's own predicted order when the layout model emits one (PP-DocLayoutV3 does), otherwise the
-    /// geometric XY-cut orderer. The default.
+    /// The default. PP-StructureV3's XY-Cut++ orderer: recursive XY-cuts plus label-aware rules (headers
+    /// first, footers last, titles and figures placed by distance), with the model's predicted order used
+    /// only as a tie-break, as in Python PP-StructureV3. On a right-to-left page (see
+    /// <see cref="DocumentAnalysisOptions.ReadingDirection"/>) it uses the direction-aware
+    /// <see cref="XyCut"/> orderer instead, because XY-Cut++ only reads left to right.
     /// </summary>
+    /// <remarks>
+    /// Before the PaddleOcrNet 2.1.0 engine update, <c>Auto</c> meant "the model's order when it has one";
+    /// pass <see cref="Model"/> to keep that behaviour.
+    /// </remarks>
     Auto = 0,
 
     /// <summary>
-    /// Always use the geometric XY-cut orderer, ignoring any order the model predicted — keeps ordering
-    /// identical across layout models.
+    /// Always use the plain geometric XY-cut orderer, ignoring the model's predicted order and the XY-Cut++
+    /// label rules — keeps ordering identical across layout models. Honours
+    /// <see cref="DocumentAnalysisOptions.ReadingDirection"/>.
     /// </summary>
     XyCut = 1,
 
     /// <summary>
-    /// Prefer the model's predicted order; identical to <see cref="Auto"/>, since a model that predicts no
-    /// order leaves nothing to use but XY-cut.
+    /// Use the layout model's own predicted order (PP-DocLayoutV3 emits one). When the model predicts no
+    /// order for some block, falls back to the direction-aware <see cref="XyCut"/> orderer.
     /// </summary>
     Model = 2,
 }
@@ -130,19 +138,20 @@ public sealed record DocumentAnalysisOptions
     public const float DefaultLayoutScoreThreshold = 0.5f;
 
     /// <summary>
-    /// Drop near-duplicate layout regions. The layout detectors emit a fixed top-k of candidates with no
-    /// NMS, so the same area of the page is routinely proposed several times under different labels; this
-    /// collapses each cluster to one region and drops sub-6px slivers. Barely visible at the default
+    /// Drop overlapping layout regions, as PP-StructureV3's <c>remove_overlap_blocks</c> does: when two regions
+    /// overlap by more than half of the smaller one's area, the smaller region is dropped, except that an
+    /// <c>image</c> region loses to whatever it overlaps regardless of size. Barely visible at the default
     /// <see cref="LayoutScoreThreshold"/> and increasingly important as you lower it. Default true.
     /// </summary>
     public bool FilterOverlappingRegions { get; init; } = true;
 
     /// <summary>
-    /// Additionally run non-maximum suppression over the layout regions (0.6 IoU within a class, 0.98
-    /// across classes). Complements <see cref="FilterOverlappingRegions"/>, which measures overlap against
-    /// the smaller box rather than the union. Default false.
+    /// Run non-maximum suppression over the layout regions (0.6 IoU within a class, 0.98 across classes).
+    /// Complements <see cref="FilterOverlappingRegions"/>, which measures overlap against the smaller box
+    /// rather than the union. Default <c>true</c>, matching <c>layout_nms: True</c> in PP-StructureV3.yaml
+    /// (was <c>false</c> before the PaddleOcrNet 2.1.0 engine update; set it to <c>false</c> to restore that).
     /// </summary>
-    public bool LayoutNms { get; init; }
+    public bool LayoutNms { get; init; } = true;
 
     /// <summary>
     /// Grow every layout region about its own centre by this ratio before recognition (1.1 adds 10% to the
@@ -185,9 +194,11 @@ public sealed record DocumentAnalysisOptions
     /// <c>he</c> …) and left-to-right otherwise.
     /// </summary>
     /// <remarks>
-    /// Affects the geometric XY-cut ordering. When the layout model emits its own reading-order index and
-    /// <see cref="ReadingOrder"/> leaves that in use, the model's prediction wins — it was trained on the
-    /// document's real order and already accounts for direction.
+    /// Affects the geometric XY-cut ordering. A right-to-left page under the default
+    /// <see cref="DocumentReadingOrder.Auto"/> is ordered with the direction-aware XY-cut rather than
+    /// XY-Cut++, which only reads left to right. Under <see cref="DocumentReadingOrder.Model"/> the model's
+    /// prediction wins when present — it was trained on the document's real order and already accounts for
+    /// direction.
     /// </remarks>
     public TextReadingDirection ReadingDirection { get; init; } = TextReadingDirection.Auto;
 

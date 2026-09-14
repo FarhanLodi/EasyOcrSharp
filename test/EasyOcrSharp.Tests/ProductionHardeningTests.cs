@@ -194,7 +194,31 @@ public class ProductionHardeningTests
         var options = new ModelDownloadOptions();
 
         Assert.True(options.MaxDownloadBytes > 0);
-        // Comfortably above the largest published asset (~124 MB) and well below a runaway stream.
         Assert.InRange(options.MaxDownloadBytes, 200L * 1024 * 1024, 4L * 1024 * 1024 * 1024);
+    }
+
+    /// <summary>
+    /// The largest asset this library publishes, in bytes: the full-precision TrOCR handwriting decoder
+    /// (<c>trocr_base_handwritten_decoder.onnx</c>), confirmed against the model host.
+    /// </summary>
+    private const long LargestPublishedAssetBytes = 1_195_550_470;
+
+    [Fact]
+    public void The_download_ceiling_clears_the_largest_model_this_library_publishes()
+    {
+        // Regression guard. The ceiling first shipped at 512 MB, which is less than half this asset -- so
+        // HandwritingOptions { Quantize = false }, a configuration the README documents, could never
+        // download on a cold cache. The ceiling is tested against Content-Length before a byte is written,
+        // and ModelDownloadException is deliberately non-transient, so there was no retry and no fallback to
+        // the int8 build: an opt-in feature turned into a permanent hard failure.
+        //
+        // The original test asserted only InRange(200 MB, 4 GB) and passed happily, which is exactly why
+        // this one compares against a real number instead of a comfortable-looking range.
+        var options = new ModelDownloadOptions();
+
+        Assert.True(
+            options.MaxDownloadBytes > LargestPublishedAssetBytes,
+            $"MaxDownloadBytes default ({options.MaxDownloadBytes:N0}) must exceed the largest published " +
+            $"asset ({LargestPublishedAssetBytes:N0}); otherwise the guard blocks the library's own models.");
     }
 }

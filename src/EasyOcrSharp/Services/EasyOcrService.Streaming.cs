@@ -307,7 +307,7 @@ public sealed partial class EasyOcrService
             {
                 activity.SetTag("easyocr.languages", string.Join(",", langs));
                 activity.SetTag("easyocr.lines", emitted);
-                activity.SetTag("easyocr.gpu", _useGpu);
+                activity.SetTag("easyocr.gpu", _engine.ActiveProvider != OcrExecutionProvider.Cpu);
                 activity.SetTag("easyocr.streaming", true);
             }
             _logger?.LogInformation("Streaming OCR completed: {Count} lines in {Ms:F0} ms", emitted, sw.Elapsed.TotalMilliseconds);

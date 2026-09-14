@@ -1,4 +1,4 @@
-namespace EasyOcrSharp.Structure.Engine.Models;
+﻿namespace EasyOcrSharp.Structure.Engine.Models;
 
 /// <summary>
 /// Converts between the strongly-typed <see cref="OcrLanguage"/> enum and the underlying recognizer
@@ -57,6 +57,13 @@ internal static class OcrLanguageExtensions
         OcrLanguage.Welsh => "cy",
         OcrLanguage.Azerbaijani => "az",
         OcrLanguage.Uzbek => "uz",
+        OcrLanguage.Finnish => "fi",
+        OcrLanguage.Basque => "eu",
+        OcrLanguage.Galician => "gl",
+        OcrLanguage.Luxembourgish => "lb",
+        OcrLanguage.Romansh => "rm",
+        OcrLanguage.Catalan => "ca",
+        OcrLanguage.Quechua => "qu",
 
         OcrLanguage.Cyrillic => "cyrillic",
         OcrLanguage.Russian => "ru",
@@ -65,11 +72,31 @@ internal static class OcrLanguageExtensions
         OcrLanguage.Belarusian => "be",
         OcrLanguage.SerbianCyrillic => "rs_cyrillic",
         OcrLanguage.Mongolian => "mn",
+        OcrLanguage.Kazakh => "kk",
+        OcrLanguage.Kyrgyz => "ky",
+        OcrLanguage.Tajik => "tg",
+        OcrLanguage.Macedonian => "mk",
+        OcrLanguage.Tatar => "tt",
+        OcrLanguage.Chuvash => "cv",
+        OcrLanguage.Bashkir => "ba",
+        OcrLanguage.MeadowMari => "mhr",
+        OcrLanguage.Moldovan => "mo",
+        OcrLanguage.Udmurt => "udm",
+        OcrLanguage.Komi => "kv",
+        OcrLanguage.Ossetian => "os",
+        OcrLanguage.Buryat => "bua",
+        OcrLanguage.Kalmyk => "xal",
+        OcrLanguage.Tuvan => "tyv",
+        OcrLanguage.Yakut => "sah",
+        OcrLanguage.Karakalpak => "kaa",
 
         OcrLanguage.Arabic => "ar",
         OcrLanguage.Persian => "fa",
         OcrLanguage.Urdu => "ur",
         OcrLanguage.Uyghur => "ug",
+        OcrLanguage.Pashto => "ps",
+        OcrLanguage.Sindhi => "sd",
+        OcrLanguage.Balochi => "bal",
 
         OcrLanguage.Devanagari => "devanagari",
         OcrLanguage.Hindi => "hi",
@@ -98,10 +125,40 @@ internal static class OcrLanguageExtensions
         return languages.Select(ToCode).ToArray();
     }
 
+    // Standard language tags for the languages whose canonical code is a PaddleOCR pack name rather than
+    // an ISO code, so callers reading codes out of config ("ko", "zh", "ja") are not turned away by an
+    // internal naming convention. Parse-only: ToCode still returns the canonical pack name.
+    // Deliberately absent: "cy" (ISO Welsh, already canonical for OcrLanguage.Welsh — never Cyrillic).
+    private static readonly (string Alias, OcrLanguage Language)[] CodeAliases =
+    {
+        ("zh", OcrLanguage.ChineseSimplified),
+        ("zh-hans", OcrLanguage.ChineseSimplified),
+        ("zh-cn", OcrLanguage.ChineseSimplified),
+        ("zh-hant", OcrLanguage.ChineseTraditional),
+        ("zh-tw", OcrLanguage.ChineseTraditional),
+        ("cht", OcrLanguage.ChineseTraditional),
+        ("ja", OcrLanguage.Japanese),
+        ("ko", OcrLanguage.Korean),
+        ("th", OcrLanguage.Thai),
+        ("el", OcrLanguage.Greek),
+        ("ta", OcrLanguage.Tamil),
+        ("te", OcrLanguage.Telugu),
+    };
+
     // Built once from ToCode so the reverse lookup auto-stays-in-sync with the forward mapping — adding a
     // new OcrLanguage entry (with a ToCode arm) makes it parseable here without any change to this map.
-    private static readonly Dictionary<string, OcrLanguage> CodeToLanguage =
-        Enum.GetValues<OcrLanguage>().ToDictionary(l => l.ToCode(), l => l, StringComparer.OrdinalIgnoreCase);
+    // Aliases are added afterwards and never shadow a canonical code.
+    private static readonly Dictionary<string, OcrLanguage> CodeToLanguage = BuildCodeLookup();
+
+    private static Dictionary<string, OcrLanguage> BuildCodeLookup()
+    {
+        var map = Enum.GetValues<OcrLanguage>()
+            .ToDictionary(l => l.ToCode(), l => l, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (alias, language) in CodeAliases) map.TryAdd(alias, language);
+
+        return map;
+    }
 
     /// <summary>
     /// Attempts to parse a recognizer language code (e.g. <c>"fr"</c>, <c>"auto"</c>) into the matching

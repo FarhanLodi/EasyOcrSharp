@@ -227,7 +227,9 @@ public class FeatureIntegrationTests
 
         var result = await ocr.ExtractTextFromImage(Sample(), new[] { "en" });
 
-        Assert.True(result.UsedGpu); // accelerator was requested
+        // UsedGpu / ExecutionProvider report what actually ran: CPU whenever CUDA could not attach.
+        Assert.Equal(ocr.ActiveExecutionProvider, result.ExecutionProvider);
+        Assert.Equal(result.ExecutionProvider != OcrExecutionProvider.Cpu, result.UsedGpu);
         Assert.Contains("HELLO", TestAssets.Normalize(result.FullText));
     }
 }

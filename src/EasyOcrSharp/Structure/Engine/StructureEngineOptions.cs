@@ -21,6 +21,38 @@ internal sealed record StructureEngineOptions
     public OcrExecutionProvider ExecutionProvider { get; init; } = OcrExecutionProvider.Auto;
 
     /// <summary>
+    /// Zero-based accelerator device index used by the CUDA / DirectML providers. Default 0.
+    /// </summary>
+    public int DeviceId { get; init; } = 0;
+
+    /// <summary>
+    /// Which PP-OCRv5 detection network to load (mobile default, server opt-in).
+    /// </summary>
+    public OcrModelVariant DetectionModel { get; init; } = OcrModelVariant.Mobile;
+
+    /// <summary>
+    /// Which PP-OCRv5 recognition network to load for the default (ch/en/ja) pack.
+    /// Per-script packs have no server variant and always stay mobile.
+    /// </summary>
+    public OcrModelVariant RecognitionModel { get; init; } = OcrModelVariant.Mobile;
+
+    /// <summary>
+    /// Local detection ONNX file that replaces the registry detector entirely (no download, no checksum).
+    /// </summary>
+    public string? DetectionModelPath { get; init; }
+
+    /// <summary>
+    /// Local recognition ONNX file that replaces the default-pack recognizer (no download, no checksum).
+    /// </summary>
+    public string? RecognitionModelPath { get; init; }
+
+    /// <summary>
+    /// Local character dictionary paired with <see cref="RecognitionModelPath"/>; when null the default
+    /// pack's dictionary is used.
+    /// </summary>
+    public string? RecognitionDictionaryPath { get; init; }
+
+    /// <summary>
     /// Intra-op thread count for ONNX Runtime (null = runtime default). 1 = single-threaded ops.
     /// </summary>
     public int? IntraOpNumThreads { get; init; }

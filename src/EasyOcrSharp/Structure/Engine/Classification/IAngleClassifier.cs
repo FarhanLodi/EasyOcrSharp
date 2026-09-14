@@ -1,4 +1,4 @@
-using EasyImageSharp;
+﻿using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
 
 namespace EasyOcrSharp.Structure.Engine.Classification;
@@ -16,8 +16,10 @@ internal interface IAngleClassifier : IDisposable
     /// </summary>
     /// <param name="crop">The upright text-line crop to classify (caller retains ownership).</param>
     /// <returns>
-    /// <c>Rotated</c> is true when the crop is 180° (upside-down) and should be flipped; <c>Score</c> is
-    /// the classifier's confidence (0–1) in the chosen label.
+    /// <c>Rotated</c> is true when the model's <c>argmax</c> label is 180° (upside-down); <c>Score</c> is
+    /// the classifier's confidence (0–1) in that label. This is the model's raw verdict: callers decide
+    /// whether to act on it, gating with <see cref="Models.RecognitionOptions.TextLineOrientationThreshold"/>
+    /// so that low-confidence misfires do not flip upright text.
     /// </returns>
     (bool Rotated, float Score) Classify(Image<Rgb24> crop);
 }

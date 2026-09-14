@@ -22,7 +22,7 @@ internal enum OcrLanguage
     // ---- East Asian ----
 
     /// <summary>
-    /// English (<c>en</c>) — served by the default PP-OCRv5 recognizer.
+    /// English (<c>en</c>) — served by the dedicated English PP-OCRv5 recognizer pack.
     /// </summary>
     English,
 
@@ -177,6 +177,34 @@ internal enum OcrLanguage
     /// Uzbek (<c>uz</c>).
     /// </summary>
     Uzbek,
+    /// <summary>
+    /// Finnish (<c>fi</c>).
+    /// </summary>
+    Finnish,
+    /// <summary>
+    /// Basque (<c>eu</c>).
+    /// </summary>
+    Basque,
+    /// <summary>
+    /// Galician (<c>gl</c>).
+    /// </summary>
+    Galician,
+    /// <summary>
+    /// Luxembourgish (<c>lb</c>).
+    /// </summary>
+    Luxembourgish,
+    /// <summary>
+    /// Romansh (<c>rm</c>).
+    /// </summary>
+    Romansh,
+    /// <summary>
+    /// Catalan (<c>ca</c>).
+    /// </summary>
+    Catalan,
+    /// <summary>
+    /// Quechua (<c>qu</c>).
+    /// </summary>
+    Quechua,
 
     // ---- Cyrillic script ----
 
@@ -185,11 +213,11 @@ internal enum OcrLanguage
     /// </summary>
     Cyrillic,
     /// <summary>
-    /// Russian (<c>ru</c>).
+    /// Russian (<c>ru</c>) — served by the East-Slavic recognizer pack.
     /// </summary>
     Russian,
     /// <summary>
-    /// Ukrainian (<c>uk</c>).
+    /// Ukrainian (<c>uk</c>) — served by the East-Slavic recognizer pack.
     /// </summary>
     Ukrainian,
     /// <summary>
@@ -197,7 +225,7 @@ internal enum OcrLanguage
     /// </summary>
     Bulgarian,
     /// <summary>
-    /// Belarusian (<c>be</c>).
+    /// Belarusian (<c>be</c>) — served by the East-Slavic recognizer pack.
     /// </summary>
     Belarusian,
     /// <summary>
@@ -208,6 +236,74 @@ internal enum OcrLanguage
     /// Mongolian (<c>mn</c>).
     /// </summary>
     Mongolian,
+    /// <summary>
+    /// Kazakh (<c>kk</c>).
+    /// </summary>
+    Kazakh,
+    /// <summary>
+    /// Kyrgyz (<c>ky</c>).
+    /// </summary>
+    Kyrgyz,
+    /// <summary>
+    /// Tajik (<c>tg</c>).
+    /// </summary>
+    Tajik,
+    /// <summary>
+    /// Macedonian (<c>mk</c>).
+    /// </summary>
+    Macedonian,
+    /// <summary>
+    /// Tatar (<c>tt</c>).
+    /// </summary>
+    Tatar,
+    /// <summary>
+    /// Chuvash (<c>cv</c>).
+    /// </summary>
+    Chuvash,
+    /// <summary>
+    /// Bashkir (<c>ba</c>).
+    /// </summary>
+    Bashkir,
+    /// <summary>
+    /// Meadow Mari (<c>mhr</c>).
+    /// </summary>
+    MeadowMari,
+    /// <summary>
+    /// Moldovan, Cyrillic script (<c>mo</c>).
+    /// </summary>
+    Moldovan,
+    /// <summary>
+    /// Udmurt (<c>udm</c>).
+    /// </summary>
+    Udmurt,
+    /// <summary>
+    /// Komi (<c>kv</c>).
+    /// </summary>
+    Komi,
+    /// <summary>
+    /// Ossetian (<c>os</c>).
+    /// </summary>
+    Ossetian,
+    /// <summary>
+    /// Buryat (<c>bua</c>).
+    /// </summary>
+    Buryat,
+    /// <summary>
+    /// Kalmyk (<c>xal</c>).
+    /// </summary>
+    Kalmyk,
+    /// <summary>
+    /// Tuvan (<c>tyv</c>).
+    /// </summary>
+    Tuvan,
+    /// <summary>
+    /// Yakut / Sakha (<c>sah</c>).
+    /// </summary>
+    Yakut,
+    /// <summary>
+    /// Karakalpak (<c>kaa</c>).
+    /// </summary>
+    Karakalpak,
 
     // ---- Arabic script ----
 
@@ -227,6 +323,18 @@ internal enum OcrLanguage
     /// Uyghur (<c>ug</c>).
     /// </summary>
     Uyghur,
+    /// <summary>
+    /// Pashto (<c>ps</c>).
+    /// </summary>
+    Pashto,
+    /// <summary>
+    /// Sindhi (<c>sd</c>).
+    /// </summary>
+    Sindhi,
+    /// <summary>
+    /// Balochi (<c>bal</c>).
+    /// </summary>
+    Balochi,
 
     // ---- Devanagari script ----
 

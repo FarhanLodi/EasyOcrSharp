@@ -27,6 +27,9 @@ internal sealed record EngineOptions
     /// <summary>Use the int8-quantized recognizer variants (EasyOCR's <c>quantize=True</c>).</summary>
     public bool Quantize { get; init; }
 
+    /// <summary>Local CRAFT detector file loaded instead of the registry model (no download, no checksum).</summary>
+    public string? DetectorModelPath { get; init; }
+
     /// <summary>
     /// Log the GPU upgrade hint as a one-time startup warning (default false). The hint string is always
     /// computed and exposed via <see cref="OnnxEasyOcrEngine.GpuHint"/> regardless of this flag.

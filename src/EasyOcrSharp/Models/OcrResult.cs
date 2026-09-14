@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using EasyOcrSharp.Services;
 
 namespace EasyOcrSharp.Models;
 
@@ -37,9 +38,19 @@ public sealed record OcrResult
     public TimeSpan Duration { get; init; }
 
     /// <summary>
-    /// Gets a value indicating whether GPU acceleration was used.
+    /// Gets a value indicating whether GPU acceleration was used — equivalent to
+    /// <see cref="ExecutionProvider"/> being a non-CPU provider. It reflects the provider the sessions were
+    /// really running on when the result was built, so an accelerator that was requested but failed to
+    /// attach (and fell back to CPU) reports <c>false</c>.
     /// </summary>
     public bool UsedGpu { get; init; }
+
+    /// <summary>
+    /// Gets the execution provider the ONNX sessions were actually running on when this result was
+    /// produced. <see cref="OcrExecutionProvider.Cpu"/> when an accelerator was requested but failed to
+    /// attach (see <see cref="EasyOcrService.GpuAccelerationHint"/> for why).
+    /// </summary>
+    public OcrExecutionProvider ExecutionProvider { get; init; } = OcrExecutionProvider.Cpu;
 
     /// <summary>
     /// Gets the width (px) of the image OCR ran on, or 0 if unknown. Useful for exporters (hOCR/ALTO) and

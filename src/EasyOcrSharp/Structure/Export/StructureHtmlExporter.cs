@@ -185,13 +185,17 @@ internal static class StructureHtmlExporter
     /// Emits the table block's recovered HTML verbatim when it is a well-formed, table-rooted fragment;
     /// otherwise falls back to the recovered text (escaped) or, failing that, an empty-table placeholder.
     /// The pre-built markup is NOT escaped — it is already markup — but it is validated first.
+    /// <para>
+    /// The recognizer hands over a whole <c>&lt;html&gt;&lt;body&gt;&lt;table&gt;…</c> document (PaddleOCR
+    /// parity), so the <c>&lt;table&gt;</c> span is taken out of it first: nesting a second
+    /// <c>&lt;html&gt;</c>/<c>&lt;body&gt;</c> inside this exporter's own document is invalid, and the
+    /// table-rooted check below would reject the wrapped form and silently degrade every real table to its
+    /// fallback text.
+    /// </para>
     /// </summary>
     private static string RenderTable(StructureBlock block)
     {
-        // The recognizer emits PaddleOCR's <html><body><table>…</table></body></html> envelope, which is what
-        // StructureBlock.TableHtml carries. Only the <table> fragment may be spliced into the page we build,
-        // so unwrap first — validating the envelope as a table fragment would reject every real table.
-        var html = ExtractTableFragment(block.TableHtml);
+        var html = TableHtmlFragment.Extract(block.TableHtml);
         if (!string.IsNullOrEmpty(html) && IsWellFormedTable(html))
         {
             return html;

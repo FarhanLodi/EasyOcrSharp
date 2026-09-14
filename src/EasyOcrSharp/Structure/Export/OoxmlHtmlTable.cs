@@ -10,7 +10,9 @@ namespace EasyOcrSharp.Structure.Export;
 /// materializes that into a rectangular <see cref="OoxmlTableGrid"/> with merge information so both the Word
 /// and Excel exporters can lay the cells out faithfully. It is intentionally tolerant: it scans for
 /// <c>&lt;tr&gt;</c> / <c>&lt;td&gt;</c> / <c>&lt;th&gt;</c> tags, ignores anything it does not understand, and
-/// strips inner tags from cell content.
+/// strips inner tags from cell content — except <c>&lt;br&gt;</c>, which the table recognizer emits between a
+/// cell's visual lines and which becomes a <c>\n</c> in <see cref="OoxmlGridCell.Text"/> for the exporters to
+/// render as a real line break.
 /// </summary>
 internal static class OoxmlHtmlTable
 {
@@ -119,22 +121,48 @@ internal static class OoxmlHtmlTable
     }
 
     /// <summary>
-    /// Strips any nested tags and decodes the handful of HTML entities PaddleOCR emits.
+    /// Strips nested tags and decodes the handful of HTML entities PaddleOCR emits. <c>&lt;br&gt;</c> (in any
+    /// of its spellings — <c>&lt;br&gt;</c>, <c>&lt;br/&gt;</c>, <c>&lt;br /&gt;</c>) is the one tag that
+    /// carries meaning here: it becomes a newline, so a multi-line cell survives into Word and Excel instead
+    /// of having its lines run together.
     /// </summary>
     private static string CleanCellText(string raw)
     {
         if (raw.Length == 0) return string.Empty;
 
         var sb = new StringBuilder(raw.Length);
-        bool inTag = false;
-        foreach (char ch in raw)
+        int i = 0;
+        while (i < raw.Length)
         {
-            if (ch == '<') { inTag = true; continue; }
-            if (ch == '>') { inTag = false; continue; }
-            if (!inTag) sb.Append(ch);
+            char ch = raw[i];
+            if (ch != '<')
+            {
+                sb.Append(ch);
+                i++;
+                continue;
+            }
+
+            // A tag: skip to its '>' (or to the end when the markup is truncated), emitting a newline for
+            // <br> and nothing for everything else.
+            int gt = raw.IndexOf('>', i + 1);
+            int end = gt < 0 ? raw.Length : gt + 1;
+            if (IsLineBreak(raw.AsSpan(i + 1, (gt < 0 ? raw.Length : gt) - i - 1)))
+            {
+                sb.Append('\n');
+            }
+            i = end;
         }
 
         return DecodeEntities(sb.ToString()).Trim();
+    }
+
+    /// <summary>
+    /// True when the tag body (between <c>&lt;</c> and <c>&gt;</c>) is a <c>br</c>, self-closing or not.
+    /// </summary>
+    private static bool IsLineBreak(ReadOnlySpan<char> tagBody)
+    {
+        var body = tagBody.Trim().TrimEnd('/').Trim();
+        return body.Equals("br", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string DecodeEntities(string s)
