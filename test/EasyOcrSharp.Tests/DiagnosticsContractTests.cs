@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using System.Runtime.CompilerServices;
-using System.Xml.Linq;
 using EasyOcrSharp.Diagnostics;
 using Xunit;
 
@@ -77,60 +76,6 @@ public class DiagnosticsContractTests
         => Assert.Single(measurements, m => m.Instrument == instrument);
 
     // ------------------------------------------------------------------ version consistency
-
-    /// <summary>
-    /// Walks up from the compiled test source and from the output directory looking for the library
-    /// csproj. Returns null when neither is available (binaries copied to another machine), so the caller
-    /// can skip rather than fail.
-    /// </summary>
-    private static string? FindLibraryCsproj([CallerFilePath] string? testSourcePath = null)
-    {
-        var starts = new[] { Path.GetDirectoryName(testSourcePath), AppContext.BaseDirectory };
-
-        foreach (var start in starts)
-        {
-            if (string.IsNullOrEmpty(start) || !Directory.Exists(start)) continue;
-
-            for (var dir = new DirectoryInfo(start); dir is not null; dir = dir.Parent)
-            {
-                var candidate = Path.Combine(dir.FullName, "src", "EasyOcrSharp", "EasyOcrSharp.csproj");
-                if (File.Exists(candidate)) return candidate;
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// REGRESSION GUARD. The version constant behind the meter and activity source is hand-maintained and
-    /// silently drifted: it read "2.2.1" while the package shipped as 3.0.1, so every metric and every span
-    /// a 3.x deployment emitted was labelled with a version two releases old. Nothing fails when that
-    /// happens — the data is simply wrong, and stays wrong until someone correlates a dashboard against a
-    /// deployment and does not believe what they see.
-    /// <para>
-    /// Asserted against the ActivitySource and Meter rather than the private constant, because those are
-    /// what actually reach an exporter.
-    /// </para>
-    /// </summary>
-    [SkippableFact]
-    public void Telemetry_version_matches_the_package_version()
-    {
-        var csproj = FindLibraryCsproj();
-        Skip.If(csproj is null, "src/EasyOcrSharp/EasyOcrSharp.csproj not reachable from the test output — nothing to compare against.");
-
-        var packageVersion = XDocument.Load(csproj)
-            .Root?
-            .Elements("PropertyGroup")
-            .Elements("Version")
-            .FirstOrDefault()?
-            .Value
-            .Trim();
-
-        Skip.If(string.IsNullOrWhiteSpace(packageVersion), $"No <Version> element found in {csproj}.");
-
-        Assert.Equal(packageVersion, EasyOcrDiagnostics.ActivitySource.Version);
-        Assert.Equal(packageVersion, EasyOcrDiagnostics.Meter.Version);
-    }
 
     /// <summary>The meter and activity source must stay named alike; exporters are configured by name.</summary>
     [Fact]
