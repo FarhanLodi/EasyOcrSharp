@@ -312,7 +312,7 @@ internal static partial class ExecutionProviderResolver
         "The CUDA provider library is deployed with this application, but the ONNX Runtime that loaded has " +
         "no CUDA support compiled in. That is the NuGet native-asset conflict between Microsoft.ML.OnnxRuntime " +
         "(CPU) and Microsoft.ML.OnnxRuntime.Gpu: both ship the same 'onnxruntime' native library and the CPU copy " +
-        "won. EasyOcrSharp.Gpu 3.1.0 and later replace it with the GPU copy during build and publish, unless " +
+        "won. EasyOcrSharp.Gpu 3.1.1 and later replace it with the GPU copy during build and publish, unless " +
         "EasyOcrSharpGpuPreferGpuRuntime is set to false. On an older EasyOcrSharp.Gpu, upgrade it, or add " +
         "<PackageReference Include=\"Microsoft.ML.OnnxRuntime\" Version=\"(the version EasyOcrSharp uses)\" " +
         "ExcludeAssets=\"native\" /> to the application project so only the GPU package supplies the runtime.";

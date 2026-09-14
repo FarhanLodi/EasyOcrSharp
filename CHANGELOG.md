@@ -2,7 +2,7 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
-## Unreleased
+## 3.1.1
 
 ### Document structure engine — mirrors PaddleOcrNet 2.0.3, 2.0.4 and 2.1.0
 
