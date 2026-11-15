@@ -1,4 +1,5 @@
 using EasyOcrSharp.Structure.Engine.Models;
+using EasyOcrSharp.Structure.Preprocess;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyImageSharp;
@@ -39,16 +40,6 @@ namespace EasyOcrSharp.Structure.Layout;
 /// </summary>
 internal sealed class PicoDetLayoutDetector : ILayoutDetector
 {
-    /// <summary>
-    /// ImageNet mean, applied to <c>pixel/255</c> in RGB channel order (PaddleX <c>NormalizeImage</c>).
-    /// </summary>
-    private static readonly float[] Mean = { 0.485f, 0.456f, 0.406f };
-
-    /// <summary>
-    /// ImageNet std, applied after mean-subtraction in RGB channel order.
-    /// </summary>
-    private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
-
     /// <summary>
     /// Fallback square input edge when the graph declares a dynamic spatial dimension (PP-DocLayout-S default).
     /// </summary>
@@ -167,23 +158,10 @@ internal sealed class PicoDetLayoutDetector : ILayoutDetector
         int plane = h * w;
         Memory<float> bufferMem = tensor.Buffer;
 
-        resized.ProcessPixelRows(accessor =>
-        {
-            var buffer = bufferMem.Span;
-            for (int y = 0; y < h; y++)
-            {
-                var row = accessor.GetRowSpan(y);
-                int rowOffset = y * w;
-                for (int x = 0; x < w; x++)
-                {
-                    var px = row[x];
-                    int idx = rowOffset + x;
-                    buffer[idx] = (px.R / 255f - Mean[0]) / Std[0];             // R channel
-                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];      // G channel
-                    buffer[2 * plane + idx] = (px.B / 255f - Mean[2]) / Std[2];  // B channel
-                }
-            }
-        });
+        // (v/255 - mean) / std in RGB order -> channels 0/1/2, via the bit-identical lookup tables.
+        PlanarTensorPacker.Pack(
+            resized, 0, 0, w, h, bufferMem, w, plane,
+            PlanarTensorPacker.ImageNet0, PlanarTensorPacker.ImageNet1, PlanarTensorPacker.ImageNet2, bgr: false);
 
         return tensor;
     }

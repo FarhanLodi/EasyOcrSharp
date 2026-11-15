@@ -224,4 +224,19 @@ internal static class CharacterDictionary
         vocab.Add(" ");
         return vocab;
     }
+
+    /// <summary>
+    /// Returns the index of the space class in <paramref name="vocab"/> (the last <c>" "</c> entry — every
+    /// supported dictionary convention puts it last), or −1 when the vocabulary has none.
+    /// </summary>
+    /// <param name="vocab">The CTC vocabulary (index 0 is the blank).</param>
+    public static int FindSpaceClass(IReadOnlyList<string> vocab)
+    {
+        ArgumentNullException.ThrowIfNull(vocab);
+        for (int i = vocab.Count - 1; i > 0; i--)
+        {
+            if (vocab[i] == " ") return i;
+        }
+        return -1;
+    }
 }

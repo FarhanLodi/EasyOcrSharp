@@ -63,16 +63,27 @@ internal sealed record StructureEngineOptions
     public int? InterOpNumThreads { get; init; }
 
     /// <summary>
+    /// ONNX Runtime <c>session.intra_op.allow_spinning</c> (null = runtime default).
+    /// </summary>
+    public bool? AllowIntraOpSpinning { get; init; }
+
+    /// <summary>
+    /// CUDA provider <c>cudnn_conv_algo_search</c> (null = runtime default).
+    /// </summary>
+    public EasyOcrSharp.Services.CudnnConvolutionAlgorithmSearch? CudnnConvAlgoSearch { get; init; }
+
+    /// <summary>
     /// How model files are downloaded and cached.
     /// </summary>
     public ModelDownloadOptions Download { get; init; } = new();
 
     /// <summary>
-    /// Run the text-line orientation classifier (PaddleOCR's <c>use_textline_orientation</c>). When false,
-    /// the classifier model is never loaded. Can also be requested per call via
-    /// <see cref="RecognitionOptions.UseTextLineOrientation"/>.
+    /// Run the text-line orientation classifier (PaddleOCR's <c>use_textline_orientation</c>). Null (unset)
+    /// keeps the per-call default (on); <c>false</c> or <c>true</c> becomes the default for every call that
+    /// does not set <see cref="RecognitionOptions.UseTextLineOrientation"/> explicitly, and an explicit
+    /// per-call value always wins (see <see cref="StructureTextEngine.ResolveUseTextLineOrientation"/>).
     /// </summary>
-    public bool UseTextLineOrientation { get; init; }
+    public bool? UseTextLineOrientation { get; init; }
 
     /// <summary>
     /// Log the GPU upgrade hint as a one-time startup warning (default false). The hint string is always

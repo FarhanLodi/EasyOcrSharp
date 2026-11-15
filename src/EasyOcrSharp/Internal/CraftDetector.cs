@@ -3,6 +3,7 @@ using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
+using EasyImageSharp.Processing;
 
 namespace EasyOcrSharp.Internal;
 
@@ -24,11 +25,84 @@ internal sealed class CraftDetector : IDisposable
     }
 
     /// <summary>
-    /// Returns one polygon per detected text region using the supplied <see cref="DetectionOptions"/>.
+    /// Returns one polygon per detected text region using the supplied <see cref="DetectionOptions"/>. With
+    /// none of the opt-in passes enabled (<see cref="DetectionOptions.TileLargeImages"/>,
+    /// <see cref="DetectionOptions.MinTextHeight"/>, <see cref="DetectionOptions.EnhanceContrast"/>) this is
+    /// exactly EasyOCR's single pass; otherwise see <see cref="DetectWithPasses"/>. Polygons are always in
+    /// <paramref name="image"/>'s coordinates.
     /// </summary>
-    public IReadOnlyList<OcrPoint[]> Detect(Image<Rgb24> image, DetectionOptions options)
-        => Detect(image, options.CanvasSize, options.MagRatio, options.TextThreshold,
+    public IReadOnlyList<OcrPoint[]> Detect(Image<Rgb24> image, DetectionOptions options, CancellationToken cancellationToken = default)
+        => options.UsesExtraPasses
+            ? DetectWithPasses(image, options, cancellationToken)
+            : DetectOnce(image, options, options.MagRatio);
+
+    /// <summary>One EasyOCR detection pass at <paramref name="magRatio"/> with the other thresholds from <paramref name="options"/>.</summary>
+    private IReadOnlyList<OcrPoint[]> DetectOnce(Image<Rgb24> image, DetectionOptions options, double magRatio)
+        => Detect(image, options.CanvasSize, magRatio, options.TextThreshold,
                   options.LinkThreshold, options.LowText, options.MinSize);
+
+    /// <summary>
+    /// The opt-in passes. The contrast-enhanced copy (when requested) feeds every pass but only the detector —
+    /// it is a per-pixel transform, so coordinates are unchanged by it. A page the canvas cap would shrink
+    /// substantially is detected in tiles when tiling is on (the small-text rescue does not apply to it: the
+    /// tiles already run at full magnification). Otherwise one normal pass runs, followed by a magnified
+    /// re-detection when the typical text is shorter than <see cref="DetectionOptions.MinTextHeight"/>, whose
+    /// boxes replace the first pass's unless it found nothing.
+    /// </summary>
+    private IReadOnlyList<OcrPoint[]> DetectWithPasses(Image<Rgb24> image, DetectionOptions options, CancellationToken cancellationToken)
+    {
+        using Image<Rgb24>? enhanced = options.EnhanceContrast ? CreateContrastEnhancedCopy(image) : null;
+        var source = enhanced ?? image;
+
+        if (options.TileLargeImages
+            && DetectionTiling.ShouldTile(source.Width, source.Height, options.CanvasSize, options.MagRatio, out int tileLength))
+        {
+            return DetectTiled(source, options, tileLength, cancellationToken);
+        }
+
+        var polygons = DetectOnce(source, options, options.MagRatio);
+        if (options.MinTextHeight <= 0) return polygons;
+
+        int longSide = Math.Max(source.Width, source.Height);
+        double magnification = polygons.Count == 0
+            ? DetectionTiling.EmptyRetryMagnification(longSide, options.CanvasSize, options.MagRatio)
+            : DetectionTiling.RescueMagnification(
+                DetectionTiling.MedianShortSide(polygons), options.MinTextHeight, longSide, options.CanvasSize, options.MagRatio);
+        if (magnification <= 0) return polygons;
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var rescued = DetectOnce(source, options, magnification);
+        return rescued.Count > 0 ? rescued : polygons;
+    }
+
+    /// <summary>
+    /// <see cref="DetectionOptions.TileLargeImages"/>: detects each tile of the grid at full magnification,
+    /// shifts its boxes into page coordinates and merges the overlaps (<see cref="DetectionTiling.Merge"/>).
+    /// </summary>
+    private IReadOnlyList<OcrPoint[]> DetectTiled(Image<Rgb24> image, DetectionOptions options, int tileLength, CancellationToken cancellationToken)
+    {
+        var tiles = DetectionTiling.PlanGrid(image.Width, image.Height, tileLength, DetectionTiling.TileOverlap);
+        var candidates = new List<DetectionTiling.TileCandidate>();
+        for (int t = 0; t < tiles.Count; t++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var tile = tiles[t];
+            using var crop = image.Clone(ctx => ctx.Crop(new Rectangle(tile.X, tile.Y, tile.Width, tile.Height)));
+            foreach (var polygon in DetectOnce(crop, options, options.MagRatio))
+            {
+                bool touchesCut = DetectionTiling.TouchesCut(OcrBoundingBox.FromPoints(polygon), tile);
+                candidates.Add(new DetectionTiling.TileCandidate(DetectionTiling.Offset(polygon, tile.X, tile.Y), t, touchesCut));
+            }
+        }
+        return DetectionTiling.Merge(candidates);
+    }
+
+    /// <summary>
+    /// <see cref="DetectionOptions.EnhanceContrast"/>: a background-normalized (auto radius), 0.5–99.5
+    /// percentile contrast-stretched copy of <paramref name="image"/>, same size. The caller owns it.
+    /// </summary>
+    internal static Image<Rgb24> CreateContrastEnhancedCopy(Image<Rgb24> image)
+        => image.Clone(ctx => ctx.BackgroundNormalize(0).ContrastStretch(0.5f, 99.5f));
 
     /// <summary>
     /// Returns one polygon per detected text region. Each polygon has 4 corners

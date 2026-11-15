@@ -23,4 +23,11 @@ internal sealed class StructureResultDto
     /// The analyzed blocks in reading order.
     /// </summary>
     public IReadOnlyList<StructureBlockDto> Blocks { get; init; } = Array.Empty<StructureBlockDto>();
+
+    /// <summary>
+    /// Source OCR lines no single block owns (see <see cref="StructureResult.OrphanLines"/>); omitted when
+    /// there are none.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<EasyOcrSharp.Models.OcrLine>? OrphanLines { get; init; }
 }

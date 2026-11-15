@@ -2,6 +2,192 @@
 
 All notable changes to EasyOcrSharp are documented here.
 
+## 3.2.0
+
+Accuracy options for hard pages, an opt-in PP-OCRv5 engine for plain OCR, born-digital PDF text, the
+data-extraction helpers PaddleOcrNet 2.2.0 introduced, the structure engine brought up to PaddleOcrNet
+2.4.0, and EasyImageSharp 1.2.0. Every new feature is opt-in and no public type moved. Three defaults
+change behaviour; they are listed under *Behaviour changes to be aware of*.
+
+### Added — opt-in PP-OCRv5 engine for plain OCR
+
+- **`RecognitionOptions.Engine`** (`RecognitionEngine.EasyOcr`, the default and unchanged, or
+  `RecognitionEngine.PpOcrV5`) runs `ExtractTextFromImage` (every overload), `ExtractTextStreamAsync`,
+  `RecognizeRegionsAsync` and `DetectRegionsAsync` on PaddleOCR's PP-OCRv5 DB detector, text-line
+  orientation classifier and SVTR recognizers. Results are the same `OcrResult`/`OcrLine` types.
+- One set of PP-OCRv5 sessions per service, shared with `AnalyzeDocumentAsync`. The service's execution
+  provider, thread limits, model cache and downloads, `MaxImagePixels`, concurrency governor, metrics,
+  tracing, cancellation and disposal all apply.
+- EasyOCR language codes map to PP-OCRv5 packs: `en`/`ch_sim`/`ch_tra`/`ja` use the default pack; Korean,
+  Arabic-script, Cyrillic, Devanagari, Latin-script, Thai, Tamil, Telugu and Greek (`el`) each use a script
+  pack. A request spanning several packs reads each line with every pack and keeps the most confident
+  reading, except that a script pack's reading carrying a letter with no Latin look-alike beats a Latin
+  reading within 0.10 confidence (see the structure-engine fix below). `bn`, `as`, `mni`, `kn` (no pack),
+  `vi` (the PP-OCRv5 Latin dictionary has none of Vietnamese's tone-marked vowels) and custom recognizers
+  throw `ArgumentException`.
+- Measured against the default engine (CPU, warm, interleaved): on the 100-page synthetic corpus both
+  recover 141 of 144 probe strings and PP-OCRv5 is 2.7× faster (median 2.1 s vs 5.8 s per page); a
+  table page's CER falls from 0.70 to 0, the six-language test page from 0.74 to 0, and word recall on
+  a sign collage rises from 0.47 to 0.98 and on a scanned form from 0.17 to 0.80. On 20 real sign
+  panels it is better on Cyrillic, Han, Arabic and Devanagari and reads Greek. It is weaker on rotated
+  and perspective-distorted pages (3 of 6 banners vs 6 of 6 — add `DocumentOrientation` or
+  `DetectOrientation`), drops some word spaces on receipts, can add a stray CJK glyph to English-only
+  signs (`en` uses the default Chinese/English pack), and missed a line on one Korean sign. Measure on
+  your own documents before switching.
+- Honoured: region, preprocessing (deskew, fax correction, orientation sweep, document orientation/unwarp),
+  grouping including paragraphs, reading direction, minimum confidence, allow/blocklists, auto-detection,
+  `WordLevelDetail` (word boxes from the CTC timesteps) and the new detection opt-ins below. CRAFT
+  thresholds, beam decoders, the contrast retry and `RotationInfo` don't apply; the option list is on
+  `RecognitionOptions.Engine`.
+- An engine-comparison benchmark (`dotnet test --filter Benchmark=EngineComparison`) compares both engines
+  interleaved on the 100-page corpus, the real test assets and 20 sign panels covering Han, Kana, Hangul,
+  Cyrillic, Devanagari, Arabic, Thai, Greek and accented Latin, and writes Markdown and JSON reports.
+
+### Added — detection for hard pages (both engines)
+
+- **`DetectionOptions.TileLargeImages`** (default off): pages that `CanvasSize` would shrink below 0.75× are
+  detected in overlapping full-resolution tiles — strips for tall receipts and wide banners, a grid when
+  both sides are large. Duplicates in the overlaps are dropped and words cut by a seam re-joined before line
+  grouping.
+- **`DetectionOptions.MinTextHeight`** (default 0, off): when the typical detected text is shorter than this,
+  detection repeats magnified (at most 3×, within `CanvasSize`); an empty page under 1,500 px is retried at
+  2×. For screenshots, faxes and low-DPI photos.
+- **`DetectionOptions.EnhanceContrast`** (default off): detection runs on a background-normalized,
+  contrast-stretched copy while recognition reads the original pixels. For faded or unevenly lit scans.
+- **`PreprocessingOptions.CorrectNonSquarePixels`** (default **on**): pages whose metadata declares
+  non-square pixels (e.g. 204×98 DPI faxes) are resampled to square pixels before OCR; boxes,
+  `SourceWidth` and `SourceHeight` are reported on the original grid. Images with square or no resolution
+  metadata, or an implausible ratio above 4:1, take the unchanged path. A fax turned sideways by EXIF
+  orientation is corrected along the right axis.
+- **`OcrResult.DeskewAngle`**: the clockwise rotation deskew applied (0 when the page stayed straight);
+  omitted from JSON when 0.
+
+### Added — PDF
+
+- **Embedded text layers.** `PdfOcrOptions.TextLayer` (`PdfTextLayerMode.Ignore` — default,
+  `PreferEmbedded`, `Auto`) reads born-digital pages from PDFium instead of OCR: exact text at confidence
+  1.0, with lines and words in the same pixel space OCR reports. A quality gate (≥ 20 characters, < 5 %
+  replacement/control/private-use, ≥ 60 % letters, digits or combining marks) sends pages with broken
+  `/ToUnicode` maps to OCR; `Auto` also OCRs pages whose text covers under 1 % of the page.
+  `PdfPageResult.Source` says which path produced each page. Embedded pages honour grouping, word detail,
+  region and reading direction, and handle right-to-left text and PDFs drawn at `/F1 1 Tf` with a scaled
+  text matrix.
+- **Auto render DPI.** `PdfOcrOptions.Dpi = PdfOcrOptions.AutoDpi` (0) renders each page at
+  `clamp(CanvasSize / longest side in inches, 150, 400)` (Letter 232, A4 218), following a raised
+  `DetectionOptions.CanvasSize`. `PdfPageResult.Dpi` reports the value used. The default stays 200.
+- **Streaming.** `ExtractTextFromPdfPagesAsync` (path, bytes or `Stream`) yields pages on demand, so breaking
+  out stops rendering.
+- **`Stream` overloads** for `ExtractTextFromPdfAsync` and `CreateSearchablePdfAsync` (input and output);
+  streams need not be seekable and are not disposed.
+- Searchable PDFs built from born-digital pages carry that page's own text as its single invisible layer.
+
+### Added — extracting data from results (`EasyOcrSharp.Extraction`)
+
+- **Pattern extraction with page positions.** `OcrResult.FindMatches` with the built-in `OcrPatterns`
+  (e-mail, URL, phone, date, amount, IBAN mod-97, payment card Luhn, percentage) or your own regex/pattern
+  returns the matched text, a normalized form, its line and a box — the union of character boxes when the
+  result has `WordLevelDetail.Characters`, otherwise an estimate. Look-alikes such as `O` for `0` are
+  accepted only where a checksum confirms the fix; `Value` is never altered.
+- **Quality helpers.** `GetQuality` (mean, character-weighted and minimum confidence, low-confidence counts)
+  and `GetLinesForReview`.
+- **MRZ parsing.** `MrzParser` reads ICAO 9303 TD1/TD2/TD3 zones (passports, ID cards, MRV visas), corrects
+  misreads by field position and verifies every check digit. The document number is repaired only by the
+  smallest unique change, because the 7-3-1 scheme cannot tell `L` from `1`.
+  `MrzParser.RecommendedRecognitionOptions` restricts recognition to the MRZ alphabet.
+- **Layout-preserving text.** `ToLayoutText` renders a result like `pdftotext -layout`: aligned columns,
+  CJK at two columns wide, right-to-left lines right-aligned.
+- **Zone (template) OCR.** `RecognizeZonesAsync` reads named regions in pixels or page fractions, each
+  detected normally or read as a single line, with its own allowlist; `ZoneOcrResult.ToValueMap()` gives
+  name → text.
+- **Model pre-download.** `EasyOcrModels.DownloadAsync` fills the cache for given languages and model sets
+  (OCR, document preprocessing, handwriting, document analysis) and returns a per-file report;
+  `EnsureSuccess()` fails a build step. `EasyOcrModels.CheckCache` verifies a pre-seeded cache without
+  touching the network.
+
+### Added — runtime and CLI
+
+- **`EasyOcrServiceOptions.AllowIntraOpSpinning`** and **`EasyOcrServiceOptions.CudnnConvAlgoSearch`**
+  (new `CudnnConvolutionAlgorithmSearch` enum: `Exhaustive`/`Heuristic`/`Default`). Null keeps ONNX
+  Runtime's defaults. They apply to every session the service builds, including the PP-OCRv5 and
+  document-structure engine.
+- CLI: `--engine easyocr|ppocrv5`, `--text-layer ignore|prefer|auto` and `--dpi auto` on `scan` and `pdf`.
+
+### Fixed — plain OCR
+
+- **Consecutive lines merged into one unreadable box, part 2.** 3.1.1 bounded the tilted-line rule in line
+  grouping by one line height, but two layouts still slipped through. Tightly set text puts the next line
+  *under* one line height below (`Monthly_Report_With_Image.pdf`: lines 33 px apart, 31 px boxes, so two body
+  lines came back as `stopadyeroesbltsrooghavredheitepanting…`). On a rotated page the next line's right
+  end overlaps this line's left end (`005_plain_text.png`, rotated ~1.5°, returned only its banner). The
+  rule compared a box with whichever word of the line sorted lowest, often at the far end of the page. A
+  box now joins a tilted line when it lies on the line's own fitted course; a line of one box keeps the
+  neighbour test and must also share a quarter of its height with that box. Both pages now read every line,
+  and `005_plain_text.png` is no longer a known failure of the dataset benchmark.
+- **Tilted lines are cut along their slope.** A long line on a rotated page used to be cut as an
+  axis-aligned rectangle, which grows by `|slope| × width` (35 px on a 1300 px line tilted 1.5°, against
+  30 px text) and takes in the ends of the lines above and below. When the tilt adds more than a full line
+  height across a line, its region is now a parallelogram along the line, rectified before recognition.
+  Level and slightly tilted lines (such as scans under ~1°) keep exactly the rectangle they had.
+- **`Preprocessing.Deskew` coordinates.** Line, word and character boxes were returned on the rotated,
+  enlarged deskew canvas, landing right of and below their ink. They are now mapped back onto the input
+  image. Text and reading order are unchanged.
+- **`Region` with `Deskew`** was applied to the rotated canvas as if it were the input image; it is now
+  converted onto the canvas first.
+- **Word and character geometry with `Region` and `DetectOrientation`.** With `WordLevelDetail` on,
+  `OcrLine.Words`/`Characters` stayed in the crop's or the rotated pass's coordinates; they now follow their
+  line.
+- A canceled request now stops inside image decoding on every input path (file, stream, bytes, frames,
+  barcodes, redaction, document analysis) and surfaces as `OperationCanceledException`, never
+  `ImageTooLargeException`.
+
+### Document structure engine — mirrors PaddleOcrNet 2.2.0, 2.2.1, 2.3.0 and 2.4.0
+
+- **Fixed:** OCR lines without a single owning layout block (inside figures/charts, on empty ground, or the
+  original reading of a line straddling several blocks) are no longer dropped. They are kept in the new
+  **`StructureResult.OrphanLines`** and written to `ToJson()` only when present; Markdown is unchanged.
+- **Fixed:** with several recognizer packs in play (language auto-detection, or a multi-script request),
+  each line kept the most confident pack's reading — but confidences from different packs are not on one
+  scale, and the default pack reads Cyrillic, Greek, Arabic, Indic, Thai and Hangul words as confident
+  Latin look-alikes (a Russian `ВЫХОД` sign came back as `BbIXOA` at 0.969 against the Cyrillic pack's
+  correct 0.966). A reading containing a letter with no Latin twin now beats a Latin reading unless it is
+  more than 0.10 less confident. Readings made only of look-alike letters still compare on confidence.
+- Speedups designed to leave results bit-identical: faster DB post-processing, lookup-table input
+  normalization for the detector, layout, table, seal and orientation models, and a CTC decode that reads
+  the recognizer output in place.
+- Text-line orientation is classified in batches, crops are rectified in parallel, and on CPU up to two
+  recognition batches and the 180° confirmation pass run concurrently (DirectML/CUDA stay sequential).
+  Formulas are recognized beside the page OCR, and independent table and seal regions run concurrently.
+  Upright pages and table crops are no longer cloned. Peak memory is somewhat higher as a result.
+- Warm-up runs each structure model once, so the first request no longer pays kernel selection and arena
+  growth.
+- Internal engine fixes: reading order no longer splits a row at band edges and is skew-aware; deskewed
+  boxes map back onto the original image; diagnostics report the real library version; an oversized
+  detector input is rejected before it is resized.
+- **Kept different from PaddleOcrNet:** as in 3.1.1 (`en` on the default recognizer, right-to-left reading
+  order, per-call recognizer filters, keyed model caches). Not mirrored: PaddleOcrNet's Office inputs, hybrid
+  PDF fusion, calibrated routing, document recovery/verification, multi-page assembly, TensorRT, recognizer
+  residency limits and `UseLegacyResize`.
+
+### Changed — dependencies and imaging
+
+- EasyImageSharp 1.1.0 → **1.2.0**; Microsoft.ML.OnnxRuntime (and `EasyOcrSharp.Gpu`'s
+  Microsoft.ML.OnnxRuntime.Gpu) 1.30.0 → **1.31.1**; Microsoft.Extensions.* 10.0.12 → **10.0.14**. Tests:
+  Microsoft.NET.Test.Sdk 18.11.0, xunit.runner.visualstudio 4.0.1.
+- The TrOCR, document-orientation and full-size UVDoc input tensors are built with EasyImageSharp's
+  `ResizeToTensor`/`WriteTensor`, so no intermediate resized image is allocated; parity tests confirm every
+  value is bit-identical. The CRAFT and CRNN packers, and UVDoc pages shrunk by its memory cap, keep their
+  existing code: the fused resize is single-threaded on EasyImageSharp 1.2.0 and measured 1.6–2.7× slower
+  than the parallel `Resize` there.
+
+### Behaviour changes to be aware of
+
+- `PreprocessingOptions.CorrectNonSquarePixels` is **on** by default. It only acts on images whose resolution
+  metadata declares non-square pixels; set it to `false` for the previous behaviour.
+- With `Preprocessing.Deskew`, boxes are now on the image you passed, not the deskew canvas. Code that
+  compensated for the old offset should drop that compensation.
+- `StructureResult.ToJson()` gains an `OrphanLines` array on pages that have such lines.
+- CLI: `--dpi 0` used to be rejected and now means auto DPI.
+
 ## 3.1.1
 
 ### Document structure engine — mirrors PaddleOcrNet 2.0.3, 2.0.4 and 2.1.0

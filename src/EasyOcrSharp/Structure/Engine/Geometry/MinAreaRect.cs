@@ -78,7 +78,7 @@ internal static class MinAreaRect
     private static OcrPoint[] ConvexHull(ReadOnlySpan<OcrPoint> input)
     {
         var pts = input.ToArray();
-        Array.Sort(pts, (p, q) => p.X != q.X ? p.X.CompareTo(q.X) : p.Y.CompareTo(q.Y));
+        pts.AsSpan().Sort(new XThenYComparer());
 
         int n = pts.Length;
         var hull = new OcrPoint[2 * n];
@@ -100,6 +100,15 @@ internal static class MinAreaRect
 
         Array.Resize(ref hull, k - 1);
         return hull;
+    }
+
+    /// <summary>
+    /// Lexicographic (x, then y) ordering for the monotone chain, as a struct comparer so the sort is
+    /// devirtualized rather than paying a delegate call per comparison.
+    /// </summary>
+    private readonly struct XThenYComparer : IComparer<OcrPoint>
+    {
+        public int Compare(OcrPoint p, OcrPoint q) => p.X != q.X ? p.X.CompareTo(q.X) : p.Y.CompareTo(q.Y);
     }
 
     private static double Cross(OcrPoint o, OcrPoint a, OcrPoint b)

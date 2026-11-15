@@ -193,7 +193,7 @@ public sealed partial class EasyOcrService : IEasyOcrService
             throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var image = LoadGuarded(imageBytes.Span);
+        using var image = LoadGuarded(imageBytes.Span, cancellationToken);
         return await RunPipelineAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -285,6 +285,8 @@ public sealed partial class EasyOcrService : IEasyOcrService
         using var op = BeginOperation();
         ArgumentNullException.ThrowIfNull(image);
         options ??= RecognitionOptions.Default;
+        if (options.Engine != RecognitionEngine.EasyOcr)
+            return await DetectRegionsWithPaddleAsync(image, options, cancellationToken).ConfigureAwait(false);
 
         if (options.Region is not { } region)
         {
@@ -341,6 +343,8 @@ public sealed partial class EasyOcrService : IEasyOcrService
                 var sw = Stopwatch.StartNew();
 
                 var langs = ResolveLanguages(languages, allowEmpty: false);
+                if (options.Engine != RecognitionEngine.EasyOcr)
+                    return await RecognizeRegionsWithPaddleAsync(image, polygons, langs, options, sw, activity, recorder, token).ConfigureAwait(false);
                 if (polygons.Length == 0)
                 {
                     return BuildResult(Array.Empty<OcrLine>(), langs, sw, activity, image.Width, image.Height, options.ReadingDirection, recorder);
@@ -473,7 +477,15 @@ public sealed partial class EasyOcrService : IEasyOcrService
     {
         using var op = BeginOperation();
         options ??= RecognitionOptions.Default;
+        if (options.Engine != RecognitionEngine.EasyOcr)
+            return await RunPaddlePipelineCoreAsync(image, languages, options, recorder, activity, cancellationToken).ConfigureAwait(false);
         var sw = Stopwatch.StartNew();
+
+        // Non-square pixels (204×98 DPI fax pages): OCR a square-pixel copy and scale every coordinate back
+        // onto the caller's grid at the end. Null for square or unknown pixels, and then everything below runs
+        // on the caller's own image exactly as it does with the option off.
+        using var squared = CreateSquarePixelInput(image, options);
+        var input = squared ?? image;
 
         // Model-based document preprocessing (PP-LCNet orientation / UVDoc unwarp) runs first, so every
         // later stage — including the brute-force DetectOrientation fallback — sees the corrected page.
@@ -481,28 +493,37 @@ public sealed partial class EasyOcrService : IEasyOcrService
         Image<Rgb24>? docCorrected = null;
         try
         {
+            int docRotation = 0;
             if (options.Preprocessing.DocumentOrientation || options.Preprocessing.DocumentUnwarp)
             {
                 var (corrected, rotation) = await _docPreprocess.ApplyAsync(
-                    image, options.Preprocessing.DocumentOrientation, options.Preprocessing.DocumentUnwarp, cancellationToken).ConfigureAwait(false);
+                    input, options.Preprocessing.DocumentOrientation, options.Preprocessing.DocumentUnwarp, cancellationToken).ConfigureAwait(false);
                 docCorrected = corrected;
+                docRotation = rotation;
                 if (rotation != 0)
                     _logger?.LogInformation("Document orientation corrected by {Degrees}° clockwise", rotation);
             }
-            var working = docCorrected ?? image;
+            var working = docCorrected ?? input;
+            var aspect = SquarePixelMappingFor(image, squared, docRotation);
+            var workingOptions = WithRegionOnSquarePixels(options, aspect);
 
-            (IReadOnlyList<OcrLine> Lines, string[] Languages) outcome;
+            (IReadOnlyList<OcrLine> Lines, string[] Languages, DeskewCanvas? Deskew, float DeskewAngle) outcome;
 
             if (options.Preprocessing.DetectOrientation)
             {
-                outcome = await RecognizeBestOrientationAsync(working, languages, options, cancellationToken).ConfigureAwait(false);
+                var (lines, langs, deskewAngle) = await RecognizeBestOrientationAsync(working, languages, workingOptions, cancellationToken).ConfigureAwait(false);
+                outcome = (lines, langs, null, deskewAngle);
             }
             else
             {
-                outcome = await CoreAsync(working, languages, options, cancellationToken).ConfigureAwait(false);
+                var (lines, langs, deskew) = await CoreAsync(working, languages, workingOptions, cancellationToken).ConfigureAwait(false);
+                outcome = (lines, langs, deskew, deskew?.RotationDegrees ?? 0f);
             }
 
-            return BuildResult(outcome.Lines, outcome.Languages, sw, activity, working.Width, working.Height, options.ReadingDirection, recorder);
+            // Reading order is decided in the frame OCR ran in — a deskewed canvas reads straight, where the
+            // tilted page would band its rows wrongly — and the coordinates are mapped onto the caller's image after.
+            var result = BuildResult(outcome.Lines, outcome.Languages, sw, activity, working.Width, working.Height, options.ReadingDirection, recorder);
+            return ToCallerFrame(result, outcome.Deskew, outcome.DeskewAngle, aspect);
         }
         finally
         {
@@ -546,14 +567,17 @@ public sealed partial class EasyOcrService : IEasyOcrService
         };
     }
 
-    /// <summary>Runs OCR at 0/90/180/270° and keeps the orientation with the strongest result.</summary>
-    private async Task<(IReadOnlyList<OcrLine>, string[])> RecognizeBestOrientationAsync(
+    /// <summary>
+    /// Runs OCR at 0/90/180/270° and keeps the orientation with the strongest result, mapped onto
+    /// <paramref name="image"/>. Also returns the winning pass's deskew rotation (0 without deskew).
+    /// </summary>
+    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages, float DeskewAngle)> RecognizeBestOrientationAsync(
         Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
     {
         var langsList = languages.ToArray();
         var noOrient = options with { Preprocessing = options.Preprocessing with { DetectOrientation = false } };
 
-        (IReadOnlyList<OcrLine> Lines, string[] Langs)? best = null;
+        (IReadOnlyList<OcrLine> Lines, string[] Langs, DeskewCanvas? Deskew)? best = null;
         double bestScore = double.NegativeInfinity;
         int bestDegrees = 0;
 
@@ -563,13 +587,13 @@ public sealed partial class EasyOcrService : IEasyOcrService
             Image<Rgb24>? rotated = degrees == 0 ? null : ImagePreprocessor.RotateRightAngle(image, degrees);
             try
             {
-                var (lines, langs) = await CoreAsync(rotated ?? image, langsList, noOrient, ct).ConfigureAwait(false);
+                var (lines, langs, deskew) = await CoreAsync(rotated ?? image, langsList, noOrient, ct).ConfigureAwait(false);
                 double score = lines.Where(l => !string.IsNullOrWhiteSpace(l.Text)).Sum(l => l.Confidence * l.Text.Length);
                 _logger?.LogInformation("Orientation {Deg}° scored {Score:F1}", degrees, score);
                 if (score > bestScore)
                 {
                     bestScore = score;
-                    best = (lines, langs);
+                    best = (lines, langs, deskew);
                     bestDegrees = degrees;
                 }
             }
@@ -581,15 +605,17 @@ public sealed partial class EasyOcrService : IEasyOcrService
 
         if (best is not { } chosen)
         {
-            return (Array.Empty<OcrLine>(), langsList);
+            return (Array.Empty<OcrLine>(), langsList, 0f);
         }
 
-        // The winning pass detected its boxes in the rotated copy. Map them back into the original image's
-        // coordinate space so they stay anchored to the image the caller passed — and so they agree with the
-        // SourceWidth/SourceHeight reported for the result (which are the un-rotated dimensions). This mirrors
-        // EasyOCR, which rotates coordinates back to the source frame after its orientation sweep.
-        var mapped = MapLinesToOriginalOrientation(chosen.Lines, bestDegrees, image.Width, image.Height);
-        return (mapped, chosen.Langs);
+        // The winning pass detected its boxes in the rotated copy (on its deskewed canvas, when deskew
+        // rotated it). Map them back into the original image's coordinate space so they stay anchored to the
+        // image the caller passed — and so they agree with the SourceWidth/SourceHeight reported for the
+        // result (which are the un-rotated dimensions). This mirrors EasyOCR, which rotates coordinates back
+        // to the source frame after its orientation sweep.
+        var upright = chosen.Deskew is { } canvas ? canvas.LinesToSource(chosen.Lines) : chosen.Lines;
+        var mapped = MapLinesToOriginalOrientation(upright, bestDegrees, image.Width, image.Height);
+        return (mapped, chosen.Langs, chosen.Deskew?.RotationDegrees ?? 0f);
     }
 
     /// <summary>
@@ -632,23 +658,41 @@ public sealed partial class EasyOcrService : IEasyOcrService
             {
                 BoundingPolygon = mapped,
                 BoundingBox = OcrBoundingBox.FromPoints(mapped),
+                // Word and character boxes came from the same rotated pass; left in its frame they landed on
+                // the wrong part of the page whenever the sweep picked a quarter or half turn.
+                Words = LineGeometry.Transform(line.Words, p => MapBack(p, degrees, width, height)),
+                Characters = LineGeometry.Transform(line.Characters, p => MapBack(p, degrees, width, height)),
             });
         }
 
         return result;
     }
 
-    /// <summary>Preprocess → resolve/auto-detect languages → region crop → recognize.</summary>
-    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages)> CoreAsync(
+    /// <summary>
+    /// Preprocess → resolve/auto-detect languages → region crop → recognize. When deskew rotated the page the
+    /// lines are on the deskewed canvas, and the returned <see cref="DeskewCanvas"/> maps them onto
+    /// <paramref name="image"/>; it is null otherwise.
+    /// </summary>
+    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages, DeskewCanvas? Deskew)> CoreAsync(
         Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
     {
         // Denoise / deskew / sharpen / binarize into a working image (orientation and the model-based
         // document steps are handled by the caller).
         bool needsPreprocess = options.Preprocessing.Denoise || options.Preprocessing.Deskew
             || options.Preprocessing.Sharpen || options.Preprocessing.Binarize;
-        Image<Rgb24> working = needsPreprocess ? ImagePreprocessor.Apply(image, options.Preprocessing) : image;
+        float deskewRotation = 0f;
+        Image<Rgb24> working = needsPreprocess ? ImagePreprocessor.Apply(image, options.Preprocessing, out deskewRotation) : image;
         try
         {
+            // The caller's region is in the unrotated image's frame; re-express it on the deskewed canvas.
+            DeskewCanvas? deskew = deskewRotation != 0f
+                ? new DeskewCanvas(deskewRotation, working.Width, working.Height, image.Width, image.Height)
+                : null;
+            if (deskew is { } canvas && options.Region is { } region)
+            {
+                options = options with { Region = canvas.RegionToCanvas(region) };
+            }
+
             string[] langs;
             if (options.AutoDetectLanguage)
             {
@@ -664,7 +708,7 @@ public sealed partial class EasyOcrService : IEasyOcrService
             }
 
             var lines = await RecognizeRegionsAsync(working, langs, options, ct).ConfigureAwait(false);
-            return (lines, langs);
+            return (lines, langs, deskew);
         }
         finally
         {
@@ -730,6 +774,9 @@ public sealed partial class EasyOcrService : IEasyOcrService
             {
                 BoundingPolygon = poly,
                 BoundingBox = new OcrBoundingBox(box.MinX + dx, box.MinY + dy, box.MaxX + dx, box.MaxY + dy),
+                // Word and character boxes were measured on the crop too.
+                Words = LineGeometry.Transform(line.Words, p => new OcrPoint(p.X + dx, p.Y + dy)),
+                Characters = LineGeometry.Transform(line.Characters, p => new OcrPoint(p.X + dx, p.Y + dy)),
             });
         }
         return translated;
@@ -857,17 +904,21 @@ public sealed partial class EasyOcrService : IEasyOcrService
         // decoding into the full pixel buffer.
         using var ms = new MemoryStream();
         await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
-        return LoadGuarded(ms.GetBuffer().AsSpan(0, (int)ms.Length));
+        return LoadGuarded(ms.GetBuffer().AsSpan(0, (int)ms.Length), ct);
     }
 
-    private Image<Rgb24> LoadGuarded(ReadOnlySpan<byte> bytes)
+    /// <summary>
+    /// Guards and decodes encoded bytes. <paramref name="ct"/> reaches the header read and the decoder, so
+    /// a canceled request stops decoding (as <see cref="OperationCanceledException"/>) rather than finishing it.
+    /// </summary>
+    private Image<Rgb24> LoadGuarded(ReadOnlySpan<byte> bytes, CancellationToken ct)
     {
         if (_maxImagePixels > 0)
         {
-            var info = Image.Identify(bytes);
+            var info = DecodeLimits.Identify(bytes, ct);
             GuardPixels(info.Width, info.Height);
         }
-        return DecodeLimits.Load(bytes, _maxImagePixels, MaxPixelsOption);
+        return DecodeLimits.Load(bytes, _maxImagePixels, MaxPixelsOption, ct);
     }
 
     /// <summary>The option a caller raises when an image is rejected for being too large.</summary>

@@ -23,7 +23,7 @@ public static class EasyOcrDiagnostics
 
     // Kept in step with <Version> in EasyOcrSharp.csproj: a stale value here silently mislabels every
     // metric and span the library emits, so a 3.x deployment reported itself as 2.2.1.
-    private const string Version = "3.1.1";
+    private const string Version = "3.2.0";
 
     /// <summary>Activity source for per-operation OCR spans.</summary>
     public static readonly ActivitySource ActivitySource = new(ActivitySourceName, Version);

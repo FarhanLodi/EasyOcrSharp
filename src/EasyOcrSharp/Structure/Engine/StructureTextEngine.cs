@@ -15,6 +15,7 @@ using EasyImageSharp.Processing;
 using OcrLine = EasyOcrSharp.Models.OcrLine;
 using OcrPoint = EasyOcrSharp.Models.OcrPoint;
 using OcrBoundingBox = EasyOcrSharp.Models.OcrBoundingBox;
+using OcrWord = EasyOcrSharp.Models.OcrWord;
 
 namespace EasyOcrSharp.Structure.Engine;
 
@@ -150,24 +151,28 @@ internal sealed class StructureTextEngine : IAsyncDisposable
         {
             if (options.UseDocOrientation || options.UseDocUnwarp)
             {
+                using var preprocessingStage = StructureDiagnostics.MeasureStage("document_preprocess");
                 var preprocessor = await GetOrLoadDocPreprocessorAsync(
                     options.UseDocOrientation, options.UseDocUnwarp, cancellationToken).ConfigureAwait(false);
                 if (preprocessor is not null)
                 {
-                    // Apply always returns a NEW image the caller owns (even when no stage changed pixels).
-                    var (processed, rotation) = preprocessor.Apply(image, options.UseDocOrientation, options.UseDocUnwarp);
-                    owned = processed;
-                    page = processed;
-                    appliedRotation = rotation;
-                    if (rotation != 0)
+                    // Apply returns the caller's image itself when no stage changed pixels (OwnsImage false);
+                    // only an image it created is ours to dispose.
+                    var preprocessed = preprocessor.Apply(image, options.UseDocOrientation, options.UseDocUnwarp);
+                    page = preprocessed.Image;
+                    if (preprocessed.OwnsImage) owned = preprocessed.Image;
+                    appliedRotation = preprocessed.RotationApplied;
+                    if (appliedRotation != 0)
                     {
-                        _logger?.LogInformation("Document orientation: page rotated {Deg}° clockwise to upright.", rotation);
+                        _logger?.LogInformation("Document orientation: page rotated {Deg}° clockwise to upright.", appliedRotation);
                     }
                 }
             }
 
             var detector = await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
-            var quads = detector.Detect(page, options.Detection);
+            IReadOnlyList<TextQuad> quads;
+            using (StructureDiagnostics.MeasureStage("detection"))
+                quads = detector.Detect(page, options.Detection);
             _logger?.LogInformation("DB detector located {Count} text regions", quads.Count);
             if (quads.Count == 0) return (Array.Empty<OcrLine>(), Array.Empty<string>(), appliedRotation);
 
@@ -218,7 +223,9 @@ internal sealed class StructureTextEngine : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var detector = await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
-        var quads = detector.Detect(image, detection);
+        IReadOnlyList<TextQuad> quads;
+        using (StructureDiagnostics.MeasureStage("detection"))
+            quads = detector.Detect(image, detection);
         if (quads.Count == 0) return Array.Empty<DetectedRegion>();
 
         var polygons = BoxNms.Reduce(quads.Select(q => q.ToOcrPoints()).ToArray(), detection.NmsIouThreshold);
@@ -268,62 +275,89 @@ internal sealed class StructureTextEngine : IAsyncDisposable
             if (fixedPack is null) return Array.Empty<OcrLine>();
         }
 
-        // Honor the per-call orientation flag even when the engine default left the classifier off; the
-        // classifier session is loaded on demand and reused thereafter.
+        // The per-call orientation flag wins when set explicitly; otherwise the service-level option applies
+        // when it was set. The classifier session is loaded on demand and reused thereafter.
         IAngleClassifier? classifier = null;
-        if (options.UseTextLineOrientation || _options.UseTextLineOrientation)
+        if (ResolveUseTextLineOrientation(options, _options.UseTextLineOrientation))
         {
             classifier = await GetOrLoadClassifierAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        // Rectify each quad into an upright crop. A null crop means the polygon was degenerate
-        // (sub-2px after rectification); skip it but keep the polygon→crop index mapping intact so
-        // recognition results line back up with their source polygons.
-        var crops = new List<Image<Rgb24>>(polygons.Count);
-        var cropPolygons = new List<OcrPoint[]>(polygons.Count);
-        // Indices into `crops` the orientation classifier flagged as upside-down, pending confirmation.
-        var flipCandidates = new List<int>();
+        int parallelism = BoundedParallel.ResolveDegree(options.MaxDegreeOfParallelism);
+        bool withWords = options.ReturnWordBoxes;
+
+        // Rectify each quad into an upright crop, in parallel (each polygon is independent and the page is
+        // only read). A null slot means the polygon was degenerate (sub-2px after rectification); it is
+        // skipped while the surviving crops keep their polygons' order, so recognition results line back up
+        // with their source polygons.
+        var slots = new Image<Rgb24>?[polygons.Count];
+        var slotGeometry = new CropGeometry[polygons.Count];
         try
         {
-            foreach (var poly in polygons)
+            BoundedParallel.For(polygons.Count, parallelism, cancellationToken, i =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 // rotateVertical: tall crops (h/w >= 1.5, i.e. vertical text lines) are rotated 90° CCW
                 // inside Rectify so the recognizer sees them horizontally — PaddleOCR's
                 // get_rotate_crop_image np.rot90 rule.
-                var crop = PerspectiveWarp.Rectify(image, poly, rotateVertical: true);
-                if (crop is null) continue;
+                var crop = PerspectiveWarp.Rectify(image, polygons[i], rotateVertical: true, out slotGeometry[i]);
+                if (crop is null) return;
 
                 // Optional white padding around the crop (GitHub issue #6): applied before the 180°
                 // classifier so classification and recognition see identical pixels.
                 if (options.CropPadding > 0)
                 {
-                    var padded = PadCrop(crop, options.CropPadding);
-                    crop.Dispose();
-                    crop = padded;
-                }
-
-                // Optional text-line orientation. The classifier's verdict is only a candidate: it is
-                // confirmed later by recognizing both orientations and keeping the more confident
-                // reading (see VerifyOrientationByRecognition), because a confidently-wrong flip
-                // destroys an upright line outright.
-                if (classifier is not null)
-                {
-                    var (rotated, score) = classifier.Classify(crop);
-                    if (rotated && score >= options.TextLineOrientationThreshold)
+                    try
                     {
-                        if (options.VerifyOrientationByRecognition)
-                            flipCandidates.Add(crops.Count);
-                        else
-                            crop.Mutate(ctx => ctx.Rotate(RotateMode.Rotate180));
+                        slots[i] = PadCrop(crop, options.CropPadding);
                     }
+                    finally
+                    {
+                        crop.Dispose();
+                    }
+                    return;
                 }
 
+                slots[i] = crop;
+            });
+
+            var crops = new List<Image<Rgb24>>(polygons.Count);
+            var cropPolygons = new List<OcrPoint[]>(polygons.Count);
+            var cropGeometry = new List<CropGeometry>(polygons.Count);
+            for (int i = 0; i < slots.Length; i++)
+            {
+                if (slots[i] is not { } crop) continue;
                 crops.Add(crop);
-                cropPolygons.Add(poly);
+                cropPolygons.Add(polygons[i]);
+                cropGeometry.Add(slotGeometry[i]);
             }
 
             if (crops.Count == 0) return Array.Empty<OcrLine>();
+
+            // Optional text-line orientation, classified in batches. The classifier's verdict is only a
+            // candidate: it is confirmed later by recognizing both orientations and keeping the more
+            // confident reading (see VerifyOrientationByRecognition), because a confidently-wrong flip
+            // destroys an upright line outright.
+            var flipCandidates = new List<int>();
+            var flippedInPlace = new bool[crops.Count];
+            if (classifier is not null)
+            {
+                var verdicts = classifier.Classify(crops, parallelism);
+                for (int i = 0; i < crops.Count; i++)
+                {
+                    var (rotated, score) = verdicts[i];
+                    if (!(rotated && score >= options.TextLineOrientationThreshold)) continue;
+
+                    if (options.VerifyOrientationByRecognition)
+                    {
+                        flipCandidates.Add(i);
+                    }
+                    else
+                    {
+                        crops[i].Mutate(ctx => ctx.Rotate(RotateMode.Rotate180));
+                        flippedInPlace[i] = true;
+                    }
+                }
+            }
 
             // A wrong page-level orientation verdict corrupts every line at once (PP-LCNet_x1_0_doc_ori
             // does misfire on upright pages), and the text-line classifier does not reliably flag the
@@ -338,20 +372,31 @@ internal sealed class StructureTextEngine : IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
 
             // Per-crop best reading: either from the single requested pack, or — when auto-detecting — the
-            // highest-confidence reading across all candidate packs.
-            IReadOnlyList<(string Text, float Confidence)> readings = auto
-                ? await RecognizeAutoAsync(crops, options, detectedLanguagesSink, cancellationToken).ConfigureAwait(false)
-                : ApplyPackPostProcessing(fixedPack!,
-                    (await GetOrLoadRecognizerAsync(fixedPack!, cancellationToken).ConfigureAwait(false)).Recognize(crops, options));
-
-            // Confirm the classifier's 180° verdicts. The flagged crops are recognized a second time
-            // upside-down and the more confident reading wins: a genuinely inverted line reads far better
-            // rotated, while a misfire on upright text reads far worse, so a wrong verdict costs nothing
-            // but the extra recognition of the flagged lines.
-            if (flipCandidates.Count > 0)
+            // highest-confidence reading across all candidate packs. The classifier's 180° verdicts are then
+            // confirmed: the flagged crops are recognized a second time upside-down and the more confident
+            // reading wins. On CPU both passes share the thread-safe session and run concurrently.
+            int concurrency = RecognitionBatchConcurrency(options);
+            IReadOnlyList<RecognizedText> readings;
+            if (flipCandidates.Count > 0 && concurrency > 1)
             {
-                readings = await ConfirmOrientationAsync(
-                    crops, readings, flipCandidates, options, auto, fixedPack, cancellationToken).ConfigureAwait(false);
+                var uprightTask = Task.Run(() => RecognizeCropsAsync(
+                    crops, options, auto, fixedPack, detectedLanguagesSink, concurrency, withWords, cancellationToken), cancellationToken);
+                var flippedTask = Task.Run(() => RecognizeFlippedAsync(
+                    crops, flipCandidates, options, auto, fixedPack, concurrency, withWords, cancellationToken), cancellationToken);
+                // WhenAll only completes once both passes have finished, so no pass can outlive the crops.
+                await Task.WhenAll(uprightTask, flippedTask).ConfigureAwait(false);
+                readings = CombineOrientation(uprightTask.Result, flippedTask.Result, flipCandidates);
+            }
+            else
+            {
+                readings = await RecognizeCropsAsync(
+                    crops, options, auto, fixedPack, detectedLanguagesSink, concurrency, withWords, cancellationToken).ConfigureAwait(false);
+                if (flipCandidates.Count > 0)
+                {
+                    var flipped = await RecognizeFlippedAsync(
+                        crops, flipCandidates, options, auto, fixedPack, concurrency, withWords, cancellationToken).ConfigureAwait(false);
+                    readings = CombineOrientation(readings, flipped, flipCandidates);
+                }
             }
 
             // Drop low-confidence / empty readings (PaddleOCR's drop_score), then keep each surviving
@@ -359,16 +404,20 @@ internal sealed class StructureTextEngine : IAsyncDisposable
             var lines = new List<OcrLine>(crops.Count);
             for (int i = 0; i < crops.Count && i < readings.Count; i++)
             {
-                var (text, confidence) = readings[i];
-                if (string.IsNullOrWhiteSpace(text) || confidence < options.DropScore) continue;
+                var reading = readings[i];
+                if (string.IsNullOrWhiteSpace(reading.Text) || reading.Confidence < options.DropScore) continue;
 
                 var poly = cropPolygons[i];
                 lines.Add(new OcrLine
                 {
-                    Text = text,
-                    Confidence = confidence,
+                    Text = reading.Text,
+                    Confidence = reading.Confidence,
                     BoundingPolygon = poly,
                     BoundingBox = OcrBoundingBox.FromPoints(poly),
+                    Words = withWords
+                        ? WordBoxBuilder.Build(reading, cropGeometry[i], crops[i].Width, crops[i].Height,
+                            options.CropPadding, flipped: flippedInPlace[i] || reading.Flipped)
+                        : Array.Empty<OcrWord>(),
                 });
             }
 
@@ -383,8 +432,46 @@ internal sealed class StructureTextEngine : IAsyncDisposable
         }
         finally
         {
-            foreach (var crop in crops) crop.Dispose();
+            foreach (var crop in slots) crop?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Resolves whether the text-line orientation classifier runs for a call: a value set explicitly on
+    /// <paramref name="options"/> wins; otherwise the service-level <paramref name="serviceDefault"/> applies
+    /// when it was set; otherwise the per-call default (on, the Python pipeline default) applies.
+    /// </summary>
+    /// <param name="options">The call's recognition options.</param>
+    /// <param name="serviceDefault">The service-level setting, or null when it was never set.</param>
+    internal static bool ResolveUseTextLineOrientation(RecognitionOptions options, bool? serviceDefault)
+        => options.UseTextLineOrientationSpecified
+            ? options.UseTextLineOrientation
+            : serviceDefault ?? options.UseTextLineOrientation;
+
+    /// <summary>
+    /// Upper bound on concurrently running recognition batches on the CPU provider when ONNX Runtime uses its
+    /// default intra-op thread pool (measured: more concurrent runs only contend for the same pool).
+    /// </summary>
+    private const int MaxCpuConcurrentBatches = 2;
+
+    /// <summary>
+    /// Upper bound on concurrently running recognition batches when the intra-op thread count is pinned.
+    /// </summary>
+    private const int MaxPinnedConcurrentBatches = 4;
+
+    /// <summary>
+    /// How many recognition batches may run at once on a shared session. Accelerated providers stay
+    /// sequential (DirectML requires it and CUDA gains little); on CPU it is bounded by
+    /// <see cref="RecognitionOptions.MaxDegreeOfParallelism"/> and by how many intra-op pools fit on the machine.
+    /// </summary>
+    private int RecognitionBatchConcurrency(RecognitionOptions options)
+    {
+        if (_activeProvider != OcrExecutionProvider.Cpu) return 1;
+
+        int cap = _options.IntraOpNumThreads is int intra and > 0
+            ? Math.Clamp(Environment.ProcessorCount / intra, 1, MaxPinnedConcurrentBatches)
+            : MaxCpuConcurrentBatches;
+        return Math.Clamp(BoundedParallel.ResolveDegree(options.MaxDegreeOfParallelism), 1, cap);
     }
 
     /// <summary>
@@ -398,15 +485,45 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     internal static (string Text, float Confidence) ChooseOrientation(
         (string Text, float Confidence) upright,
         (string Text, float Confidence) flipped)
+        => PreferFlipped(upright.Text, upright.Confidence, flipped.Text, flipped.Confidence) ? flipped : upright;
+
+    /// <summary>
+    /// The <see cref="ChooseOrientation"/> rule: true when the flipped reading should replace the upright one.
+    /// </summary>
+    private static bool PreferFlipped(string uprightText, float uprightConfidence, string flippedText, float flippedConfidence)
     {
-        if (string.IsNullOrWhiteSpace(flipped.Text)) return upright;
-        if (string.IsNullOrWhiteSpace(upright.Text)) return flipped;
-        return flipped.Confidence > upright.Confidence ? flipped : upright;
+        if (string.IsNullOrWhiteSpace(flippedText)) return false;
+        if (string.IsNullOrWhiteSpace(uprightText)) return true;
+        return flippedConfidence > uprightConfidence;
     }
 
     /// <summary>
-    /// Re-recognizes the crops the orientation classifier flagged as upside-down, rotated 180°, and keeps
-    /// whichever orientation the recognizer is more confident about.
+    /// Recognizes crops with the fixed pack (applying its post-processing) or, when auto-detecting, with
+    /// every candidate pack.
+    /// </summary>
+    private async Task<IReadOnlyList<RecognizedText>> RecognizeCropsAsync(
+        IReadOnlyList<Image<Rgb24>> crops,
+        RecognitionOptions options,
+        bool auto,
+        RecognizerPack? fixedPack,
+        List<string>? detectedLanguagesSink,
+        int concurrency,
+        bool withWords,
+        CancellationToken cancellationToken)
+    {
+        if (auto)
+        {
+            return await RecognizeAutoAsync(crops, options, detectedLanguagesSink, concurrency, withWords, cancellationToken).ConfigureAwait(false);
+        }
+
+        var recognizer = await GetOrLoadRecognizerAsync(fixedPack!, cancellationToken).ConfigureAwait(false);
+        return ApplyPackPostProcessing(fixedPack!, recognizer.RecognizeDetailed(crops, options, concurrency, withWords, cancellationToken));
+    }
+
+    /// <summary>
+    /// Re-recognizes the crops the orientation classifier flagged as upside-down, rotated 180°. The result is
+    /// aligned with <paramref name="flipCandidates"/>; <see cref="CombineOrientation"/> keeps whichever
+    /// orientation the recognizer is more confident about.
     /// </summary>
     /// <remarks>
     /// The classifier (PP-LCNet_x1_0_textline_ori) misfires on some upright lines — including
@@ -415,16 +532,17 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     /// ~0.95+ against ~0.35 for the inverted one), so it is used as the arbiter. Only flagged crops pay
     /// for the second pass. PaddleX 3.x has no such confirmation; this is a deliberate improvement.
     /// </remarks>
-    private async Task<IReadOnlyList<(string Text, float Confidence)>> ConfirmOrientationAsync(
+    private async Task<RecognizedText?[]> RecognizeFlippedAsync(
         List<Image<Rgb24>> crops,
-        IReadOnlyList<(string Text, float Confidence)> upright,
         List<int> flipCandidates,
         RecognitionOptions options,
         bool auto,
         RecognizerPack? fixedPack,
+        int concurrency,
+        bool withWords,
         CancellationToken cancellationToken)
     {
-        var confirmed = upright.ToArray();
+        var flipped = new RecognizedText?[flipCandidates.Count];
 
         // Rotated copies are made a chunk at a time. A reoriented page seeds every line as a candidate,
         // so cloning them all at once would hold a second copy of the whole page's crops in memory —
@@ -445,17 +563,12 @@ internal sealed class StructureTextEngine : IAsyncDisposable
                 }
 
                 // Auto-detection runs its own per-pack sweep; a fixed pack recognizes the batch directly.
-                IReadOnlyList<(string Text, float Confidence)> rotatedReadings = auto
-                    ? await RecognizeAutoAsync(rotated, options, null, cancellationToken).ConfigureAwait(false)
-                    : ApplyPackPostProcessing(fixedPack!,
-                        (await GetOrLoadRecognizerAsync(fixedPack!, cancellationToken).ConfigureAwait(false)).Recognize(rotated, options));
+                var rotatedReadings = await RecognizeCropsAsync(
+                    rotated, options, auto, fixedPack, null, concurrency, withWords, cancellationToken).ConfigureAwait(false);
 
                 for (int i = 0; i < count && i < rotatedReadings.Count; i++)
                 {
-                    int index = flipCandidates[start + i];
-                    if (index >= confirmed.Length) continue;
-
-                    confirmed[index] = ChooseOrientation(confirmed[index], rotatedReadings[i]);
+                    flipped[start + i] = rotatedReadings[i] with { Flipped = true };
                 }
             }
             finally
@@ -464,9 +577,27 @@ internal sealed class StructureTextEngine : IAsyncDisposable
             }
         }
 
-        return confirmed;
+        return flipped;
     }
 
+    /// <summary>
+    /// Applies the orientation confirmation: for every flagged crop, the flipped reading replaces the upright
+    /// one when <see cref="ChooseOrientation"/> prefers it.
+    /// </summary>
+    private static RecognizedText[] CombineOrientation(
+        IReadOnlyList<RecognizedText> upright, RecognizedText?[] flipped, List<int> flipCandidates)
+    {
+        var confirmed = upright.ToArray();
+        for (int k = 0; k < flipCandidates.Count && k < flipped.Length; k++)
+        {
+            int index = flipCandidates[k];
+            if (index >= confirmed.Length || flipped[k] is not { } candidate) continue;
+
+            if (PreferFlipped(confirmed[index].Text, confirmed[index].Confidence, candidate.Text, candidate.Confidence))
+                confirmed[index] = candidate;
+        }
+        return confirmed;
+    }
 
     /// <summary>
     /// Returns a copy of <paramref name="crop"/> centered on a white canvas with a
@@ -485,15 +616,19 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     /// (typing) order, which renders reversed — PaddleOCR runs bidi <c>get_display</c> on them; this is the
     /// equivalent. Other packs pass through unchanged.
     /// </summary>
-    private static IReadOnlyList<(string Text, float Confidence)> ApplyPackPostProcessing(
-        RecognizerPack pack, IReadOnlyList<(string Text, float Confidence)> readings)
+    private static IReadOnlyList<RecognizedText> ApplyPackPostProcessing(
+        RecognizerPack pack, IReadOnlyList<RecognizedText> readings)
     {
         if (!pack.Name.Contains("arabic", StringComparison.OrdinalIgnoreCase)) return readings;
 
-        var reordered = new (string Text, float Confidence)[readings.Count];
+        var reordered = new RecognizedText[readings.Count];
         for (int i = 0; i < readings.Count; i++)
         {
-            reordered[i] = (RtlTextReorder.ApplyDisplayOrder(readings[i].Text), readings[i].Confidence);
+            reordered[i] = readings[i] with
+            {
+                Text = RtlTextReorder.ApplyDisplayOrder(readings[i].Text),
+                RightToLeft = true,
+            };
         }
         return reordered;
     }
@@ -504,6 +639,46 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     /// The mean default-pack confidence at/above which the Latin/CJK fast path accepts without trying other packs.
     /// </summary>
     private const double AutoFastPathConfidence = 0.85;
+
+    /// <summary>
+    /// How much less confident a reading backed by script evidence may be and still beat a Latin reading in
+    /// the multi-pack vote (<see cref="IsBetterReading"/>).
+    /// </summary>
+    internal const float ScriptEvidenceMargin = 0.10f;
+
+    /// <summary>
+    /// Whether <paramref name="candidate"/> should replace <paramref name="current"/> as a crop's reading in
+    /// the multi-pack vote. Normally the more confident reading wins. But confidences from different packs
+    /// are not calibrated against each other, and the default pack — which has no Cyrillic, Greek, Arabic,
+    /// Indic, Thai or Hangul letters — reads such a word as confident Latin look-alikes: a Russian
+    /// <c>ВЫХОД</c> sign came back as <c>BbIXOA</c> at 0.969 against the Cyrillic pack's correct 0.966.
+    /// Every script pack's dictionary also holds the Latin letters, so when a pack picks a letter of its own
+    /// script that has no Latin twin (<see cref="ScriptDetection.DistinctiveScript"/>), that choice is
+    /// evidence. Such a reading beats a Latin one unless it is less confident by more than
+    /// <see cref="ScriptEvidenceMargin"/>. Readings made only of look-alike letters (<c>ЕХІТ</c> for
+    /// <c>EXIT</c>) carry no such evidence and are compared on confidence alone.
+    /// </summary>
+    internal static bool IsBetterReading(RecognizedText candidate, RecognizedText current)
+    {
+        var candidateScript = ScriptDetection.DistinctiveScript(candidate.Text);
+        var currentScript = ScriptDetection.DistinctiveScript(current.Text);
+        if (candidateScript != currentScript)
+        {
+            if (candidateScript != DetectedScript.Unknown && currentScript == DetectedScript.Unknown
+                && ScriptDetection.DominantScript(current.Text) == DetectedScript.Latin)
+            {
+                return candidate.Confidence >= current.Confidence - ScriptEvidenceMargin;
+            }
+
+            if (currentScript != DetectedScript.Unknown && candidateScript == DetectedScript.Unknown
+                && ScriptDetection.DominantScript(candidate.Text) == DetectedScript.Latin)
+            {
+                return candidate.Confidence > current.Confidence + ScriptEvidenceMargin;
+            }
+        }
+
+        return candidate.Confidence > current.Confidence;
+    }
 
     /// <summary>
     /// The curated cross-script candidate shortlist used when auto-detection is requested without an explicit
@@ -537,10 +712,12 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     /// models.
     /// </para>
     /// </summary>
-    private async Task<IReadOnlyList<(string Text, float Confidence)>> RecognizeAutoAsync(
+    private async Task<IReadOnlyList<RecognizedText>> RecognizeAutoAsync(
         IReadOnlyList<Image<Rgb24>> crops,
         RecognitionOptions options,
         List<string>? detectedLanguagesSink,
+        int concurrency,
+        bool withWords,
         CancellationToken cancellationToken)
     {
         // Resolve candidate codes → distinct packs, preserving order (default pack first so the fast path
@@ -553,11 +730,11 @@ internal sealed class StructureTextEngine : IAsyncDisposable
         {
             // No candidate resolved: fall back to the default recognizer so we still return readings.
             var fallback = await GetOrLoadRecognizerAsync(StructureModelRegistry.MobileRecognizer, cancellationToken).ConfigureAwait(false);
-            return fallback.Recognize(crops, options);
+            return fallback.RecognizeDetailed(crops, options, concurrency, withWords, cancellationToken);
         }
 
         int n = crops.Count;
-        var best = new (string Text, float Confidence)[n];
+        var best = new RecognizedText[n];
         var bestPack = new RecognizerPack?[n];
         // Per-pack tally of crops won, weighted by the winning confidence — the detection vote.
         var packScore = new Dictionary<string, double>(StringComparer.Ordinal);
@@ -567,7 +744,7 @@ internal sealed class StructureTextEngine : IAsyncDisposable
             cancellationToken.ThrowIfCancellationRequested();
             var pack = candidatePacks[p];
             var recognizer = await GetOrLoadRecognizerAsync(pack, cancellationToken).ConfigureAwait(false);
-            var readings = ApplyPackPostProcessing(pack, recognizer.Recognize(crops, options));
+            var readings = ApplyPackPostProcessing(pack, recognizer.RecognizeDetailed(crops, options, concurrency, withWords, cancellationToken));
 
             double confSum = 0;
             for (int i = 0; i < n && i < readings.Count; i++)
@@ -575,7 +752,7 @@ internal sealed class StructureTextEngine : IAsyncDisposable
                 var reading = readings[i];
                 confSum += reading.Confidence;
                 // Keep this pack's reading for crop i if it beats the best so far (or is the first reading).
-                if (bestPack[i] is null || reading.Confidence > best[i].Confidence)
+                if (bestPack[i] is null || IsBetterReading(reading, best[i]))
                 {
                     best[i] = reading;
                     bestPack[i] = pack;
@@ -680,13 +857,14 @@ internal sealed class StructureTextEngine : IAsyncDisposable
     /// </summary>
     public async Task WarmUp(IReadOnlyList<string> languages, CancellationToken cancellationToken)
     {
-        await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
+        var warmDetector = await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
+        IAngleClassifier? warmClassifier = null;
         // RecognitionOptions.UseTextLineOrientation defaults to true (the Python pipeline default), so the
-        // classifier participates in a default recognition call — pre-load it whenever either the engine
-        // default or the per-call default would bring it in.
-        if (_options.UseTextLineOrientation || RecognitionOptions.Default.UseTextLineOrientation)
+        // classifier participates in a default recognition call unless the service-level option turned it
+        // off — pre-load it whenever a default call would bring it in.
+        if (ResolveUseTextLineOrientation(RecognitionOptions.Default, _options.UseTextLineOrientation))
         {
-            await GetOrLoadClassifierAsync(cancellationToken).ConfigureAwait(false);
+            warmClassifier = await GetOrLoadClassifierAsync(cancellationToken).ConfigureAwait(false);
         }
         // Doc orientation defaults on too (RecognitionOptions.UseDocOrientation, the Python pipeline
         // default) — pre-load its classifier as well. A failed load degrades gracefully (never throws).
@@ -694,11 +872,15 @@ internal sealed class StructureTextEngine : IAsyncDisposable
         {
             await GetOrLoadDocPreprocessorAsync(needOrientation: true, needUnwarp: false, cancellationToken).ConfigureAwait(false);
         }
+        Detection.ModelWarmUp.Run(warmDetector, warmClassifier, Array.Empty<ITextRecognizer>(), _logger);
         foreach (var pack in ResolvePacks(languages))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await GetOrLoadRecognizerAsync(pack, cancellationToken).ConfigureAwait(false);
+            var recognizer = await GetOrLoadRecognizerAsync(pack, cancellationToken).ConfigureAwait(false);
+            Detection.ModelWarmUp.Run(null, null, new[] { recognizer }, _logger);
         }
+        // Loading a session does not run it: one dummy inference per model moves kernel selection and
+        // arena growth out of the first real request.
     }
 
     /// <summary>

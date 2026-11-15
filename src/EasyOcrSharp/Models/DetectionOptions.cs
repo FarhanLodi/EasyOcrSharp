@@ -48,6 +48,47 @@ public sealed record DetectionOptions
     /// </summary>
     public double NmsIouThreshold { get; init; } = 0.6;
 
+    /// <summary>
+    /// Detect very large images in overlapping full-resolution tiles instead of shrinking them to
+    /// <see cref="CanvasSize"/>. When the canvas cap would scale the detector input below 0.75× of the size
+    /// <see cref="MagRatio"/> asks for (a long side above ~3400 px at the defaults), the page is cut into
+    /// tiles of <c>CanvasSize / MagRatio</c> source pixels overlapping by 384 px — along the long axis for
+    /// tall receipts and wide banners, in a grid when both sides are too large. Each tile is detected at
+    /// full resolution, the word boxes are shifted back into page coordinates, and the duplicates the overlaps
+    /// produce are resolved (boxes clear of a tile's cut edge win; a box cut in two by a seam is re-joined)
+    /// before the usual line grouping runs over the whole page. Costs one detector pass per tile. Default
+    /// false (EasyOCR downscales).
+    /// </summary>
+    public bool TileLargeImages { get; init; }
+
+    /// <summary>
+    /// Small-text rescue: the text height (px, at the detector's input scale — source pixels at the default
+    /// <see cref="MagRatio"/> for images within <see cref="CanvasSize"/>) below which detection is repeated
+    /// at a higher magnification. When greater than 0, the median short side of the boxes found by the
+    /// normal pass is measured; if it is below this value the image is detected again magnified so the
+    /// typical line reaches about <c>max(24, MinTextHeight)</c> px (at most 3×, and never past
+    /// <see cref="CanvasSize"/>). A page where nothing was found and whose detector input is under 1500 px is
+    /// also retried once at 2×. Boxes are always returned in original-image coordinates, and recognition
+    /// still reads the original pixels. Default 0 (off) — the extra pass costs a second detector run on the
+    /// images it triggers for, and EasyOCR has no such step (its manual equivalent is <see cref="MagRatio"/>).
+    /// </summary>
+    public int MinTextHeight { get; init; }
+
+    /// <summary>
+    /// Run detection on a contrast-enhanced copy of the image (background normalization, then a 0.5–99.5
+    /// percentile contrast stretch), which helps faded, grey or unevenly lit scans the detector otherwise
+    /// under-segments. Only the detector sees the enhanced copy — recognition still crops the original
+    /// pixels, and box coordinates are unchanged by it. Can cost a little on clean, high-contrast pages, so
+    /// enable it for faded or unevenly lit input. Default false.
+    /// </summary>
+    public bool EnhanceContrast { get; init; }
+
+    /// <summary>
+    /// Whether any of the opt-in detection passes (<see cref="TileLargeImages"/>, <see cref="MinTextHeight"/>,
+    /// <see cref="EnhanceContrast"/>) is enabled. With none enabled, detection is EasyOCR's single pass.
+    /// </summary>
+    internal bool UsesExtraPasses => TileLargeImages || EnhanceContrast || MinTextHeight > 0;
+
     /// <summary>The default detection thresholds (match EasyOCR).</summary>
     public static DetectionOptions Default { get; } = new();
 }

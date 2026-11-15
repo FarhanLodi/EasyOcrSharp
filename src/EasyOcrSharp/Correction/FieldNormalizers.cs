@@ -810,7 +810,12 @@ public static partial class FieldNormalizers
         return ComputeMrzCheckDigit(sb.ToString().AsSpan()) == printed - '0';
     }
 
-    private static int ComputeMrzCheckDigit(ReadOnlySpan<char> field)
+    /// <summary>
+    /// Span form of <see cref="MrzCheckDigit(string)"/>: 7-3-1 weighted ICAO 9303 check digit, or -1 when
+    /// the field contains a character outside the MRZ alphabet. Shared with
+    /// <see cref="Extraction.MrzParser"/> so there is exactly one implementation.
+    /// </summary>
+    internal static int ComputeMrzCheckDigit(ReadOnlySpan<char> field)
     {
         ReadOnlySpan<int> weights = [7, 3, 1];
         int sum = 0;

@@ -183,7 +183,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         var detector = await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
-        var rawPolygons = detector.Detect(image, options.Detection);
+        var rawPolygons = detector.Detect(image, options.Detection, cancellationToken);
 
         // Word grouping keeps the raw per-box detections; Line/Paragraph merge adjacent boxes
         // into reading-order lines (EasyOCR's group_text_box) before recognition.
@@ -295,7 +295,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
     /// <see cref="OcrChar.Value"/> still reproduces the paragraph text. Paragraphs that are a single line
     /// already carry their words and are returned untouched; anything that fails to match is left as-is.
     /// </summary>
-    private static IReadOnlyList<OcrLine> ReattachWords(List<OcrLine> paragraphs, List<OcrLine> sourceLines)
+    internal static IReadOnlyList<OcrLine> ReattachWords(List<OcrLine> paragraphs, List<OcrLine> sourceLines)
     {
         var claimed = new bool[sourceLines.Count];
         for (int p = 0; p < paragraphs.Count; p++)
@@ -436,7 +436,7 @@ internal sealed class OnnxEasyOcrEngine : IAsyncDisposable
         Image<Rgb24> image, DetectionOptions detection, TextGrouping grouping, GroupingOptions groupingOptions, CancellationToken cancellationToken)
     {
         var detector = await GetOrLoadDetectorAsync(cancellationToken).ConfigureAwait(false);
-        var raw = detector.Detect(image, detection);
+        var raw = detector.Detect(image, detection, cancellationToken);
         var polygons = grouping == TextGrouping.Word
             ? raw
             : TextBoxGrouper.Group(raw, image.Width, image.Height, groupingOptions);

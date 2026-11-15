@@ -26,9 +26,8 @@ namespace EasyOcrSharp.Structure.Preprocess;
 /// </summary>
 internal sealed class DocPreprocessor : IDocPreprocessor
 {
-    // ImageNet mean/std (RGB), applied to pixel/255 — the PP-LCNet doc-ori classifier's normalization.
-    private static readonly float[] Mean = { 0.485f, 0.456f, 0.406f };
-    private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
+    // The PP-LCNet doc-ori classifier normalizes pixel/255 with ImageNet mean/std in RGB order
+    // (PlanarTensorPacker.ImageNet0..2).
 
     // PP-LCNet_x1_0_doc_ori input is a fixed 3×224×224 (standard PP-LCNet classification head). Verified
     // against the real export: input "x" [N,3,224,224] tensor(float), output [N,4] tensor(float).
@@ -73,50 +72,69 @@ internal sealed class DocPreprocessor : IDocPreprocessor
     /// <inheritdoc />
     /// <remarks>
     /// Order matches PaddleX's document pipeline: orientation correction first (so unwarp sees an upright
-    /// page), then unwarp. The returned image is always a fresh image the caller owns and disposes — even
-    /// when no stage changes the pixels we hand back a clone so callers can dispose the input independently.
+    /// page), then unwarp. The input is never modified or disposed: the orientation classifier reads it
+    /// directly and a copy is made only when a stage actually changes the pixels (a non-zero rotation or a
+    /// dewarp). When nothing changes, the input itself comes back with
+    /// <see cref="DocPreprocessResult.OwnsImage"/> false, so an upright page costs no full-page clone.
     /// </remarks>
-    public (Image<Rgb24> image, int rotationApplied) Apply(Image<Rgb24> input, bool useOrientation, bool useUnwarp)
+    public DocPreprocessResult Apply(Image<Rgb24> input, bool useOrientation, bool useUnwarp)
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        // Work on an owned copy so the input remains the caller's to dispose and intermediate stages can be
-        // swapped without aliasing. Each stage replaces 'current' and disposes the one it consumed.
-        Image<Rgb24> current = input.Clone();
+        // 'current' starts as the caller's input and is replaced by an owned image the first time a stage
+        // changes pixels; each later stage disposes the owned image it consumed.
+        Image<Rgb24> current = input;
+        bool owns = false;
         int rotationApplied = 0;
+        bool unwarpApplied = false;
 
         try
         {
-            // --- Orientation: classify {0,90,180,270} and rotate the whole page upright (FULLY IMPLEMENTED).
+            // --- Orientation: classify {0,90,180,270} on the input, rotate an owned copy only when needed.
             if (useOrientation && _orientation is not null)
             {
-                rotationApplied = ClassifyAndRotate(current);
+                rotationApplied = ClassifyCorrection(input);
+                var mode = rotationApplied switch
+                {
+                    90 => RotateMode.Rotate90,
+                    180 => RotateMode.Rotate180,
+                    270 => RotateMode.Rotate270,
+                    _ => RotateMode.None,
+                };
+                if (mode != RotateMode.None)
+                {
+                    current = input.Clone();
+                    owns = true;
+                    current.Mutate(ctx => ctx.Rotate(mode));
+                }
             }
 
-            // --- Unwarp: UVDoc dewarp (FULLY IMPLEMENTED — returns a rectified image; see Unwarp()).
+            // --- Unwarp: UVDoc dewarp (returns a new rectified image, or its input on an unexpected output).
             if (useUnwarp && _unwarp is not null)
             {
                 Image<Rgb24> dewarped = Unwarp(current);
                 if (!ReferenceEquals(dewarped, current))
                 {
-                    current.Dispose();
+                    unwarpApplied = true;
+                    if (owns) current.Dispose();
                     current = dewarped;
+                    owns = true;
                 }
             }
 
-            return (current, rotationApplied);
+            return new DocPreprocessResult(current, rotationApplied, owns, unwarpApplied);
         }
         catch
         {
-            current.Dispose();
+            if (owns) current.Dispose();
             throw;
         }
     }
 
     /// <summary>
-    /// Runs the PP-LCNet doc-orientation classifier on <paramref name="image"/>, takes the argmax over the
-    /// four {0,90,180,270} logits, and rotates the image in place to upright it. Returns the rotation (in
-    /// degrees, clockwise) that was actually applied to the image (0 when the page is already upright).
+    /// Runs the PP-LCNet doc-orientation classifier on <paramref name="image"/> (read-only), takes the
+    /// argmax over the four {0,90,180,270} logits, and returns the corrective clockwise rotation (in degrees)
+    /// that uprights the page (0 when it is already upright). The caller applies the rotation.
     /// </summary>
     /// <remarks>
     /// PaddleX labels index <c>i</c> with <see cref="OrientationAngles"/>[i] = the clockwise angle by which
@@ -125,7 +143,7 @@ internal sealed class DocPreprocessor : IDocPreprocessor
     /// upright. We report the applied (corrective) clockwise rotation so the caller can map any downstream
     /// coordinates back to the original page if needed.
     /// </remarks>
-    private int ClassifyAndRotate(Image<Rgb24> image)
+    private int ClassifyCorrection(Image<Rgb24> image)
     {
         var input = BuildOrientationTensor(image);
 
@@ -142,19 +160,7 @@ internal sealed class DocPreprocessor : IDocPreprocessor
         }
 
         // Corrective clockwise rotation = 360 - detected (e.g. detected 90 -> rotate 270 CW to upright).
-        int correction = (360 - detected) % 360;
-        var mode = correction switch
-        {
-            90 => RotateMode.Rotate90,
-            180 => RotateMode.Rotate180,
-            270 => RotateMode.Rotate270,
-            _ => RotateMode.None,
-        };
-        if (mode != RotateMode.None)
-        {
-            image.Mutate(ctx => ctx.Rotate(mode));
-        }
-        return correction;
+        return (360 - detected) % 360;
     }
 
     /// <summary>
@@ -185,23 +191,10 @@ internal sealed class DocPreprocessor : IDocPreprocessor
         int plane = OrientSize * OrientSize;
         Memory<float> bufferMem = tensor.Buffer;
 
-        resized.ProcessPixelRows(accessor =>
-        {
-            var buffer = bufferMem.Span;
-            for (int y = 0; y < OrientSize; y++)
-            {
-                var row = accessor.GetRowSpan(cropY + y);
-                int rowOffset = y * OrientSize;
-                for (int x = 0; x < OrientSize; x++)
-                {
-                    var px = row[cropX + x];
-                    int idx = rowOffset + x;
-                    buffer[idx] = (px.R / 255f - Mean[0]) / Std[0];            // R channel
-                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];     // G channel
-                    buffer[2 * plane + idx] = (px.B / 255f - Mean[2]) / Std[2]; // B channel
-                }
-            }
-        });
+        // ImageNet-normalize the center window in RGB order via the bit-identical lookup tables.
+        PlanarTensorPacker.Pack(
+            resized, cropX, cropY, OrientSize, OrientSize, bufferMem, OrientSize, plane,
+            PlanarTensorPacker.ImageNet0, PlanarTensorPacker.ImageNet1, PlanarTensorPacker.ImageNet2, bgr: false);
 
         return tensor;
     }
@@ -309,6 +302,7 @@ internal sealed class DocPreprocessor : IDocPreprocessor
             int plane = padW * padH;
             Memory<float> bufferMem = tensor.Buffer;
 
+            var scale = PlanarTensorPacker.Scale01; // v / 255f, bit-identical to the per-pixel expression
             source.ProcessPixelRows(accessor =>
             {
                 var buffer = bufferMem.Span;
@@ -320,9 +314,9 @@ internal sealed class DocPreprocessor : IDocPreprocessor
                     {
                         var px = row[Math.Min(x, workW - 1)];
                         int idx = rowOffset + x;
-                        buffer[idx] = px.B / 255f;                 // B plane (model consumes BGR)
-                        buffer[plane + idx] = px.G / 255f;         // G plane
-                        buffer[2 * plane + idx] = px.R / 255f;     // R plane
+                        buffer[idx] = scale[px.B];                 // B plane (model consumes BGR)
+                        buffer[plane + idx] = scale[px.G];         // G plane
+                        buffer[2 * plane + idx] = scale[px.R];     // R plane
                     }
                 }
             });

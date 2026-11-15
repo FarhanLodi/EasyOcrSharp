@@ -31,6 +31,16 @@ public sealed partial class StructureResult
     public int SourceHeight { get; init; }
 
     /// <summary>
+    /// Recognized OCR lines that no single layout block owns: lines on empty ground or inside a figure or
+    /// chart region, lines without a usable box, and the original reading of a line that straddles several
+    /// blocks (its per-block fragments are still placed in those blocks). They are kept as evidence, in the
+    /// same coordinate frame as <see cref="Blocks"/>, instead of being dropped; they are not inserted into
+    /// <see cref="ToMarkdown"/> or the other exports. Empty when every line found an owner.
+    /// <see cref="ToJson()"/> writes them as <c>OrphanLines</c> only when there are any.
+    /// </summary>
+    public IReadOnlyList<OcrLine> OrphanLines { get; init; } = Array.Empty<OcrLine>();
+
+    /// <summary>
     /// An empty structure result.
     /// </summary>
     public static StructureResult Empty { get; } = new() { Blocks = Array.Empty<StructureBlock>() };
@@ -424,6 +434,8 @@ public sealed partial class StructureResult
         SourceWidth = SourceWidth,
         SourceHeight = SourceHeight,
         Blocks = OrderedBlocks().Select(StructureBlockDto.From).ToArray(),
+        // Omitted (null) when empty so pages whose every line has an owner serialize exactly as before.
+        OrphanLines = OrphanLines is { Count: > 0 } orphans ? orphans : null,
     };
 
     /// <summary>

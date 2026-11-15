@@ -1,4 +1,5 @@
 using EasyOcrSharp.Structure.Engine.Models;
+using EasyOcrSharp.Structure.Preprocess;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyImageSharp;
@@ -183,24 +184,10 @@ internal sealed class RtDetrLayoutDetector : ILayoutDetector
         int plane = h * w;
         Memory<float> bufferMem = tensor.Buffer;
 
-        resized.ProcessPixelRows(accessor =>
-        {
-            var buffer = bufferMem.Span;
-            for (int y = 0; y < h; y++)
-            {
-                var row = accessor.GetRowSpan(y);
-                int rowOffset = y * w;
-                for (int x = 0; x < w; x++)
-                {
-                    var px = row[x];
-                    int idx = rowOffset + x;
-                    // pixel/255 — NO mean/std. RGB CHW.
-                    buffer[idx] = px.R / 255f;             // R channel
-                    buffer[plane + idx] = px.G / 255f;     // G channel
-                    buffer[2 * plane + idx] = px.B / 255f; // B channel
-                }
-            }
-        });
+        // pixel/255 — NO mean/std. RGB CHW, via the bit-identical lookup table.
+        PlanarTensorPacker.Pack(
+            resized, 0, 0, w, h, bufferMem, w, plane,
+            PlanarTensorPacker.Scale01, PlanarTensorPacker.Scale01, PlanarTensorPacker.Scale01, bgr: false);
 
         return tensor;
     }

@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Clipper2Lib;
 using EasyOcrSharp.Structure.Engine.Geometry;
 using EasyOcrSharp.Structure.Engine.Models;
@@ -61,11 +63,7 @@ internal static class DBPostProcess
         double unclipRatio = options.UnclipRatio;         // det_db_unclip_ratio (1.5)
 
         // Binarize: segmentation = prob > thresh.
-        var bitmap = new byte[width * height];
-        for (int i = 0; i < bitmap.Length; i++)
-        {
-            bitmap[i] = prob[i] > thresh ? (byte)1 : (byte)0;
-        }
+        var bitmap = Binarize(prob, width * height, thresh);
 
         // use_dilation: bridge thin/broken strokes with cv2.dilate(bitmap, np.ones((2,2))) before
         // contour extraction. Off by default, so the unchanged path stays byte-identical.
@@ -80,20 +78,30 @@ internal static class DBPostProcess
         // PaddleOCR caps the number of candidate regions at 1000 (max_candidates).
         int maxCandidates = Math.Min(components.Length - 1, 1000);
 
+        // Reused across regions: at most two hull candidates per region row.
+        OcrPoint[] extremes = Array.Empty<OcrPoint>();
+
         // components[0] is the background placeholder; real regions start at index 1.
         for (int label = 1; label <= maxCandidates && label < components.Length; label++)
         {
             var stats = components[label];
-
-            // Gather the region's pixel coordinates for the min-area quad fit.
-            var regionPoints = CollectRegionPoints(labels, width, stats, label);
-            if (regionPoints.Count < 4)
+            if (stats.Area < 4)
             {
                 continue;
             }
 
+            // Hull candidates for the min-area quad fit: the leftmost and rightmost pixel of each row. The
+            // convex hull of a pixel set equals the hull of its per-row extremes (every other pixel lies on
+            // the segment between them), so the fitted rectangle is identical to fitting all pixels.
+            int rows = stats.MaxY - stats.MinY + 1;
+            if (extremes.Length < 2 * rows)
+            {
+                extremes = new OcrPoint[Math.Max(2 * rows, 2 * extremes.Length)];
+            }
+            int extremeCount = CollectRowExtremes(labels, width, stats, label, extremes);
+
             // get_mini_boxes: min-area quad of the region, ordered + measured for its shortest side.
-            var (quad, minSide) = GetMiniBox(regionPoints);
+            var (quad, minSide) = GetMiniBox(extremes.AsSpan(0, extremeCount));
             if (minSide < minSize)
             {
                 continue;
@@ -103,7 +111,7 @@ internal static class DBPostProcess
             //   Fast — mean probability over the quad's bounding-box crop under a polygon mask.
             //   Slow — mean probability over the region's exact pixel mask (the contour interior).
             float score = options.ScoreMode == DetectionScoreMode.Slow
-                ? BoxScoreSlow(prob, width, regionPoints)
+                ? BoxScoreSlow(prob, labels, width, stats, label)
                 : BoxScoreFast(prob, width, height, quad);
             if (score < boxThresh)
             {
@@ -182,11 +190,7 @@ internal static class DBPostProcess
         double heightScale = (double)destHeight / height;
 
         // Binarize (and optionally dilate), exactly as the quad path does.
-        var bitmap = new byte[width * height];
-        for (int i = 0; i < bitmap.Length; i++)
-        {
-            bitmap[i] = prob[i] > thresh ? (byte)1 : (byte)0;
-        }
+        var bitmap = Binarize(prob, width * height, thresh);
 
         if (options.UseDilation)
         {
@@ -534,33 +538,114 @@ internal static class DBPostProcess
     }
 
     /// <summary>
-    /// Collects the (x,y) coordinates of every pixel belonging to <paramref name="label"/>.
+    /// Binarizes the probability map: <c>bitmap[i] = prob[i] &gt; thresh ? 1 : 0</c>, vectorized with a
+    /// scalar tail. The ordered float comparison is the same as the scalar one (NaN compares false in
+    /// both), so the bitmap is identical. Internal for unit tests.
     /// </summary>
-    private static List<OcrPoint> CollectRegionPoints(int[] labels, int width, ConnectedComponents.Stats stats, int label)
+    internal static byte[] Binarize(ReadOnlySpan<float> prob, int length, float thresh)
     {
-        var points = new List<OcrPoint>(stats.Area);
+        var bitmap = new byte[length];
+        int i = 0;
+        if (Vector256.IsHardwareAccelerated && length >= Vector256<float>.Count)
+        {
+            var t = Vector256.Create(thresh);
+            var one = Vector256.Create(1);
+            ref float src = ref MemoryMarshal.GetReference(prob);
+            Span<int> tmp = stackalloc int[Vector256<int>.Count];
+            for (; i <= length - Vector256<float>.Count; i += Vector256<float>.Count)
+            {
+                var v = Vector256.LoadUnsafe(ref src, (nuint)i);
+                var mask = Vector256.GreaterThan(v, t).AsInt32() & one;
+                mask.CopyTo(tmp);
+                for (int k = 0; k < tmp.Length; k++)
+                {
+                    bitmap[i + k] = (byte)tmp[k];
+                }
+            }
+        }
+        else if (Vector128.IsHardwareAccelerated && length >= Vector128<float>.Count)
+        {
+            var t = Vector128.Create(thresh);
+            var one = Vector128.Create(1);
+            ref float src = ref MemoryMarshal.GetReference(prob);
+            Span<int> tmp = stackalloc int[Vector128<int>.Count];
+            for (; i <= length - Vector128<float>.Count; i += Vector128<float>.Count)
+            {
+                var v = Vector128.LoadUnsafe(ref src, (nuint)i);
+                var mask = Vector128.GreaterThan(v, t).AsInt32() & one;
+                mask.CopyTo(tmp);
+                for (int k = 0; k < tmp.Length; k++)
+                {
+                    bitmap[i + k] = (byte)tmp[k];
+                }
+            }
+        }
+
+        for (; i < length; i++)
+        {
+            bitmap[i] = prob[i] > thresh ? (byte)1 : (byte)0;
+        }
+        return bitmap;
+    }
+
+    /// <summary>
+    /// Writes the leftmost and rightmost pixel of <paramref name="label"/> on every row of its bounding
+    /// box into <paramref name="destination"/> (one point when both coincide) and returns the count. These
+    /// per-row extremes have the same convex hull as the full pixel set. Internal for unit tests.
+    /// </summary>
+    internal static int CollectRowExtremes(int[] labels, int width, ConnectedComponents.Stats stats, int label, Span<OcrPoint> destination)
+    {
+        int n = 0;
         for (int y = stats.MinY; y <= stats.MaxY; y++)
         {
             int rowBase = y * width;
+            int left = -1;
             for (int x = stats.MinX; x <= stats.MaxX; x++)
             {
                 if (labels[rowBase + x] == label)
                 {
-                    points.Add(new OcrPoint(x, y));
+                    left = x;
+                    break;
                 }
             }
+            if (left < 0)
+            {
+                continue;
+            }
+
+            int right = left;
+            for (int x = stats.MaxX; x > left; x--)
+            {
+                if (labels[rowBase + x] == label)
+                {
+                    right = x;
+                    break;
+                }
+            }
+
+            destination[n++] = new OcrPoint(left, y);
+            if (right != left)
+            {
+                destination[n++] = new OcrPoint(right, y);
+            }
         }
-        return points;
+        return n;
     }
+
+    /// <summary>
+    /// PaddleOCR's <c>get_mini_boxes</c> over a list of points (unclipped polygons).
+    /// </summary>
+    private static (OcrPoint[] Quad, double MinSide) GetMiniBox(IReadOnlyList<OcrPoint> points)
+        => GetMiniBox(points is OcrPoint[] arr ? arr : points.ToArray());
 
     /// <summary>
     /// PaddleOCR's <c>get_mini_boxes</c>: fits the minimum-area rectangle to <paramref name="points"/>,
     /// orders the four corners as top-left, top-right, bottom-right, bottom-left, and returns the
     /// rectangle's shorter side length so tiny boxes can be filtered.
     /// </summary>
-    private static (OcrPoint[] Quad, double MinSide) GetMiniBox(IReadOnlyList<OcrPoint> points)
+    private static (OcrPoint[] Quad, double MinSide) GetMiniBox(ReadOnlySpan<OcrPoint> points)
     {
-        var corners = MinAreaRect.Compute(points is OcrPoint[] arr ? arr : points.ToArray());
+        var corners = MinAreaRect.Compute(points);
         if (corners.Length != 4)
         {
             return (corners, 0);
@@ -595,7 +680,14 @@ internal static class DBPostProcess
     /// coordinates are truncated to int before rasterization, mirroring Python's
     /// <c>.astype("int32")</c> + <c>cv2.fillPoly</c> mask.
     /// </summary>
-    private static float BoxScoreFast(ReadOnlySpan<float> prob, int width, int height, OcrPoint[] quad)
+    /// <remarks>
+    /// Rasterized per row rather than per pixel: the even-odd rule of <see cref="PointInPolygon"/> puts
+    /// integer column <c>x</c> inside exactly when an odd number of the row's edge crossings
+    /// <c>xc</c> (computed with the identical expression) satisfy <c>x &lt; xc</c>. Sorting the crossings
+    /// turns that into contiguous integer spans, summed row-major and left to right — the same pixels in
+    /// the same order as the per-pixel loop, so the double sum and the score are bit-identical.
+    /// </remarks>
+    internal static float BoxScoreFast(ReadOnlySpan<float> prob, int width, int height, OcrPoint[] quad)
     {
         double minXd = quad[0].X, maxXd = quad[0].X, minYd = quad[0].Y, maxYd = quad[0].Y;
         for (int i = 1; i < quad.Length; i++)
@@ -625,6 +717,109 @@ internal static class DBPostProcess
             local[i] = ((int)(quad[i].X - xmin), (int)(quad[i].Y - ymin));
         }
 
+        int n = local.Length;
+        Span<double> crossings = n <= 64 ? stackalloc double[n] : new double[n];
+
+        double sum = 0;
+        long count = 0;
+        for (int y = 0; y < localH; y++)
+        {
+            // Edge crossings of this row, with PointInPolygon's exact expression and edge filter.
+            int k = 0;
+            for (int i = 0, j = n - 1; i < n; j = i++)
+            {
+                double xi = local[i].X, yi = local[i].Y;
+                double xj = local[j].X, yj = local[j].Y;
+                if ((yi > y) != (yj > y))
+                {
+                    double xc = (xj - xi) * (y - yi) / (yj - yi + 1e-12) + xi;
+
+                    // Insertion sort (n is tiny).
+                    int p = k++;
+                    while (p > 0 && crossings[p - 1] > xc)
+                    {
+                        crossings[p] = crossings[p - 1];
+                        p--;
+                    }
+                    crossings[p] = xc;
+                }
+            }
+            if (k == 0)
+            {
+                continue;
+            }
+
+            // Column x is inside iff #{c : x < c} is odd. With c sorted, for integer x in
+            // [ceil(c[m-1]), ceil(c[m]) - 1] exactly m crossings are <= x, so #{x < c} = k - m.
+            int rowBase = (y + ymin) * width + xmin;
+            for (int m = 0; m < k; m++)
+            {
+                if (((k - m) & 1) == 0)
+                {
+                    continue;
+                }
+
+                long start = m == 0 ? 0 : CeilToLong(crossings[m - 1]);
+                long end = CeilToLong(crossings[m]) - 1;
+                if (start < 0) start = 0;
+                if (end > localW - 1) end = localW - 1;
+                for (long x = start; x <= end; x++)
+                {
+                    sum += prob[rowBase + (int)x];
+                }
+                if (end >= start)
+                {
+                    count += end - start + 1;
+                }
+            }
+        }
+
+        return count == 0 ? 0f : (float)(sum / count);
+    }
+
+    /// <summary>
+    /// <c>ceil(v)</c> as a saturating long (so far-off crossings clamp harmlessly to the row span).
+    /// </summary>
+    private static long CeilToLong(double v)
+    {
+        double c = Math.Ceiling(v);
+        if (c >= long.MaxValue / 2) return long.MaxValue / 2;
+        if (c <= long.MinValue / 2) return long.MinValue / 2;
+        return (long)c;
+    }
+
+    /// <summary>
+    /// Reference per-pixel implementation of <see cref="BoxScoreFast"/> (the pre-scanline loop), kept for
+    /// equivalence tests only.
+    /// </summary>
+    internal static float BoxScoreFastReference(ReadOnlySpan<float> prob, int width, int height, OcrPoint[] quad)
+    {
+        double minXd = quad[0].X, maxXd = quad[0].X, minYd = quad[0].Y, maxYd = quad[0].Y;
+        for (int i = 1; i < quad.Length; i++)
+        {
+            minXd = Math.Min(minXd, quad[i].X);
+            maxXd = Math.Max(maxXd, quad[i].X);
+            minYd = Math.Min(minYd, quad[i].Y);
+            maxYd = Math.Max(maxYd, quad[i].Y);
+        }
+
+        int xmin = Math.Clamp((int)Math.Floor(minXd), 0, width - 1);
+        int xmax = Math.Clamp((int)Math.Ceiling(maxXd), 0, width - 1);
+        int ymin = Math.Clamp((int)Math.Floor(minYd), 0, height - 1);
+        int ymax = Math.Clamp((int)Math.Ceiling(maxYd), 0, height - 1);
+        if (xmax < xmin || ymax < ymin)
+        {
+            return 0f;
+        }
+
+        int localW = xmax - xmin + 1;
+        int localH = ymax - ymin + 1;
+        var local = new (double X, double Y)[quad.Length];
+        for (int i = 0; i < quad.Length; i++)
+        {
+            local[i] = ((int)(quad[i].X - xmin), (int)(quad[i].Y - ymin));
+        }
+
         double sum = 0;
         long count = 0;
         for (int y = 0; y < localH; y++)
@@ -645,26 +840,31 @@ internal static class DBPostProcess
     /// <summary>
     /// PaddleOCR's <c>box_score_slow</c>: the mean probability over the region's exact mask rather than the
     /// quad's bounding-box crop. PaddleOCR rasterizes the contour polygon with <c>cv2.fillPoly</c> and
-    /// averages the probability map under it; because <paramref name="regionPoints"/> are precisely the
+    /// averages the probability map under it; because the pixels carrying <paramref name="label"/> are precisely the
     /// connected component's labeled pixels, that mask equals this pixel set, so we average directly over it
     /// (no rasterization needed). This is slightly slower but more accurate than <see cref="BoxScoreFast"/>
     /// for slanted or non-rectangular regions, where the bounding-box crop bleeds in background probability.
+    /// The sum runs over the label map in raster order (the order the region's pixels were always visited),
+    /// so no per-pixel point list is materialized.
     /// </summary>
-    private static float BoxScoreSlow(ReadOnlySpan<float> prob, int width, IReadOnlyList<OcrPoint> regionPoints)
+    private static float BoxScoreSlow(ReadOnlySpan<float> prob, int[] labels, int width, ConnectedComponents.Stats stats, int label)
     {
-        if (regionPoints.Count == 0)
-        {
-            return 0f;
-        }
-
         double sum = 0;
-        for (int i = 0; i < regionPoints.Count; i++)
+        long count = 0;
+        for (int y = stats.MinY; y <= stats.MaxY; y++)
         {
-            var p = regionPoints[i];
-            sum += prob[(int)p.Y * width + (int)p.X];
+            int rowBase = y * width;
+            for (int x = stats.MinX; x <= stats.MaxX; x++)
+            {
+                if (labels[rowBase + x] == label)
+                {
+                    sum += prob[rowBase + x];
+                    count++;
+                }
+            }
         }
 
-        return (float)(sum / regionPoints.Count);
+        return count == 0 ? 0f : (float)(sum / count);
     }
 
     /// <summary>

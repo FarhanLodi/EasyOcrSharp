@@ -2,6 +2,7 @@ using System.Buffers;
 using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
 using EasyImageSharp.Processing;
+using EasyImageSharp.Tensors;
 
 namespace EasyOcrSharp.Internal;
 
@@ -19,6 +20,119 @@ internal static class ImageProcessing
     /// </summary>
     private const int MinCrnnWidth = 16;
 
+    // ImageNet normalization in 0-255 space for CRAFT: (pixel - mean*255) / (std*255),
+    // mean = (0.485, 0.456, 0.406), std = (0.229, 0.224, 0.225). Shared by both CRAFT packers so the
+    // fused path reproduces the reference arithmetic bit for bit.
+    private const float CraftMeanR = 0.485f * 255f, CraftMeanG = 0.456f * 255f, CraftMeanB = 0.406f * 255f;
+    private const float CraftStdR = 0.229f * 255f, CraftStdG = 0.224f * 255f, CraftStdB = 0.225f * 255f;
+
+    /// <summary>
+    /// Per-channel CRAFT normalization of every byte value — <c>(v - mean*255) / (std*255)</c>, the exact
+    /// expression <see cref="PreprocessForCraft"/> evaluates per pixel — R, G and B tables back to
+    /// back (768 entries).
+    /// </summary>
+    private static readonly float[] CraftNormalization = BuildCraftNormalization();
+
+    private static float[] BuildCraftNormalization()
+    {
+        var table = new float[768];
+        for (int i = 0; i < 256; i++)
+        {
+            float v = i;
+            table[i] = (v - CraftMeanR) / CraftStdR;
+            table[256 + i] = (v - CraftMeanG) / CraftStdG;
+            table[512 + i] = (v - CraftMeanB) / CraftStdB;
+        }
+        return table;
+    }
+
+    /// <summary>CRNN normalization to [-1, 1]: <c>(pixel/255 - 0.5) / 0.5</c>, as one mean and one std.</summary>
+    private static readonly float[] CrnnMean = [0.5f];
+    private static readonly float[] CrnnStd = [0.5f];
+
+    /// <summary>
+    /// <see cref="PreprocessForCraft"/> with the resize and the packing fused through EasyImageSharp's
+    /// <c>ResizeToTensor</c>, which filters the source a rolling window of rows at a time straight into the
+    /// padded canvas. Its sampling matches <c>Resize</c> exactly, but its normalization is
+    /// <c>(v/255 - mean) / std</c>, which can differ from EasyOCR's <c>(v - mean*255) / (std*255)</c> in the
+    /// last bit, so it writes plain <c>v/255</c> samples and a second pass maps each byte back through
+    /// <see cref="CraftNormalization"/>. The tensor is bit-identical to <see cref="PreprocessForCraft"/>.
+    /// </summary>
+    /// <remarks>
+    /// Not used in production: on EasyImageSharp 1.2.0 the fused resize runs on one thread while
+    /// <c>Resize</c> is parallel, and it measured 2.1–2.7× slower (median 69 vs 33 ms on a 1700×2200 page,
+    /// 323 vs 120 ms downscaling 3024×4032) for about 20 % less allocation. Kept, with its parity test, so a
+    /// later EasyImageSharp can be re-measured (<c>TensorPackingBenchmarkTests</c>) and switched in.
+    /// </remarks>
+    internal static CraftPreprocessResult PreprocessForCraftFused(Image<Rgb24> source, int canvasSize, double magRatio)
+    {
+        int srcW = source.Width;
+        int srcH = source.Height;
+
+        // Geometry: identical to PreprocessForCraft (see the comments there).
+        canvasSize = Math.Max(32, canvasSize);
+        magRatio = Math.Max(1e-3, magRatio);
+
+        double targetSize = magRatio * Math.Max(srcH, srcW);
+        if (targetSize > canvasSize) targetSize = canvasSize;
+
+        double ratio = targetSize / Math.Max(srcH, srcW);
+
+        int targetH = Math.Max(1, (int)(srcH * ratio));
+        int targetW = Math.Max(1, (int)(srcW * ratio));
+
+        int padH = Math.Max(32, (targetH + 31) / 32 * 32);
+        int padW = Math.Max(32, (targetW + 31) / 32 * 32);
+
+        long tensorLength = 3L * padH * padW;
+        if (tensorLength > Array.MaxLength)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(canvasSize), canvasSize,
+                $"DetectionOptions.CanvasSize {canvasSize} with MagRatio {magRatio} needs a {tensorLength}-element " +
+                "input tensor, which exceeds the maximum array length. Lower CanvasSize or MagRatio.");
+        }
+        var tensor = new float[(int)tensorLength];
+        int hwPad = padH * padW;
+
+        // Pad with normalized BLACK (EasyOCR pads in pixel space with zeros, then normalizes). The fused
+        // resize below writes only the top-left targetW x targetH window and leaves the rest untouched.
+        var table = CraftNormalization;
+        Array.Fill(tensor, table[0], 0 * hwPad, hwPad);
+        Array.Fill(tensor, table[256], 1 * hwPad, hwPad);
+        Array.Fill(tensor, table[512], 2 * hwPad, hwPad);
+
+        source.ResizeToTensor(
+            tensor,
+            new ResizeOptions { Size = new Size(targetW, targetH) },
+            new TensorWriteOptions { RowStride = padW, PlaneStride = hwPad });
+
+        // v/255 back to the byte it came from, then through the reference normalization. Every written
+        // sample is an exact i/255f, so the rounding recovers i with no ambiguity.
+        for (int c = 0; c < 3; c++)
+        {
+            var lut = table.AsSpan(c * 256, 256);
+            for (int y = 0; y < targetH; y++)
+            {
+                var row = tensor.AsSpan(c * hwPad + y * padW, targetW);
+                for (int x = 0; x < row.Length; x++)
+                {
+                    row[x] = lut[(int)(row[x] * 255f + 0.5f)];
+                }
+            }
+        }
+
+        double ratioH = 1.0 / ratio;
+        double ratioW = 1.0 / ratio;
+        double heatmapToSourceScale = 2.0;
+
+        return new CraftPreprocessResult(
+            Tensor: tensor,
+            Height: padH,
+            Width: padW,
+            HeatmapToSourceX: heatmapToSourceScale * ratioW,
+            HeatmapToSourceY: heatmapToSourceScale * ratioH);
+    }
 
     /// <summary>
     /// EasyOCR's CRAFT preprocessing: resize so the longer edge ≤ <paramref name="canvasSize"/>,
@@ -110,6 +224,73 @@ internal static class ImageProcessing
             Width: padW,
             HeatmapToSourceX: heatmapToSourceScale * ratioW,
             HeatmapToSourceY: heatmapToSourceScale * ratioH);
+    }
+
+    /// <summary>
+    /// <see cref="PreprocessForCrnn"/> with the resize and the packing fused through EasyImageSharp's
+    /// <c>ResizeToTensor</c> on the greyscaled crop. The normalization <c>(v/255 - 0.5) / 0.5</c> is the
+    /// same expression on the same bytes (the greyscale leaves R = G = B), so the tensor is bit-identical to
+    /// <see cref="PreprocessForCrnn"/>. The contrast stretch rewrites the grey bytes before normalization, so
+    /// that path delegates to <see cref="PreprocessForCrnn"/>.
+    /// </summary>
+    /// <remarks>
+    /// Not used in production: on EasyImageSharp 1.2.0 it measured 1.6× slower on a batch of 40 crops
+    /// (median 115 vs 73 ms) for about a third less allocation. Kept, with its parity test, for re-measuring
+    /// on a later EasyImageSharp (<c>TensorPackingBenchmarkTests</c>).
+    /// </remarks>
+    internal static float[] PreprocessForCrnnFused(Image<Rgb24> crop, int targetHeight, int maxWidth, bool adjustContrast, out int width, double contrastTarget = 0.5)
+    {
+        if (adjustContrast)
+        {
+            return PreprocessForCrnn(crop, targetHeight, maxWidth, adjustContrast, out width, contrastTarget);
+        }
+
+        int srcW = crop.Width;
+        int srcH = crop.Height;
+        if (srcH == 0 || srcW == 0)
+        {
+            width = 0;
+            return Array.Empty<float>();
+        }
+
+        // Geometry: identical to PreprocessForCrnn (see the comments there).
+        double ratio = (double)srcW / srcH;
+        int contentW = (int)Math.Ceiling(targetHeight * ratio);
+        if (contentW < 1) contentW = 1;
+        if (contentW > maxWidth) contentW = maxWidth;
+
+        int finalW = Math.Min(maxWidth, Math.Max(contentW, MinCrnnWidth));
+        width = finalW;
+
+        // The returned tensor escapes to ONNX Runtime, so it stays a plain allocation.
+        var tensor = new float[targetHeight * finalW];
+        using (var grey = crop.Clone(ctx => ctx.Grayscale()))
+        {
+            grey.ResizeToTensor(
+                tensor,
+                new ResizeOptions
+                {
+                    Size = new Size(contentW, targetHeight),
+                    Sampler = KnownResamplers.Bicubic,
+                    Mode = ResizeMode.Stretch,
+                },
+                new TensorWriteOptions { Channels = TensorChannels.Grayscale, RowStride = finalW },
+                CrnnMean,
+                CrnnStd);
+        }
+
+        // Right-pad narrow crops by replicating the last real column (EasyOCR's NormalizePAD). Same byte,
+        // same normalization, so copying the normalized value equals normalizing the replicated byte.
+        if (finalW > contentW)
+        {
+            for (int y = 0; y < targetHeight; y++)
+            {
+                var row = tensor.AsSpan(y * finalW, finalW);
+                row[contentW..].Fill(row[contentW - 1]);
+            }
+        }
+
+        return tensor;
     }
 
     /// <summary>

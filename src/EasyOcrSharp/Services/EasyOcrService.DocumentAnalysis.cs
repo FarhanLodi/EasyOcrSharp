@@ -134,6 +134,8 @@ public sealed partial class EasyOcrService
         ExecutionProvider = MapProvider(_engineOptions.ExecutionProvider),
         IntraOpNumThreads = _engineOptions.IntraOpNumThreads,
         InterOpNumThreads = _engineOptions.InterOpNumThreads,
+        AllowIntraOpSpinning = _engineOptions.AllowIntraOpSpinning,
+        CudnnConvAlgoSearch = _engineOptions.CudnnConvAlgoSearch,
         Download = MapDownload(_engineOptions.Download),
     };
 
@@ -146,7 +148,8 @@ public sealed partial class EasyOcrService
         _ => EasyOcrSharp.Structure.Engine.Services.OcrExecutionProvider.Auto,
     };
 
-    private static EasyOcrSharp.Structure.Engine.Services.ModelDownloadOptions MapDownload(ModelDownloadOptions download) => new()
+    // Internal so EasyOcrModels pre-downloads structure models with exactly the settings analysis uses.
+    internal static EasyOcrSharp.Structure.Engine.Services.ModelDownloadOptions MapDownload(ModelDownloadOptions download) => new()
     {
         MaxRetries = download.MaxRetries,
         RetryBaseDelay = download.RetryBaseDelay,

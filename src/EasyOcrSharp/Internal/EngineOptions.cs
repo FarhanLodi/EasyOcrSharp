@@ -19,6 +19,12 @@ internal sealed record EngineOptions
     /// <summary>Inter-op thread count for ONNX Runtime (null = runtime default).</summary>
     public int? InterOpNumThreads { get; init; }
 
+    /// <summary>ONNX Runtime <c>session.intra_op.allow_spinning</c> (null = runtime default).</summary>
+    public bool? AllowIntraOpSpinning { get; init; }
+
+    /// <summary>CUDA provider <c>cudnn_conv_algo_search</c> (null = runtime default).</summary>
+    public CudnnConvolutionAlgorithmSearch? CudnnConvAlgoSearch { get; init; }
+
     public ModelDownloadOptions Download { get; init; } = new();
 
     /// <summary>User-supplied recognizers (local ONNX models) that override built-in packs by language.</summary>

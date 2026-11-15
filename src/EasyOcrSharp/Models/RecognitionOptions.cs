@@ -206,6 +206,55 @@ public sealed record RecognitionOptions
     /// </summary>
     public GroupingOptions GroupingOptions { get; init; } = GroupingOptions.Default;
 
+    /// <summary>
+    /// Which model family runs this call. Defaults to <see cref="RecognitionEngine.EasyOcr"/> (CRAFT +
+    /// CRNN), whose behaviour is unchanged by this option. <see cref="RecognitionEngine.PpOcrV5"/> opts
+    /// into PaddleOCR's PP-OCRv5 detector and recognizers — the models behind
+    /// <c>AnalyzeDocumentAsync</c> — and returns the same result types.
+    /// </summary>
+    /// <remarks>
+    /// <para>Under <see cref="RecognitionEngine.PpOcrV5"/> the options apply as follows.</para>
+    /// <para><b>Honored:</b> <see cref="Grouping"/>, <see cref="ReadingDirection"/>,
+    /// <see cref="MinConfidence"/>, <see cref="Region"/>, <see cref="Preprocessing"/> (every step:
+    /// denoise / deskew / sharpen / binarize, the 0/90/180/270° <see cref="PreprocessingOptions.DetectOrientation"/>
+    /// sweep and the model-based document orientation / unwarp, exactly as on the default engine),
+    /// <see cref="AutoDetectLanguage"/> / <see cref="AutoDetectCandidates"/> (each candidate's PP-OCRv5
+    /// pack reads every line and the most confident reading wins; a confident Latin/CJK page stops after
+    /// the default pack when it is the first candidate), <see cref="Allowlist"/> / <see cref="Blocklist"/>,
+    /// <see cref="GroupingOptions"/> for paragraph merging, the engine-neutral detection opt-ins
+    /// <see cref="DetectionOptions.TileLargeImages"/> / <see cref="DetectionOptions.MinTextHeight"/> /
+    /// <see cref="DetectionOptions.EnhanceContrast"/> (applied to the DB detector), and
+    /// <see cref="WordLevelDetail"/> (<see cref="OcrLine.Words"/> are placed from the recognizer's CTC
+    /// timesteps; PP-OCRv5 has no per-character boxes, so <see cref="WordLevelDetail.Characters"/> also
+    /// returns words only).</para>
+    /// <para><b>Adapted:</b> <see cref="BatchSize"/> is PP-OCRv5's <c>rec_batch_num</c>; the default of 1
+    /// becomes PP-OCRv5's own default of 6 lines per run. <see cref="MaxDegreeOfParallelism"/> bounds only
+    /// <c>ExtractTextStreamAsync</c>'s concurrent chunks — buffered calls recognize batch by batch on ONNX
+    /// Runtime's intra-op threads. <see cref="TextGrouping.Word"/> returns the detector's raw boxes, which
+    /// are text-line segments rather than single words, and a streamed page yields those boxes one by one
+    /// (the buffered <see cref="TextGrouping.Line"/> merge of same-line fragments needs the whole page).
+    /// Languages are mapped to PP-OCRv5 packs (<c>en</c>/<c>ch_sim</c>/<c>ch_tra</c>/<c>ja</c> share the default pack;
+    /// <c>ko</c>, <c>ar</c>/<c>fa</c>/<c>ur</c>/<c>ug</c>, <c>ru</c>/<c>uk</c>/<c>be</c>, the other
+    /// Cyrillic codes, <c>hi</c> and the other Devanagari codes, the Latin-script codes, <c>th</c>,
+    /// <c>ta</c> and <c>te</c> each have a script pack); a request spanning several packs reads every
+    /// line with each and keeps the most confident reading, while <c>en</c> next to another script needs
+    /// no pack of its own because every PP-OCRv5 pack also reads Latin letters.</para>
+    /// <para><b>Ignored:</b> the CRAFT thresholds on <see cref="Detection"/> (PP-OCRv5 runs its DB
+    /// detector with PaddleOCR's defaults), <see cref="GroupingOptions"/> line-merge thresholds,
+    /// <see cref="Decoder"/> / <see cref="BeamWidth"/> / <see cref="Dictionary"/> (PP-OCRv5 decodes
+    /// greedily), <see cref="AdjustContrast"/> / <see cref="ContrastThreshold"/> /
+    /// <see cref="AdjustContrastTarget"/> (EasyOCR's contrast retry), <see cref="RotationInfo"/>
+    /// (PP-OCRv5's text-line orientation classifier corrects upside-down lines instead, each verdict
+    /// confirmed by recognizing both orientations).</para>
+    /// <para><b>Not supported:</b> <c>bn</c>, <c>as</c>, <c>mni</c> and <c>kn</c> (no PP-OCRv5 pack), <c>vi</c>
+    /// (the PP-OCRv5 Latin dictionary has none of Vietnamese's tone-marked vowels)
+    /// and custom recognizers registered on <see cref="Services.EasyOcrServiceOptions"/> throw
+    /// <see cref="ArgumentException"/>; use the default engine for them.
+    /// <see cref="Services.EasyOcrService.WarmUp"/> and <see cref="Services.EasyOcrService.DetectLanguagesAsync(EasyImageSharp.Image{EasyImageSharp.PixelFormats.Rgb24}, IEnumerable{string}, CancellationToken)"/>
+    /// always use the default engine.</para>
+    /// </remarks>
+    public RecognitionEngine Engine { get; init; } = RecognitionEngine.EasyOcr;
+
     /// <summary>The default options (line grouping, full parallelism, contrast retry on).</summary>
     public static RecognitionOptions Default { get; } = new();
 }

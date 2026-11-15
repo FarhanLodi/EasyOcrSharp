@@ -113,19 +113,13 @@ internal static partial class ExecutionProviderResolver
     /// <param name="logger">Optional logger for provider-attach diagnostics.</param>
     public static SessionBuildResult BuildSessionOptionsWithStatus(OcrExecutionProvider provider, StructureEngineOptions options, ILogger? logger)
     {
-        var opts = new SessionOptions
-        {
-            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
-        };
-
-        if (options.IntraOpNumThreads is { } intra and > 0) opts.IntraOpNumThreads = intra;
-        if (options.InterOpNumThreads is { } inter and > 0) opts.InterOpNumThreads = inter;
+        var opts = CreateBaseOptions(options);
 
         string? failureHint = null;
         switch (provider)
         {
             case OcrExecutionProvider.Cuda:
-                failureHint = TryAppendProvider(logger, provider, "CUDA", "EasyOcrSharp.Gpu", () => opts.AppendExecutionProvider_CUDA(options.DeviceId));
+                failureHint = TryAppendProvider(logger, provider, "CUDA", "EasyOcrSharp.Gpu", () => AppendCuda(opts, options));
                 break;
             case OcrExecutionProvider.DirectMl:
                 // DirectML needs sequential execution with memory pattern disabled.
@@ -145,6 +139,53 @@ internal static partial class ExecutionProviderResolver
         return failureHint is null
             ? new SessionBuildResult(opts, provider, null)
             : new SessionBuildResult(opts, OcrExecutionProvider.Cpu, failureHint);
+    }
+
+    /// <summary>
+    /// Session options before any provider is attached: full graph optimization, and the caller's thread
+    /// settings. Shared by every provider.
+    /// </summary>
+    internal static SessionOptions CreateBaseOptions(StructureEngineOptions options)
+    {
+        var opts = new SessionOptions
+        {
+            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+        };
+
+        if (options.IntraOpNumThreads is { } intra and > 0) opts.IntraOpNumThreads = intra;
+        if (options.InterOpNumThreads is { } inter and > 0) opts.InterOpNumThreads = inter;
+
+        // Intra-op spinning keeps worker threads busy-waiting between ops. It helps a single hot session
+        // but, with several sessions run back to back (det -> cls -> rec) each owning a pool, idle pools
+        // spin against the active one. Only set when the caller chose; null keeps ONNX Runtime's default.
+        if (options.AllowIntraOpSpinning is { } spin)
+        {
+            opts.AddSessionConfigEntry("session.intra_op.allow_spinning", spin ? "1" : "0");
+        }
+
+        return opts;
+    }
+
+    /// <summary>
+    /// Attaches the CUDA provider. Without a <see cref="StructureEngineOptions.CudnnConvAlgoSearch"/> choice
+    /// this is the plain device-id overload (unchanged behavior); otherwise the provider is configured
+    /// through <see cref="OrtCUDAProviderOptions"/> with <c>cudnn_conv_algo_search</c> set.
+    /// </summary>
+    private static void AppendCuda(SessionOptions opts, StructureEngineOptions options)
+    {
+        if (options.CudnnConvAlgoSearch is not { } search)
+        {
+            opts.AppendExecutionProvider_CUDA(options.DeviceId);
+            return;
+        }
+
+        using var cuda = new OrtCUDAProviderOptions();
+        cuda.UpdateOptions(new Dictionary<string, string>
+        {
+            ["device_id"] = options.DeviceId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["cudnn_conv_algo_search"] = EasyOcrSharp.Internal.ExecutionProviderResolver.CudnnSearchValue(search),
+        });
+        opts.AppendExecutionProvider_CUDA(cuda);
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using Microsoft.ML.OnnxRuntime;
+using EasyOcrSharp.Structure.Preprocess;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
@@ -20,12 +21,6 @@ internal sealed class TableClassifier : ITableClassifier
 {
     /// <summary>The fixed square input edge the classifier was exported with.</summary>
     private const int InputSize = 224;
-
-    /// <summary>ImageNet per-channel mean (RGB order).</summary>
-    private static readonly float[] Mean = { 0.485f, 0.456f, 0.406f };
-
-    /// <summary>ImageNet per-channel std (RGB order).</summary>
-    private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
 
     private readonly InferenceSession _session;
     private readonly string _inputName;
@@ -69,22 +64,10 @@ internal sealed class TableClassifier : ITableClassifier
 
         int plane = InputSize * InputSize;
         var data = new float[3 * plane];
-        resized.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < InputSize; y++)
-            {
-                Span<Rgb24> row = accessor.GetRowSpan(y);
-                int rowBase = y * InputSize;
-                for (int x = 0; x < InputSize; x++)
-                {
-                    Rgb24 px = row[x];
-                    int p = rowBase + x;
-                    data[p] = (px.R / 255f - Mean[0]) / Std[0];             // channel 0 (R)
-                    data[plane + p] = (px.G / 255f - Mean[1]) / Std[1];     // channel 1 (G)
-                    data[2 * plane + p] = (px.B / 255f - Mean[2]) / Std[2]; // channel 2 (B)
-                }
-            }
-        });
+        // (v/255 - mean) / std in RGB order -> channels 0/1/2, via the bit-identical lookup tables.
+        PlanarTensorPacker.Pack(
+            resized, 0, 0, InputSize, InputSize, data, InputSize, plane,
+            PlanarTensorPacker.ImageNet0, PlanarTensorPacker.ImageNet1, PlanarTensorPacker.ImageNet2, bgr: false);
 
         return new DenseTensor<float>(data, new[] { 1, 3, InputSize, InputSize });
     }

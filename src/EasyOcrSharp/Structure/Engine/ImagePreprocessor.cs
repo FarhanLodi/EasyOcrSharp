@@ -3,22 +3,42 @@ using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
 using EasyImageSharp.Processing;
 
+using OcrLine = EasyOcrSharp.Models.OcrLine;
+using OcrPoint = EasyOcrSharp.Models.OcrPoint;
+using OcrBoundingBox = EasyOcrSharp.Models.OcrBoundingBox;
+
 namespace EasyOcrSharp.Structure.Engine;
 
 /// <summary>
-/// Scanned-document clean-up: optional denoise, adaptive binarization, and projection-profile
-/// deskew. Orientation (90°/180°/270°) detection is handled at the service level because it needs
-/// the OCR result to score each rotation. Returns a new image; the caller owns and disposes it.
+/// Scanned-document clean-up: optional denoise, adaptive binarization, and deskew. Orientation
+/// (90°/180°/270°) detection is handled at the service level. Returns a new image; the caller owns and
+/// disposes it. When deskew rotates the page the working image is an enlarged canvas, and recognized
+/// coordinates must be mapped back with <see cref="MapFromRotatedCanvas"/>.
 /// </summary>
 internal static class ImagePreprocessor
 {
+    /// <summary>Largest skew (degrees, either direction) the deskew estimator searches.</summary>
+    internal const float MaxSkewDegrees = 15f;
+
+    /// <summary>Skews at or below this (degrees) are left alone — not worth a resampling pass.</summary>
+    internal const float MinDeskewDegrees = 0.1f;
+
     /// <summary>
     /// Applies denoise → deskew → binarize (in that order) per <paramref name="options"/>.
     /// Always returns a fresh image (a clone even when nothing is enabled) so the caller can dispose
     /// uniformly without touching the original.
     /// </summary>
     public static Image<Rgb24> Apply(Image<Rgb24> source, PreprocessingOptions options)
+        => Apply(source, options, out _);
+
+    /// <summary>
+    /// Applies denoise → deskew → binarize and reports, in <paramref name="deskewRotation"/>, the clockwise
+    /// rotation (degrees) the deskew step applied — 0 when the page was not rotated. A non-zero value means
+    /// the returned image is the rotated, enlarged canvas of <see cref="RotateWithWhiteBackground"/>.
+    /// </summary>
+    public static Image<Rgb24> Apply(Image<Rgb24> source, PreprocessingOptions options, out float deskewRotation)
     {
+        deskewRotation = 0f;
         var img = source.Clone();
         try
         {
@@ -29,12 +49,13 @@ internal static class ImagePreprocessor
 
             if (options.Deskew)
             {
-                double angle = EstimateSkewAngle(img);
-                if (Math.Abs(angle) > 0.1)
+                float rotation = EstimateDeskewRotation(img);
+                if (rotation != 0f)
                 {
-                    var rotated = RotateWithWhiteBackground(img, (float)angle);
+                    var rotated = RotateWithWhiteBackground(img, rotation);
                     img.Dispose();
                     img = rotated;
+                    deskewRotation = rotation;
                 }
             }
 
@@ -59,101 +80,104 @@ internal static class ImagePreprocessor
         => source.Clone(c => c.Rotate(degrees));
 
     /// <summary>
-    /// Estimates the correction angle (degrees) that best straightens the text using a
-    /// projection-profile search: the rotation that maximizes the variance of per-row ink counts
-    /// aligns text lines horizontally. Coarse pass then a fine refinement around the best coarse angle.
+    /// The clockwise rotation (degrees) that straightens the page, or 0 when the skew is negligible.
+    /// Uses EasyImageSharp's Hough estimator on background-normalized text baselines (one pass over a
+    /// downscaled luminance plane), which reports the content's clockwise skew; the correction is its
+    /// negation.
     /// </summary>
-    private static double EstimateSkewAngle(Image<Rgb24> source)
+    internal static float EstimateDeskewRotation(Image<Rgb24> image)
     {
-        // Downscale + binarize a working copy for speed.
-        using var work = source.Clone(c =>
-        {
-            if (source.Width > 800) c.Resize(800, 0);
-            c.Grayscale().BinaryThreshold(0.5f);
-        });
-
-        // Too few rows to measure row-ink variance against: every angle scores identically and the search
-        // degenerates. A 10000x3 strip resizes to 800x1, which is exactly this case.
-        if (work.Height < 8) return 0;
-
-        double coarse = SearchSkew(work, -15, 15, 1.0, out double coarseScore);
-        // Keep the refinement inside the documented +/-15 range; without the clamp a coarse winner at an
-        // endpoint lets the refine pass return -16.
-        double fine = SearchSkew(
-            work, Math.Max(-15, coarse - 1.0), Math.Min(15, coarse + 1.0), 0.2, out double fineScore);
-
-        // Only accept a rotation that actually beats leaving the page alone. On a blank page (or any image
-        // where the score is flat) every candidate ties, and without this the winner is whichever angle was
-        // tried first -- the most negative one -- so a blank scan was rotated -15 degrees for no reason.
-        double uprightScore = ScoreAngle(work, 0);
-        if (Math.Max(coarseScore, fineScore) <= uprightScore) return 0;
-        return fineScore >= coarseScore ? fine : coarse;
-    }
-
-    /// <summary>Row-ink variance of <paramref name="binary"/> rotated by <paramref name="degrees"/>.</summary>
-    private static double ScoreAngle(Image<Rgb24> binary, double degrees)
-    {
-        using var rot = RotateWithWhiteBackground(binary, (float)degrees);
-        return RowInkVariance(rot);
-    }
-
-    private static double SearchSkew(Image<Rgb24> binary, double from, double to, double step, out double bestScore)
-    {
-        double best = 0;
-        // Negative infinity, not -1: RowInkVariance is >= 0, so a -1 seed combined with the strict '>' below
-        // still picks the first candidate on a tie, but it also silently accepted a score of 0 as "better
-        // than nothing" and hid that the search never found a real maximum.
-        bestScore = double.NegativeInfinity;
-        for (double a = from; a <= to + 1e-9; a += step)
-        {
-            double score = ScoreAngle(binary, a);
-            if (score > bestScore)
-            {
-                bestScore = score;
-                best = a;
-            }
-        }
-        return best;
+        float skew = image.DetectSkew(MaxSkewDegrees);
+        return float.IsFinite(skew) && Math.Abs(skew) > MinDeskewDegrees ? -skew : 0f;
     }
 
     /// <summary>
-    /// Variance across rows of the dark-pixel count per row (higher ⇒ text lines aligned).
+    /// Rotates clockwise by an arbitrary angle onto an enlarged canvas, filling the exposed corners with
+    /// white (so binarization and detection don't see black triangles). Composites the transparent-corner
+    /// rotation over a white canvas.
     /// </summary>
-    private static double RowInkVariance(Image<Rgb24> binary)
-    {
-        int h = binary.Height, w = binary.Width;
-        var rowCounts = new double[h];
-        binary.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < h; y++)
-            {
-                var row = accessor.GetRowSpan(y);
-                int dark = 0;
-                for (int x = 0; x < w; x++)
-                    if (row[x].R < 128) dark++;
-                rowCounts[y] = dark;
-            }
-        });
-
-        double mean = 0;
-        for (int i = 0; i < h; i++) mean += rowCounts[i];
-        mean /= h;
-        double var = 0;
-        for (int i = 0; i < h; i++) { double d = rowCounts[i] - mean; var += d * d; }
-        return var / h;
-    }
-
-    /// <summary>
-    /// Rotates by an arbitrary angle, filling the exposed corners with white (so binarization and
-    /// detection don't see black triangles). Composites the transparent-corner rotation over a white
-    /// canvas.
-    /// </summary>
-    private static Image<Rgb24> RotateWithWhiteBackground(Image<Rgb24> source, float degrees)
+    internal static Image<Rgb24> RotateWithWhiteBackground(Image<Rgb24> source, float degrees)
     {
         using var rgba = source.CloneAs<Rgba32>();
         rgba.Mutate(c => c.Rotate(degrees)); // exposed area is transparent
         var result = new Image<Rgb24>(rgba.Width, rgba.Height, new Rgb24(255, 255, 255));
         result.Mutate(c => c.DrawImage(rgba, 1f));
         return result;
+    }
+
+    /// <summary>
+    /// Maps a point from the canvas produced by <see cref="RotateWithWhiteBackground"/> back into the
+    /// source image: <c>p_src = R(θ)·(p − c_canvas) + c_src</c>, the inverse of the clockwise rotation about
+    /// the image centres (continuous pixel-corner coordinates, matching the rotation's own sampling grid).
+    /// </summary>
+    internal static OcrPoint MapPointFromRotatedCanvas(
+        OcrPoint p, float rotationDegrees, int canvasWidth, int canvasHeight, int sourceWidth, int sourceHeight)
+    {
+        double rad = rotationDegrees * Math.PI / 180.0;
+        double cos = Math.Cos(rad), sin = Math.Sin(rad);
+        double tx = p.X - (canvasWidth / 2.0);
+        double ty = p.Y - (canvasHeight / 2.0);
+        return new OcrPoint(
+            (cos * tx) + (sin * ty) + (sourceWidth / 2.0),
+            (-sin * tx) + (cos * ty) + (sourceHeight / 2.0));
+    }
+
+    /// <summary>
+    /// The inverse of <see cref="MapPointFromRotatedCanvas"/>: maps a point of the source image onto the canvas
+    /// produced by <see cref="RotateWithWhiteBackground"/>, <c>p_canvas = R(−θ)·(p − c_src) + c_canvas</c>.
+    /// </summary>
+    internal static OcrPoint MapPointToRotatedCanvas(
+        OcrPoint p, float rotationDegrees, int canvasWidth, int canvasHeight, int sourceWidth, int sourceHeight)
+    {
+        double rad = rotationDegrees * Math.PI / 180.0;
+        double cos = Math.Cos(rad), sin = Math.Sin(rad);
+        double tx = p.X - (sourceWidth / 2.0);
+        double ty = p.Y - (sourceHeight / 2.0);
+        return new OcrPoint(
+            (cos * tx) - (sin * ty) + (canvasWidth / 2.0),
+            (sin * tx) + (cos * ty) + (canvasHeight / 2.0));
+    }
+
+    /// <summary>
+    /// Re-expresses a caller's <see cref="OcrRegion"/> (given against the source image) on the deskewed canvas:
+    /// the axis-aligned bounds of the region's rotated corners, in canvas pixels. The rotated rectangle is
+    /// slightly larger than the original, so text just outside a corner of the region can be read too.
+    /// </summary>
+    internal static OcrRegion MapRegionToRotatedCanvas(
+        OcrRegion region, float rotationDegrees, int canvasWidth, int canvasHeight, int sourceWidth, int sourceHeight)
+    {
+        if (rotationDegrees == 0f) return region;
+
+        var (x, y, w, h) = region.Resolve(sourceWidth, sourceHeight);
+        var box = OcrBoundingBox.FromPoints(new[]
+        {
+            new OcrPoint(x, y), new OcrPoint(x + w, y), new OcrPoint(x + w, y + h), new OcrPoint(x, y + h),
+        }.Select(p => MapPointToRotatedCanvas(p, rotationDegrees, canvasWidth, canvasHeight, sourceWidth, sourceHeight)));
+        return OcrRegion.Pixels(box.MinX, box.MinY, box.MaxX - box.MinX, box.MaxY - box.MinY);
+    }
+
+    /// <summary>
+    /// Maps recognized lines — and their word boxes — from the deskewed canvas back onto the original
+    /// (unrotated) source image.
+    /// </summary>
+    internal static IReadOnlyList<OcrLine> MapFromRotatedCanvas(
+        IReadOnlyList<OcrLine> lines, float rotationDegrees, int canvasWidth, int canvasHeight, int sourceWidth, int sourceHeight)
+    {
+        if (rotationDegrees == 0f || lines.Count == 0) return lines;
+
+        OcrPoint Map(OcrPoint p) => MapPointFromRotatedCanvas(p, rotationDegrees, canvasWidth, canvasHeight, sourceWidth, sourceHeight);
+
+        var mapped = new List<OcrLine>(lines.Count);
+        foreach (var line in lines)
+        {
+            var poly = TextSkew.CornersOf(line).Select(Map).ToArray();
+            mapped.Add(line with
+            {
+                BoundingPolygon = poly,
+                BoundingBox = OcrBoundingBox.FromPoints(poly),
+                Words = Recognition.WordBoxBuilder.Transform(line.Words, Map),
+            });
+        }
+        return mapped;
     }
 }

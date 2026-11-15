@@ -161,11 +161,11 @@ public sealed class OcrDatasetBenchmarkTests : IClassFixture<OcrDatasetBenchmark
 
     /// <summary>
     /// Pages with an open, understood defect, excluded from the string checks so the rest of the category still
-    /// guards against regressions. 005: its body lines are still merged into one box after the 2026-09-13
-    /// tilted-line fix (OCR returns only the banner and "==="); the other plain-text pages recover every
-    /// string. Remove the entry once line grouping handles this layout.
+    /// guards against regressions. Empty since 3.2.0: 005 (a page rotated ~1.5°, whose lines were merged into
+    /// one box) reads every string now that tilted lines are joined along their fitted course and cut as
+    /// slanted regions.
     /// </summary>
-    private static readonly HashSet<string> KnownGroupingFailures = new(StringComparer.Ordinal) { "005_plain_text.png" };
+    private static readonly HashSet<string> KnownGroupingFailures = new(StringComparer.Ordinal);
 
     [SkippableFact]
     public async Task Plain_text_pages_recover_their_known_strings()

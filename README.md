@@ -535,6 +535,31 @@ if (result.TextLayerFontStatus == PdfTextLayerFontStatus.Unavailable)
 > one, or let the built-in probe find an installed system font. If nothing suitable exists the output
 > falls back to the old Helvetica layer rather than failing, and `TextLayerFontStatus` tells you so.
 
+#### Born-digital pages, auto DPI and streaming
+
+Pages that already carry real text don't need OCR at all. With `TextLayer`, those pages are read
+straight from the PDF — exact text, in milliseconds — with lines and words placed in the same pixel
+space OCR uses. A quality gate sends pages with broken text encodings back to OCR, and `Auto` also
+OCRs scans that carry only a stray digital header.
+
+```csharp
+var doc = await ocr.ExtractTextFromPdfAsync("mixed.pdf", new[] { "en" }, pdfOptions: new()
+{
+    TextLayer = PdfTextLayerMode.Auto,   // Ignore (default) | PreferEmbedded | Auto
+    Dpi       = PdfOcrOptions.AutoDpi,   // per page: fills the detector's canvas (Letter ≈ 232 DPI)
+});
+
+foreach (var page in doc.Pages)
+    Console.WriteLine($"Page {page.PageNumber}: {page.Source} at {page.Dpi} DPI");
+
+// Pages arrive as they finish; breaking out stops rendering.
+await foreach (var page in ocr.ExtractTextFromPdfPagesAsync(stream, new[] { "en" }))
+    Console.WriteLine(page.Ocr.FullText);
+```
+
+`ExtractTextFromPdfAsync` and `CreateSearchablePdfAsync` also accept `Stream`s (non-seekable is fine).
+A searchable PDF built from born-digital pages carries their own text as the single invisible layer.
+
 ### 🖼️ Multi-frame TIFF
 
 Scanners emit multi-page TIFFs. Read every frame, not just the first:
@@ -709,9 +734,83 @@ Anchor matching is fuzzy, so OCR damage like `Totai` still resolves; distances a
 multiples of the anchor's line height, so the same definition works at any resolution; and a plain
 `"Total: 42.00"` on one line is extracted without any geometry at all.
 
+### 🔎 Patterns, quality, MRZ, layout text & zones
+
+```csharp
+using EasyOcrSharp.Extraction;
+
+// Values with page positions: e-mail, URL, phone, date, amount, IBAN (mod-97), card (Luhn), percent.
+foreach (var m in result.FindMatches(OcrPatterns.All))
+    Console.WriteLine($"{m.Kind}: {m.Value} → {m.Normalized} at {m.BoundingBox}");
+
+// Which lines should a person check?
+var quality = result.GetQuality();
+var review  = result.GetLinesForReview(threshold: 0.8);
+
+// Passports and ID cards (ICAO 9303 TD1/TD2/TD3), every check digit verified.
+var mrzScan = await ocr.ExtractTextFromImage("passport.jpg", new[] { "en" }, MrzParser.RecommendedRecognitionOptions);
+if (MrzParser.TryParse(mrzScan, out var mrz) && mrz!.IsValid)
+    Console.WriteLine($"{mrz.Surname}, {mrz.GivenNames} — {mrz.DocumentNumber}, expires {mrz.ExpiryDate}");
+
+// Receipts and LLM prompts: columns stay aligned, like pdftotext -layout.
+Console.WriteLine(result.ToLayoutText());
+
+// Template OCR: read named regions (pixels or page fractions), each with its own allowlist.
+var zones = await ocr.RecognizeZonesAsync("form.png", new[]
+{
+    new OcrZone("Name",  OcrRegion.Fraction(0.10, 0.20, 0.50, 0.05)),
+    new OcrZone("Total", OcrRegion.Fraction(0.70, 0.85, 0.25, 0.05), ZoneMode.SingleLine, Allowlist: "0123456789.,"),
+}, new[] { "en" });
+Console.WriteLine(zones["Total"].Text);
+```
+
+Validators accept OCR look-alikes (`O` for `0`) only where a checksum confirms the fix, and never change
+`Value`; the repaired form is in `Normalized`.
+
 <br>
 
 # 🎯 Accuracy & tuning
+
+### PP-OCRv5 engine (opt-in)
+
+The default pipeline is EasyOCR's CRAFT detector and CRNN recognizers. One option switches a call to
+PaddleOCR's PP-OCRv5 detector, text-line orientation classifier and SVTR recognizers — the models
+`AnalyzeDocumentAsync` already uses — and returns the same `OcrResult`:
+
+```csharp
+var options = new RecognitionOptions { Engine = RecognitionEngine.PpOcrV5 };
+var result  = await ocr.ExtractTextFromImage("scan.png", new[] { "en" }, options);
+```
+
+It works on `ExtractTextFromImage` (every overload), `ExtractTextStreamAsync`, `RecognizeRegionsAsync`
+and `DetectRegionsAsync`, and shares one set of model sessions with document analysis. EasyOCR language
+codes map to PP-OCRv5 packs (`bn`, `as`, `mni`, `kn` and `vi` — whose tone-marked vowels PP-OCRv5's Latin
+dictionary lacks — throw). CRAFT's thresholds, the beam
+decoders and the contrast retry don't apply; the full per-option list is on `RecognitionOptions.Engine`.
+In our measurements it was 2.7× faster on CPU and far more accurate on tables, multi-language pages,
+signs and scanned forms, and on Cyrillic, Han and Arabic text; it was weaker on rotated or
+perspective-distorted pages (pair it with `DocumentOrientation`), and `en`-only requests can pick up a
+stray CJK glyph. Run the engine-comparison benchmark (`dotnet test --filter Benchmark=EngineComparison`)
+on your own documents before switching.
+
+### Hard pages: very large, tiny text, faded scans, faxes
+
+```csharp
+var options = new RecognitionOptions
+{
+    Detection = new DetectionOptions
+    {
+        TileLargeImages = true,  // long receipts, drawings: detect in full-resolution tiles instead of shrinking
+        MinTextHeight   = 16,    // screenshots, low-DPI photos: re-detect magnified when text is this small
+        EnhanceContrast = true,  // faded or unevenly lit scans: detect on a contrast-stretched copy
+    },
+};
+```
+
+All three are off by default and apply to both engines. Recognition always reads the original pixels,
+and boxes always come back on the image you passed. Fax pages whose metadata declares non-square pixels
+(e.g. 204×98 DPI) are resampled to square pixels before OCR
+(`PreprocessingOptions.CorrectNonSquarePixels`, on by default; square-pixel images are untouched).
 
 ### Constrained fields (allow/block-lists & detection thresholds)
 
@@ -898,6 +997,8 @@ await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
 {
     ExecutionProvider = OcrExecutionProvider.Cuda, // Auto (default) | Cpu | Cuda | CoreMl
     IntraOpNumThreads = 4,   // cap CPU use in multi-tenant servers (null = runtime default)
+    AllowIntraOpSpinning = false,                                  // stop idle thread pools busy-waiting on shared hosts
+    CudnnConvAlgoSearch  = CudnnConvolutionAlgorithmSearch.Heuristic, // CUDA: don't re-benchmark every new page/line shape
 });
 ```
 
@@ -1170,7 +1271,17 @@ await using var ocr = new EasyOcrService(new EasyOcrServiceOptions
 ```
 
 For **air-gapped** deployments, pre-seed the cache and set `Offline = true` — a missing model then
-throws a clear error instead of attempting a download.
+throws a clear error instead of attempting a download. To fill the cache ahead of time (a Docker build
+step, say):
+
+```csharp
+var report = await EasyOcrModels.DownloadAsync(new[] { "en", "fr" },
+    EasyOcrModelSet.Ocr | EasyOcrModelSet.DocumentPreprocessing | EasyOcrModelSet.Structure);
+report.EnsureSuccess();                       // throws if any file failed
+
+var check = EasyOcrModels.CheckCache(new[] { "en", "fr" });   // no network, creates nothing
+Console.WriteLine($"{check.CachedCount} cached, {check.MissingCount} missing");
+```
 
 ### 🖥️ Command-line tool
 
@@ -1197,7 +1308,9 @@ easyocrsharp info
 
 `scan` writes results to stdout and errors to stderr so it pipes cleanly, exits non-zero on failure,
 and accepts the same tuning as the library (`--allowlist`, `--min-confidence`, `--paragraph`,
-`--preprocess deskew,binarize,sharpen`, `--gpu`, `--jobs`). Add `--help` to any command.
+`--preprocess deskew,binarize,sharpen`, `--engine ppocrv5`, `--gpu`, `--jobs`). For PDFs, `--dpi auto`
+sizes each page to the detector and `--text-layer prefer|auto` reads born-digital pages from their own
+text. Add `--help` to any command.
 
 ### 🌐 Web service sample
 

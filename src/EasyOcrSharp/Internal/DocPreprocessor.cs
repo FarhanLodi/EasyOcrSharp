@@ -3,6 +3,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
 using EasyImageSharp.Processing;
+using EasyImageSharp.Tensors;
 
 namespace EasyOcrSharp.Internal;
 
@@ -163,8 +164,36 @@ internal sealed class DocPreprocessor : IDisposable
     /// 383/400 correct verdicts against 395/400 for this stretch (C# spot check 28/36 vs 35/36). The center
     /// crop lands on column gutters, so upright multi-column pages were classified as 180°. The stretch sees
     /// the whole page, and this option exists to fix whole-page rotation, so it is kept.
+    /// <para>
+    /// The resize and the packing are fused through EasyImageSharp's <c>ResizeToTensor</c>, so the
+    /// intermediate 224×224 image is never materialized; its sampling matches <c>Resize</c> exactly and its
+    /// normalization is the same per-channel <c>(pixel/255 - mean) / std</c>, so the tensor is bit-identical
+    /// to <see cref="BuildOrientationTensorReference"/>.
+    /// </para>
     /// </remarks>
     internal static DenseTensor<float> BuildOrientationTensor(Image<Rgb24> image)
+    {
+        var tensor = new DenseTensor<float>(new[] { 1, 3, OrientSize, OrientSize });
+        image.ResizeToTensor(
+            tensor.Buffer.Span,
+            new ResizeOptions
+            {
+                Size = new Size(OrientSize, OrientSize),
+                Mode = ResizeMode.Stretch,
+                Sampler = KnownResamplers.Bicubic,
+            },
+            tensorOptions: null,
+            channelMean: Mean,
+            channelStd: Std);
+        return tensor;
+    }
+
+    /// <summary>
+    /// The orientation packer as it stood before the fused <c>ResizeToTensor</c> path: <c>Resize</c> into a
+    /// full intermediate image, then a per-pixel normalization loop. Kept as the parity oracle for
+    /// <see cref="BuildOrientationTensor"/>; production code does not call it.
+    /// </summary>
+    internal static DenseTensor<float> BuildOrientationTensorReference(Image<Rgb24> image)
     {
         using var resized = image.Clone(ctx => ctx.Resize(new ResizeOptions
         {
@@ -290,7 +319,59 @@ internal sealed class DocPreprocessor : IDisposable
     /// ImageNet normalization — it drives the output out of [0,1]), <b>BGR</b> plane order (what the model
     /// was trained on), CHW layout, with the last row/column edge-replicated into the stride padding.
     /// </summary>
+    /// <remarks>
+    /// A page at its working size is written straight into the strided tensor by EasyImageSharp's
+    /// <c>WriteTensor</c>, and the stride padding is then filled by copying the last real column and row;
+    /// <c>(p/255 - 0) / 1</c> is <c>p/255</c>, so the tensor is bit-identical to
+    /// <see cref="BuildUnwarpTensorReference"/>, and faster (median 7.8 vs 10.0 ms). A page the memory cap
+    /// shrank goes through <see cref="BuildUnwarpTensorReference"/> instead: the fused <c>ResizeToTensor</c>
+    /// is single-threaded on EasyImageSharp 1.2.0 and measured 2.0× slower than the parallel <c>Resize</c>.
+    /// </remarks>
     internal static DenseTensor<float> BuildUnwarpTensor(Image<Rgb24> image, UnwarpGeometry g)
+    {
+        int workW = g.WorkWidth, workH = g.WorkHeight, padW = g.PaddedWidth, padH = g.PaddedHeight;
+        if (image.Width != workW || image.Height != workH)
+        {
+            return BuildUnwarpTensorReference(image, g);
+        }
+
+        int plane = padW * padH;
+
+        var tensor = new DenseTensor<float>(new[] { 1, 3, padH, padW });
+        var buffer = tensor.Buffer.Span;
+        var layout = new TensorWriteOptions { Channels = TensorChannels.Bgr, RowStride = padW, PlaneStride = plane };
+        image.WriteTensor(buffer, layout);
+
+        // Edge-replicate into the stride padding: the last real column across each row, then the last real
+        // row down the remaining rows, per plane.
+        for (int c = 0; c < 3; c++)
+        {
+            var planeSpan = buffer.Slice(c * plane, plane);
+            if (padW > workW)
+            {
+                for (int y = 0; y < workH; y++)
+                {
+                    var row = planeSpan.Slice(y * padW, padW);
+                    row[workW..].Fill(row[workW - 1]);
+                }
+            }
+
+            var lastRow = planeSpan.Slice((workH - 1) * padW, padW);
+            for (int y = workH; y < padH; y++)
+            {
+                lastRow.CopyTo(planeSpan.Slice(y * padW, padW));
+            }
+        }
+
+        return tensor;
+    }
+
+    /// <summary>
+    /// The UVDoc packer without <c>WriteTensor</c>: an optional <c>Resize</c> into a full intermediate image,
+    /// then a per-pixel loop over the padded canvas. <see cref="BuildUnwarpTensor"/> uses it for pages the
+    /// memory cap shrank, and it is the parity oracle for the full-size path.
+    /// </summary>
+    internal static DenseTensor<float> BuildUnwarpTensorReference(Image<Rgb24> image, UnwarpGeometry g)
     {
         int workW = g.WorkWidth, workH = g.WorkHeight, padW = g.PaddedWidth, padH = g.PaddedHeight;
 

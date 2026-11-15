@@ -58,12 +58,106 @@ internal sealed class DbTextDetector : ITextDetector
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(options);
 
-        int origW = image.Width;
-        int origH = image.Height;
-        if (origW == 0 || origH == 0)
+        if (image.Width == 0 || image.Height == 0)
         {
             return Array.Empty<TextQuad>();
         }
+
+        if (!options.EnhanceContrast && !options.TileLargeImages && options.MinTextHeight <= 0)
+        {
+            // Default path: a single pass, exactly as Python PaddleOCR.
+            return DetectOnce(image, options);
+        }
+
+        // Opt-in passes. The enhanced copy feeds only the detector; coordinates are unchanged by it.
+        using Image<Rgb24>? enhanced = options.EnhanceContrast
+            ? image.Clone(ctx => ctx.BackgroundNormalize(0).ContrastStretch(0.5f, 99.5f))
+            : null;
+        var source = enhanced ?? image;
+
+        if (options.TileLargeImages && DetectionTiling.ShouldTile(source.Width, source.Height, options, out int tileLength))
+        {
+            return DetectTiled(source, options, tileLength);
+        }
+
+        var quads = DetectOnce(source, options);
+        if (options.MinTextHeight <= 0)
+        {
+            return quads;
+        }
+
+        int longSide = Math.Max(source.Width, source.Height);
+        int shortSide = Math.Min(source.Width, source.Height);
+        double factor = quads.Count == 0
+            ? (longSide < DetectionTiling.EmptyRetryMaxSide
+                ? Math.Min(2.0, (double)(options.MaxSideLimit > 0 ? options.MaxSideLimit : 4000) / longSide)
+                : 1)
+            : DetectionTiling.UpscaleFactor(DetectionTiling.MedianShortSide(quads), options.MinTextHeight, longSide, options.MaxSideLimit);
+        if (factor <= 1.05)
+        {
+            return quads;
+        }
+
+        // Re-detect upscaled: limit_type=min with the short side brought to factor × its size.
+        var upscaled = DetectOnce(source, options with
+        {
+            LimitTypeMax = false,
+            LimitSideLen = Math.Max(options.LimitTypeMax ? 64 : options.LimitSideLen, (int)(shortSide * factor)),
+        });
+        return upscaled;
+    }
+
+    /// <summary>
+    /// <see cref="DetectionOptions.TileLargeImages"/>: detects overlapping tiles along the long axis at full
+    /// resolution, offsets their quads into image coordinates, and merges the overlaps.
+    /// </summary>
+    private IReadOnlyList<TextQuad> DetectTiled(Image<Rgb24> image, DetectionOptions options, int tileLength)
+    {
+        bool vertical = image.Height >= image.Width;
+        int longSide = vertical ? image.Height : image.Width;
+        var tiles = DetectionTiling.PlanTiles(longSide, tileLength, DetectionTiling.TileOverlap);
+        var candidates = new List<(TextQuad Quad, bool TouchesCut)>();
+        const float edgeTolerance = 2f;
+
+        for (int t = 0; t < tiles.Count; t++)
+        {
+            var (start, length) = tiles[t];
+            var rect = vertical
+                ? new Rectangle(0, start, image.Width, length)
+                : new Rectangle(start, 0, length, image.Height);
+            using var tile = image.Clone(ctx => ctx.Crop(rect));
+            var quads = DetectOnce(tile, options);
+
+            bool cutBefore = t > 0;
+            bool cutAfter = t < tiles.Count - 1;
+            foreach (var q in quads)
+            {
+                var b = q.ToAxisAlignedBounds();
+                float lo = vertical ? b.Top : b.Left;
+                float hi = vertical ? b.Bottom : b.Right;
+                bool touches = (cutBefore && lo <= edgeTolerance) || (cutAfter && hi >= length - edgeTolerance);
+                float dx = vertical ? 0 : start;
+                float dy = vertical ? start : 0;
+                var shifted = new TextQuad(
+                    new PointF(q.P0.X + dx, q.P0.Y + dy),
+                    new PointF(q.P1.X + dx, q.P1.Y + dy),
+                    new PointF(q.P2.X + dx, q.P2.Y + dy),
+                    new PointF(q.P3.X + dx, q.P3.Y + dy),
+                    q.Score);
+                candidates.Add((shifted, touches));
+            }
+        }
+
+        return DetectionTiling.Merge(candidates, 0.5);
+    }
+
+    /// <summary>
+    /// One detector pass: resize per <paramref name="options"/>, infer, post-process, map back.
+    /// </summary>
+    private IReadOnlyList<TextQuad> DetectOnce(Image<Rgb24> image, DetectionOptions options)
+    {
+        int origW = image.Width;
+        int origH = image.Height;
 
         // DetResizeForTest zero-pads tiny inputs (h + w < 64) onto a ≥32×32 canvas before resizing;
         // boxes still map back against the original dimensions (Python scales by src_w / map_w).
@@ -184,17 +278,10 @@ internal sealed class DbTextDetector : ITextDetector
     /// </summary>
     private static DenseTensor<float> BuildInputTensor(Image<Rgb24> image, int resizeW, int resizeH)
     {
-        using var resized = image.Clone(ctx => ctx.Resize(new ResizeOptions
-        {
-            Size = new Size(resizeW, resizeH),
-            Mode = ResizeMode.Stretch,
-            Sampler = KnownResamplers.Triangle, // bilinear (cv2.resize default INTER_LINEAR)
-        }));
-
-        var tensor = new DenseTensor<float>(new[] { 1, 3, resizeH, resizeW });
-        // Checked in long before narrowing. On the limit_type=min path a 10000x3 image scales to
-        // 3,200,000 x 960, and resizeH * resizeW overflows int to a NEGATIVE value -- so the tensor
-        // allocation above fails with an arithmetic error rather than anything naming the real problem.
+        // Checked in long before narrowing, and before the resize and the tensor allocation. On the
+        // limit_type=min path a 10000x3 image scales to 3,200,000 x 960, and resizeH * resizeW overflows int
+        // to a NEGATIVE value -- so the resize/allocation would fail with an arithmetic or out-of-memory error
+        // rather than anything naming the real problem.
         long planeLong = (long)resizeH * resizeW;
         if (planeLong * 3 > Array.MaxLength)
         {
@@ -204,28 +291,62 @@ internal sealed class DbTextDetector : ITextDetector
                 "aspect ratio.");
         }
 
+        using var resized = image.Clone(ctx => ctx.Resize(new ResizeOptions
+        {
+            Size = new Size(resizeW, resizeH),
+            Mode = ResizeMode.Stretch,
+            Sampler = KnownResamplers.Triangle, // bilinear (cv2.resize default INTER_LINEAR)
+        }));
+
+        var tensor = new DenseTensor<float>(new[] { 1, 3, resizeH, resizeW });
         int plane = (int)planeLong;
         Memory<float> bufferMem = tensor.Buffer;
 
-        resized.ProcessPixelRows(accessor =>
+        resized.DangerousTryGetSinglePixelMemory(out Memory<Rgb24> pixelMem);
+        var lutB = NormalizationLut[0];
+        var lutG = NormalizationLut[1];
+        var lutR = NormalizationLut[2];
+
+        // Rows are independent; each writes a disjoint slice of the three planes.
+        Parallel.For(0, resizeH, y =>
         {
+            var row = pixelMem.Span.Slice(y * resizeW, resizeW);
             var buffer = bufferMem.Span;
-            for (int y = 0; y < resizeH; y++)
+            int rowOffset = y * resizeW;
+            var bPlane = buffer.Slice(rowOffset, resizeW);
+            var gPlane = buffer.Slice(plane + rowOffset, resizeW);
+            var rPlane = buffer.Slice(2 * plane + rowOffset, resizeW);
+            for (int x = 0; x < row.Length; x++)
             {
-                var row = accessor.GetRowSpan(y);
-                int rowOffset = y * resizeW;
-                for (int x = 0; x < resizeW; x++)
-                {
-                    var px = row[x];
-                    int idx = rowOffset + x;
-                    buffer[idx] = (px.B / 255f - Mean[0]) / Std[0];            // B plane
-                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];     // G plane
-                    buffer[2 * plane + idx] = (px.R / 255f - Mean[2]) / Std[2]; // R plane
-                }
+                var px = row[x];
+                bPlane[x] = lutB[px.B]; // B plane
+                gPlane[x] = lutG[px.G]; // G plane
+                rPlane[x] = lutR[px.R]; // R plane
             }
         });
 
         return tensor;
+    }
+
+    /// <summary>
+    /// Per-channel lookup tables (B, G, R index order) holding <c>(v / 255f - Mean[c]) / Std[c]</c> for
+    /// every byte value, built with exactly the per-pixel expression so the tensor is bit-identical.
+    /// </summary>
+    private static readonly float[][] NormalizationLut = BuildNormalizationLut();
+
+    private static float[][] BuildNormalizationLut()
+    {
+        var luts = new float[3][];
+        for (int c = 0; c < 3; c++)
+        {
+            luts[c] = new float[256];
+            for (int v = 0; v < 256; v++)
+            {
+                byte b = (byte)v;
+                luts[c][v] = (b / 255f - Mean[c]) / Std[c];
+            }
+        }
+        return luts;
     }
 
     /// <summary>

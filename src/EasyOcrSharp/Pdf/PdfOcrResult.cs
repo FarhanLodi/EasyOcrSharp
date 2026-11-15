@@ -16,6 +16,22 @@ public sealed record PdfPageResult
 
     /// <summary>Rendered page height in pixels (at the configured DPI).</summary>
     public int PixelHeight { get; init; }
+
+    /// <summary>
+    /// The resolution this page was rendered at — the pixel space of <see cref="PixelWidth"/>,
+    /// <see cref="PixelHeight"/> and every coordinate in <see cref="Ocr"/>. Equals
+    /// <see cref="PdfOcrOptions.Dpi"/>, or the resolution chosen for this page when that is
+    /// <see cref="PdfOcrOptions.AutoDpi"/>. Multiply a pixel coordinate by <c>72 / Dpi</c> for PDF points on
+    /// the rendered page (PDFium has already applied the page's <c>/Rotate</c> and crop box).
+    /// </summary>
+    public int Dpi { get; init; }
+
+    /// <summary>
+    /// Whether the text came from OCR or from the PDF's embedded text layer — see
+    /// <see cref="PdfOcrOptions.TextLayer"/>. Always <see cref="PdfPageSource.Ocr"/> while that option is
+    /// left at its default.
+    /// </summary>
+    public PdfPageSource Source { get; init; } = PdfPageSource.Ocr;
 }
 
 /// <summary>

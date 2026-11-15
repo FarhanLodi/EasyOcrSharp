@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyOcrSharp.Structure.Engine.Models;
+using EasyOcrSharp.Structure.Preprocess;
 using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
 using EasyImageSharp.Processing;
@@ -64,16 +65,6 @@ internal sealed class SlanetTableRecognizer : ITableRecognizer
     /// </para>
     /// </summary>
     private readonly bool _contentNormalizedBoxes;
-
-    /// <summary>
-    /// ImageNet per-channel mean (RGB order), the SLANet normalization the model was trained with.
-    /// </summary>
-    private static readonly float[] Mean = { 0.485f, 0.456f, 0.406f };
-
-    /// <summary>
-    /// ImageNet per-channel std (RGB order).
-    /// </summary>
-    private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
 
     /// <summary>
     /// The structure tokens whose appearance in the decoded sequence consumes one bounding-box row from the
@@ -345,26 +336,11 @@ internal sealed class SlanetTableRecognizer : ITableRecognizer
         int plane = inputSize * inputSize;
         var data = new float[3 * plane];
 
-        resized.ProcessPixelRows(accessor =>
-        {
-            for (int y = 0; y < resizeH; y++)
-            {
-                Span<Rgb24> row = accessor.GetRowSpan(y);
-                int rowBase = y * inputSize;
-                for (int x = 0; x < resizeW; x++)
-                {
-                    Rgb24 px = row[x];
-                    // (x/255 - mean) / std, per channel, ImageNet statistics.
-                    float r = (px.R / 255f - Mean[0]) / Std[0];
-                    float g = (px.G / 255f - Mean[1]) / Std[1];
-                    float b = (px.B / 255f - Mean[2]) / Std[2];
-                    int p = rowBase + x;
-                    data[p] = r;                 // channel 0 (R)
-                    data[plane + p] = g;         // channel 1 (G)
-                    data[2 * plane + p] = b;     // channel 2 (B)
-                }
-            }
-        });
+        // (v/255 - mean) / std per channel, ImageNet statistics, R/G/B -> channels 0/1/2, via the
+        // bit-identical lookup tables.
+        PlanarTensorPacker.Pack(
+            resized, 0, 0, resizeW, resizeH, data, inputSize, plane,
+            PlanarTensorPacker.ImageNet0, PlanarTensorPacker.ImageNet1, PlanarTensorPacker.ImageNet2, bgr: false);
 
         // [1, 3, inputSize, inputSize] (488 for SLANet_plus, 512 for SLANeXt).
         return new DenseTensor<float>(data, new[] { 1, 3, inputSize, inputSize });

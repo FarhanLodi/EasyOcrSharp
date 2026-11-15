@@ -22,4 +22,13 @@ internal interface IAngleClassifier : IDisposable
     /// so that low-confidence misfires do not flip upright text.
     /// </returns>
     (bool Rotated, float Score) Classify(Image<Rgb24> crop);
+
+    /// <summary>
+    /// Classifies many crops in fixed-size batches (the model input is a fixed 80×160, so batching never
+    /// pads). The result is positional: element <c>i</c> is the raw verdict for <paramref name="crops"/>[i].
+    /// </summary>
+    /// <param name="crops">The upright text-line crops to classify (caller retains ownership of each).</param>
+    /// <param name="maxDegreeOfParallelism">Maximum threads used to build each batch's input tensor.</param>
+    /// <returns>One (rotated, score) verdict per crop, in input order.</returns>
+    IReadOnlyList<(bool Rotated, float Score)> Classify(IReadOnlyList<Image<Rgb24>> crops, int maxDegreeOfParallelism);
 }

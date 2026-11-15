@@ -44,8 +44,21 @@ internal static class CommonOptions
     /// <summary>Rasterization DPI for PDF input.</summary>
     public static readonly CliOption Dpi = new(
         "dpi", null, true,
-        "Rasterization resolution for PDF input, 36-1200 (default: 200).",
-        "n");
+        "Rasterization resolution for PDF input, 36-1200, or auto to size each page to the detector (default: 200).",
+        "n|auto");
+
+    /// <summary>Whether born-digital PDF pages are read from their embedded text instead of OCR.</summary>
+    public static readonly CliOption TextLayer = new(
+        "text-layer", null, true,
+        "PDF pages with real text: ignore (default, always OCR), prefer (use the embedded text when it is "
+        + "usable), auto (as prefer, but OCR pages whose text covers almost nothing, e.g. scans with a stamp).",
+        "mode");
+
+    /// <summary>Which model family runs the OCR.</summary>
+    public static readonly CliOption Engine = new(
+        "engine", null, true,
+        "Recognition engine: easyocr (default, CRAFT + CRNN) or ppocrv5 (PaddleOCR PP-OCRv5 detector and recognizers).",
+        "name");
 
     /// <summary>
     /// Pre-OCR image clean-up steps. Repeatable, so <c>--preprocess deskew --preprocess sharpen</c>

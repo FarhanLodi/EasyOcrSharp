@@ -106,7 +106,7 @@ internal static partial class ExecutionProviderResolver
     /// <see cref="BuildSessionOptionsWithStatus"/>.
     /// </summary>
     /// <param name="provider">The concrete, already-resolved execution provider to configure.</param>
-    /// <param name="options">Engine options supplying optional intra/inter-op thread counts.</param>
+    /// <param name="options">Engine options supplying optional intra/inter-op thread counts, intra-op spinning and the cuDNN algorithm search.</param>
     /// <param name="logger">Optional logger for provider-attach diagnostics.</param>
     /// <param name="perBoxParallel">
     /// True for the per-box CRNN recognizer, which is invoked from a data-parallel <c>Parallel.For</c> over
@@ -130,7 +130,7 @@ internal static partial class ExecutionProviderResolver
     /// </para>
     /// </summary>
     /// <param name="provider">The concrete, already-resolved execution provider to configure.</param>
-    /// <param name="options">Engine options supplying optional intra/inter-op thread counts.</param>
+    /// <param name="options">Engine options supplying optional intra/inter-op thread counts, intra-op spinning and the cuDNN algorithm search.</param>
     /// <param name="logger">Optional logger for provider-attach diagnostics.</param>
     /// <param name="perBoxParallel">See <see cref="BuildSessionOptions"/>.</param>
     public static SessionBuildResult BuildSessionOptionsWithStatus(OcrExecutionProvider provider, EngineOptions options, ILogger? logger, bool perBoxParallel = false)
@@ -144,11 +144,16 @@ internal static partial class ExecutionProviderResolver
         else if (perBoxParallel && provider == OcrExecutionProvider.Cpu) opts.IntraOpNumThreads = 1;
         if (options.InterOpNumThreads is { } inter and > 0) opts.InterOpNumThreads = inter;
 
+        foreach (var (key, value) in SessionConfigEntriesFor(options))
+        {
+            opts.AddSessionConfigEntry(key, value);
+        }
+
         string? failureHint;
         switch (provider)
         {
             case OcrExecutionProvider.Cuda:
-                failureHint = TryAppendProvider(logger, provider, "CUDA", GpuPackage, () => opts.AppendExecutionProvider_CUDA());
+                failureHint = TryAppendProvider(logger, provider, "CUDA", GpuPackage, () => AppendCuda(opts, options));
                 break;
             case OcrExecutionProvider.DirectMl:
                 // DirectML needs sequential execution with memory pattern disabled.
@@ -169,6 +174,66 @@ internal static partial class ExecutionProviderResolver
             ? new SessionBuildResult(opts, provider, null)
             : new SessionBuildResult(opts, OcrExecutionProvider.Cpu, failureHint);
     }
+
+    /// <summary>ONNX Runtime's session config key behind <see cref="EngineOptions.AllowIntraOpSpinning"/>.</summary>
+    internal const string IntraOpSpinningKey = "session.intra_op.allow_spinning";
+
+    /// <summary>
+    /// The session config entries <paramref name="options"/> asks for — empty when the caller left every
+    /// knob at null, so ONNX Runtime's defaults apply untouched.
+    /// </summary>
+    /// <remarks>
+    /// Intra-op spinning keeps worker threads busy-waiting between ops. It helps a single hot session but,
+    /// with the detector and recognizer sessions run back to back, each owning a pool, idle pools spin
+    /// against the active one. Only set when the caller chose; null keeps ONNX Runtime's default (on).
+    /// </remarks>
+    internal static IReadOnlyList<KeyValuePair<string, string>> SessionConfigEntriesFor(EngineOptions options)
+        => options.AllowIntraOpSpinning is { } spin
+            ? [new KeyValuePair<string, string>(IntraOpSpinningKey, spin ? "1" : "0")]
+            : [];
+
+    /// <summary>
+    /// Attaches the CUDA provider. Without a <see cref="EngineOptions.CudnnConvAlgoSearch"/> choice this is
+    /// the plain parameterless overload (device 0, every provider option at its default — unchanged
+    /// behavior); otherwise the provider is configured through <see cref="OrtCUDAProviderOptions"/> with
+    /// <c>cudnn_conv_algo_search</c> set and the same device.
+    /// </summary>
+    private static void AppendCuda(SessionOptions opts, EngineOptions options)
+    {
+        if (CudaProviderOptionsFor(options) is not { } values)
+        {
+            opts.AppendExecutionProvider_CUDA();
+            return;
+        }
+
+        using var cuda = new OrtCUDAProviderOptions();
+        cuda.UpdateOptions(values);
+        opts.AppendExecutionProvider_CUDA(cuda);
+    }
+
+    /// <summary>
+    /// The CUDA provider options <paramref name="options"/> asks for, or null when it asks for none (the
+    /// provider is then appended with ONNX Runtime's defaults).
+    /// </summary>
+    internal static Dictionary<string, string>? CudaProviderOptionsFor(EngineOptions options)
+        => options.CudnnConvAlgoSearch is { } search
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["device_id"] = "0",
+                ["cudnn_conv_algo_search"] = CudnnSearchValue(search),
+            }
+            : null;
+
+    /// <summary>
+    /// ONNX Runtime's string for a <see cref="CudnnConvolutionAlgorithmSearch"/> value. An undefined value
+    /// maps to <c>EXHAUSTIVE</c>, ONNX Runtime's own default, rather than failing the provider attach.
+    /// </summary>
+    internal static string CudnnSearchValue(CudnnConvolutionAlgorithmSearch search) => search switch
+    {
+        CudnnConvolutionAlgorithmSearch.Heuristic => "HEURISTIC",
+        CudnnConvolutionAlgorithmSearch.Default => "DEFAULT",
+        _ => "EXHAUSTIVE",
+    };
 
     /// <summary>
     /// Appends one execution provider. Returns null on success, or the composed failure hint when the

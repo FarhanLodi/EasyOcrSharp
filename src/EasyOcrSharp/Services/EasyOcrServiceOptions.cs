@@ -46,6 +46,28 @@ public sealed class EasyOcrServiceOptions
     /// <summary>ONNX Runtime inter-op thread count. Null = runtime default.</summary>
     public int? InterOpNumThreads { get; set; }
 
+    /// <summary>
+    /// Whether ONNX Runtime's intra-op worker threads busy-wait ("spin") between operators — the
+    /// <c>session.intra_op.allow_spinning</c> session setting. Spinning shaves latency off a single hot
+    /// model but burns CPU while idle, and because every model session owns its own pool, the idle pools
+    /// of the detector and the recognizers compete with whichever one is running. Set false on busy or
+    /// shared hosts to reduce CPU use. Null (the default) keeps ONNX Runtime's behavior (spinning on).
+    /// Applies to every session this service creates: the EasyOCR detector and recognizers, handwriting,
+    /// document orientation/unwarp, and the PP-OCRv5 / document-structure engine behind
+    /// <c>AnalyzeDocumentAsync</c> and <see cref="Models.RecognitionEngine.PpOcrV5"/>.
+    /// </summary>
+    public bool? AllowIntraOpSpinning { get; set; }
+
+    /// <summary>
+    /// cuDNN convolution algorithm selection for the CUDA provider — ONNX Runtime's
+    /// <c>cudnn_conv_algo_search</c>. <see cref="CudnnConvolutionAlgorithmSearch.Heuristic"/> is usually the
+    /// better choice for OCR: detector inputs vary with page size and recognizer batch widths vary with each
+    /// batch's longest line, so the default exhaustive search re-benchmarks on nearly every new shape.
+    /// Ignored by other providers. Null (the default) keeps ONNX Runtime's default (exhaustive). Applies to
+    /// the same sessions as <see cref="AllowIntraOpSpinning"/>.
+    /// </summary>
+    public CudnnConvolutionAlgorithmSearch? CudnnConvAlgoSearch { get; set; }
+
     /// <summary>How model files are downloaded and cached (retries, progress, offline, proxy, mirror).</summary>
     public ModelDownloadOptions Download { get; set; } = new();
 
@@ -137,6 +159,8 @@ public sealed class EasyOcrServiceOptions
             ExecutionProvider = provider,
             IntraOpNumThreads = IntraOpNumThreads,
             InterOpNumThreads = InterOpNumThreads,
+            AllowIntraOpSpinning = AllowIntraOpSpinning,
+            CudnnConvAlgoSearch = CudnnConvAlgoSearch,
             Download = Download,
             CustomRecognizers = CustomRecognizers.ToArray(),
             Quantize = Quantize,

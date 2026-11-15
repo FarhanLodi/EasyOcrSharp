@@ -6,6 +6,7 @@ using Microsoft.ML.OnnxRuntime.Tensors;
 using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
 using EasyImageSharp.Processing;
+using EasyImageSharp.Tensors;
 
 namespace EasyOcrSharp.Internal;
 
@@ -180,7 +181,42 @@ internal sealed class TrOcrRecognizer : IDisposable
     /// <c>3·size·size</c> floats — channel-major, red plane first — ready to be wrapped in a
     /// <c>[1, 3, size, size]</c> ONNX tensor.
     /// </summary>
+    /// <remarks>
+    /// The resize and the packing are fused through EasyImageSharp's <c>ResizeToTensor</c>, so the
+    /// <paramref name="size"/>² intermediate image is never materialized; its sampling matches <c>Resize</c>
+    /// exactly and its normalization is the same <c>(p/255 - mean) / std</c> expression, so the tensor is
+    /// bit-identical to <see cref="PreprocessReference"/>. EasyImageSharp only accepts a finite mean and a
+    /// positive, finite std; any other configuration (<see cref="HandwritingOptions.NormalizationStd"/> is
+    /// only required to be non-zero) keeps the reference path and its exact arithmetic.
+    /// </remarks>
     internal static float[] Preprocess(Image<Rgb24> crop, int size, float mean, float std)
+    {
+        if (!float.IsFinite(mean) || !float.IsFinite(std) || std <= 0f)
+        {
+            return PreprocessReference(crop, size, mean, std);
+        }
+
+        var tensor = new float[3 * size * size];
+        crop.ResizeToTensor(
+            tensor,
+            new ResizeOptions
+            {
+                Size = new Size(size, size),
+                Sampler = KnownResamplers.Triangle,
+                Mode = ResizeMode.Stretch,
+            },
+            tensorOptions: null,
+            channelMean: [mean],
+            channelStd: [std]);
+        return tensor;
+    }
+
+    /// <summary>
+    /// The TrOCR packer as it stood before the fused <c>ResizeToTensor</c> path: <c>Resize</c> into a full
+    /// intermediate image, then a per-pixel normalization loop. The parity oracle for
+    /// <see cref="Preprocess"/>, and the path taken for normalization values EasyImageSharp rejects.
+    /// </summary>
+    internal static float[] PreprocessReference(Image<Rgb24> crop, int size, float mean, float std)
     {
         var tensor = new float[3 * size * size];
         using var resized = crop.Clone(ctx => ctx.Resize(new ResizeOptions

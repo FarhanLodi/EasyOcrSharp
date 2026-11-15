@@ -91,7 +91,7 @@ public sealed partial class EasyOcrService
             throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var image = LoadGuarded(imageBytes.AsSpan());
+        using var image = LoadGuarded(imageBytes.AsSpan(), cancellationToken);
         await foreach (var line in StreamCoreAsync(image, languages, options ?? RecognitionOptions.Default, cancellationToken).ConfigureAwait(false))
         {
             yield return line;
@@ -208,12 +208,19 @@ public sealed partial class EasyOcrService
         var langs = Array.Empty<string>();
         int emitted = 0;
 
+        Image<Rgb24>? squared = null;
         Image<Rgb24>? docCorrected = null;
         Image<Rgb24>? preprocessed = null;
         try
         {
+            // Non-square pixels first, as in the buffered pipeline: a square-pixel copy (null for square or
+            // unknown pixels) is what every later stage sees, and each line is scaled back before it is yielded.
+            squared = CreateSquarePixelInput(image, options);
+            var input = squared ?? image;
+
             // Model-based document preprocessing first (orientation upright, then unwarp), exactly as the
             // buffered pipeline does, so boxes are reported in the corrected image's coordinate space.
+            int docRotation = 0;
             if (options.Preprocessing.DocumentOrientation || options.Preprocessing.DocumentUnwarp)
             {
                 // Inside the drain gate, like every other model call: without it _activeOperations stays 0
@@ -221,17 +228,24 @@ public sealed partial class EasyOcrService
                 // service and frees those sessions mid-Run.
                 using var op = BeginOperation();
                 var (corrected, rotation) = await _docPreprocess.ApplyAsync(
-                    image, options.Preprocessing.DocumentOrientation, options.Preprocessing.DocumentUnwarp, cancellationToken).ConfigureAwait(false);
+                    input, options.Preprocessing.DocumentOrientation, options.Preprocessing.DocumentUnwarp, cancellationToken).ConfigureAwait(false);
                 docCorrected = corrected;
+                docRotation = rotation;
                 if (rotation != 0)
                     _logger?.LogInformation("Document orientation corrected by {Degrees}° clockwise", rotation);
             }
 
-            var working = docCorrected ?? image;
+            var working = docCorrected ?? input;
+            var aspect = SquarePixelMappingFor(image, squared, docRotation);
+            DeskewCanvas? deskew = null;
             if (options.Preprocessing.Denoise || options.Preprocessing.Deskew
                 || options.Preprocessing.Sharpen || options.Preprocessing.Binarize)
             {
-                preprocessed = ImagePreprocessor.Apply(working, options.Preprocessing);
+                preprocessed = ImagePreprocessor.Apply(working, options.Preprocessing, out float deskewRotation);
+                if (deskewRotation != 0f)
+                {
+                    deskew = new DeskewCanvas(deskewRotation, preprocessed.Width, preprocessed.Height, working.Width, working.Height);
+                }
                 working = preprocessed;
             }
 
@@ -240,8 +254,9 @@ public sealed partial class EasyOcrService
             // One detection pass over the whole page. This also applies the region-of-interest crop and
             // the Line/Paragraph box merging, and reports polygons in `working` coordinates. The ungated
             // core, not the public method: this stream already holds a governor slot, and asking for a
-            // second one would deadlock a single-slot service against itself.
-            var regions = await DetectRegionsCoreAsync(working, options, cancellationToken).ConfigureAwait(false);
+            // second one would deadlock a single-slot service against itself. The caller's region is moved
+            // onto the frame detection runs in; lines are mapped back off it as they are yielded.
+            var regions = await DetectRegionsCoreAsync(working, WithRegionOnWorkingFrame(options, aspect, deskew), cancellationToken).ConfigureAwait(false);
             if (regions.Count > 0)
             {
                 // Recognize BatchSize regions per call so a caller that opted into batched inference still
@@ -279,7 +294,7 @@ public sealed partial class EasyOcrService
                     foreach (var paragraph in SortLinesByReadingOrder(ParagraphGrouper.Merge(page, options.GroupingOptions, rightToLeft), rightToLeft))
                     {
                         emitted++;
-                        yield return paragraph;
+                        yield return LineToCallerFrame(paragraph, deskew, aspect);
                     }
                 }
                 else
@@ -287,7 +302,7 @@ public sealed partial class EasyOcrService
                     await foreach (var line in stream.ConfigureAwait(false))
                     {
                         emitted++;
-                        yield return line;
+                        yield return LineToCallerFrame(line, deskew, aspect);
                     }
                 }
             }
@@ -296,6 +311,7 @@ public sealed partial class EasyOcrService
         {
             preprocessed?.Dispose();
             docCorrected?.Dispose();
+            squared?.Dispose();
 
             sw.Stop();
             // Recorded even when the consumer abandons the enumeration, so a partially consumed stream
@@ -329,6 +345,8 @@ public sealed partial class EasyOcrService
             var polygon = chunk[i].BoundingPolygon;
             polygons[i] = polygon as OcrPoint[] ?? polygon.ToArray();
         }
+        if (options.Engine != RecognitionEngine.EasyOcr)
+            return await RecognizePaddleChunkAsync(image, polygons, languages, options, cancellationToken).ConfigureAwait(false);
         return await _engine.RecognizeRegionsAsync(image, languages, polygons, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -342,6 +360,12 @@ public sealed partial class EasyOcrService
         RecognitionOptions options,
         CancellationToken cancellationToken)
     {
+        // PP-OCRv5 detects the language per line inside each chunk; only validate the request here.
+        if (options.Engine != RecognitionEngine.EasyOcr)
+        {
+            return ResolvePaddleStreamLanguages(languages, options);
+        }
+
         if (!options.AutoDetectLanguage)
         {
             return ResolveLanguages(languages, allowEmpty: false);

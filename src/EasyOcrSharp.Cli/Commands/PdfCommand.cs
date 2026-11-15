@@ -39,6 +39,8 @@ internal static class PdfCommand
             Output,
             CommonOptions.Lang,
             CommonOptions.Dpi,
+            CommonOptions.TextLayer,
+            CommonOptions.Engine,
             JpegQuality,
             Paragraph,
             Line,

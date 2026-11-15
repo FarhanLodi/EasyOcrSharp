@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using EasyOcrSharp.Services;
 
 namespace EasyOcrSharp.Models;
@@ -60,6 +61,16 @@ public sealed record OcrResult
 
     /// <summary>Gets the height (px) of the image OCR ran on, or 0 if unknown.</summary>
     public int SourceHeight { get; init; }
+
+    /// <summary>
+    /// Gets the clockwise rotation (degrees) <see cref="PreprocessingOptions.Deskew"/> applied to straighten
+    /// the page, or 0 when deskew was off or found the page straight. Informational: detection and recognition
+    /// ran on the rotated canvas, but every returned line, word and character coordinate is already mapped back
+    /// onto the unrotated image. Left out of the JSON export when 0, so results without deskew serialize
+    /// exactly as before.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public float DeskewAngle { get; init; }
 
     /// <summary>
     /// Creates an empty result instance.

@@ -57,6 +57,8 @@ internal static class ScanCommand
             CommonOptions.BeamWidth,
             CommonOptions.Preprocess,
             CommonOptions.Dpi,
+            CommonOptions.TextLayer,
+            CommonOptions.Engine,
             Recursive,
             Jobs,
             CommonOptions.Gpu,

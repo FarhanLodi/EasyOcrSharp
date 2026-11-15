@@ -135,11 +135,11 @@ public static class OcrRedactionExtensions
 
         if (options.MaxSourcePixels > 0)
         {
-            var info = Image.Identify(imageBytes.Span);
+            var info = DecodeLimits.Identify(imageBytes.Span, cancellationToken);
             GuardPixels(info.Width, info.Height, options.MaxSourcePixels);
         }
 
-        using var image = DecodeLimits.Load(imageBytes.Span, options.MaxSourcePixels, MaxPixelsOption);
+        using var image = DecodeLimits.Load(imageBytes.Span, options.MaxSourcePixels, MaxPixelsOption, cancellationToken);
         return await service.RedactAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
     }
 

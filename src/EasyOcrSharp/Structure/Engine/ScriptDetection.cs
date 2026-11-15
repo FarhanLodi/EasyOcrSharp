@@ -68,6 +68,35 @@ internal static class ScriptDetection
     }
 
     /// <summary>
+    /// The non-Latin, non-CJK script of the first letter in <paramref name="text"/> that has no Latin
+    /// look-alike — any Arabic, Devanagari, Tamil, Telugu, Thai or Hangul letter, or a Cyrillic/Greek letter
+    /// such as <c>Ы</c>, <c>Д</c> or <c>Ω</c> (but not <c>А В Е К М Н О Р С Т Х</c> or <c>Α Β Ε Η Ι Κ Μ Ν Ο Ρ Τ Χ</c>).
+    /// <see cref="DetectedScript.Unknown"/> when there is none. A recognizer that reads such a letter has seen
+    /// something a Latin reading of the same pixels cannot express.
+    /// </summary>
+    public static DetectedScript DistinctiveScript(ReadOnlySpan<char> text)
+    {
+        foreach (char c in text)
+        {
+            var script = Classify(c);
+            switch (script)
+            {
+                case DetectedScript.Arabic or DetectedScript.Devanagari or DetectedScript.Tamil
+                    or DetectedScript.Telugu or DetectedScript.Thai or DetectedScript.Hangul:
+                    return script;
+                case DetectedScript.Cyrillic or DetectedScript.Greek when char.IsLetter(c) && !LatinLookAlikes.Contains(c):
+                    return script;
+            }
+        }
+        return DetectedScript.Unknown;
+    }
+
+    /// <summary>Cyrillic and Greek letters a Latin reader renders as a Latin letter (or <c>b</c> for <c>Ь</c>).</summary>
+    private const string LatinLookAlikes =
+        "АВЕЁКМНОРСТУХЅІЇЈЬаеёорсухѕіїјьҮүӀӏԁԛԝ" +
+        "ΑΒΕΖΗΙΚΜΝΟΡΤΥΧαικνορυχ";
+
+    /// <summary>
     /// Maps a detected script to the representative PaddleOCR language code its recognizer pack is registered
     /// under (the code accepted by <see cref="StructureModelRegistry.FindByLanguage"/>). Returns <c>null</c> for
     /// <see cref="DetectedScript.Unknown"/> or any script without a dedicated pack.

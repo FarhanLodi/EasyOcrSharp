@@ -13,7 +13,9 @@ internal sealed record PreprocessingOptions
     public bool Denoise { get; init; }
 
     /// <summary>
-    /// Estimate and correct a small skew angle via projection profiles. Default false.
+    /// Estimate a small skew angle (Hough transform on background-normalized text baselines, within ±15°)
+    /// and straighten the page before detection. Line and word boxes are mapped back onto the original,
+    /// unrotated image; the rotation applied is reported as <see cref="OcrResult.DeskewAngle"/>. Default false.
     /// </summary>
     public bool Deskew { get; init; }
 

@@ -10,7 +10,8 @@ namespace EasyOcrSharp.Internal;
 /// projection-profile deskew. Orientation (90°/180°/270°) detection is handled at the service level
 /// because it needs the OCR result to score each rotation; the model-based document orientation /
 /// unwarp steps live in <see cref="DocPreprocessor"/>. Returns a new image; the caller owns and
-/// disposes it.
+/// disposes it. When deskew rotates the page the returned image is an enlarged canvas, and coordinates
+/// found on it are mapped back with <see cref="DeskewCanvas"/>.
 /// </summary>
 internal static class ImagePreprocessor
 {
@@ -32,7 +33,17 @@ internal static class ImagePreprocessor
     /// is enabled) so the caller can dispose uniformly without touching the original.
     /// </summary>
     public static Image<Rgb24> Apply(Image<Rgb24> source, PreprocessingOptions options)
+        => Apply(source, options, out _);
+
+    /// <summary>
+    /// Applies denoise → deskew → sharpen → binarize and reports, in <paramref name="deskewRotation"/>, the
+    /// clockwise rotation (degrees) the deskew step applied — 0 when it left the page unrotated. A non-zero
+    /// value means the returned image is the rotated, enlarged canvas; <see cref="DeskewCanvas"/> maps
+    /// coordinates found on it back onto <paramref name="source"/>.
+    /// </summary>
+    public static Image<Rgb24> Apply(Image<Rgb24> source, PreprocessingOptions options, out float deskewRotation)
     {
+        deskewRotation = 0f;
         var img = source.Clone();
         try
         {
@@ -43,6 +54,12 @@ internal static class ImagePreprocessor
 
             if (options.Deskew)
             {
+                // The library reports no angle, so measure it with the port of its own estimator on the very
+                // pixels it is about to score, then let it rotate as before (the page pixels are unchanged by
+                // this) and cross-check the angle against the canvas it produced.
+                int width = img.Width, height = img.Height;
+                double skew = DeskewRotation.EstimateProjectionSkew(img, MaxSkewDegrees, out _);
+
                 // Projection-profile deskew: the rotation that sharpens the horizontal projection of the
                 // ink straightens the text lines. Same estimator this used to hand-roll, but it scores
                 // candidate angles on the ink coordinates instead of rotating the whole page once per
@@ -55,6 +72,8 @@ internal static class ImagePreprocessor
                     MinAngle = MinSkewDegrees,
                     FillColor = Color.White,
                 }));
+
+                deskewRotation = DeskewRotation.ResolveApplied(width, height, img.Width, img.Height, skew);
             }
 
             if (options.Sharpen)

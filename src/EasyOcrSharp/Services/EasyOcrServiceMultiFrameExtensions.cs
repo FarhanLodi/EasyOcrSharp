@@ -187,7 +187,7 @@ public static class EasyOcrServiceMultiFrameExtensions
             throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
 
         var (langs, opts) = Prepare(languages, frameOptions);
-        return IterateAsync(service, _ => new ValueTask<LoadedImage>(LoadFromBytes(imageBytes, opts)), langs, options, opts, cancellationToken);
+        return IterateAsync(service, ct => new ValueTask<LoadedImage>(LoadFromBytes(imageBytes, opts, ct)), langs, options, opts, cancellationToken);
     }
 
     /// <summary>
@@ -404,14 +404,18 @@ public static class EasyOcrServiceMultiFrameExtensions
         // are decoded into memory.
         using var buffer = new MemoryStream();
         await stream.CopyToAsync(buffer, ct).ConfigureAwait(false);
-        return LoadFromBytes(buffer.GetBuffer().AsSpan(0, (int)buffer.Length), opts);
+        return LoadFromBytes(buffer.GetBuffer().AsSpan(0, (int)buffer.Length), opts, ct);
     }
 
-    private static LoadedImage LoadFromBytes(ReadOnlySpan<byte> bytes, MultiFrameOcrOptions opts)
+    /// <summary>
+    /// Guards and decodes every frame of encoded bytes. <paramref name="ct"/> reaches the header read and the
+    /// all-frames decode, so canceling stops a long multi-page decode at the decoder's next checkpoint.
+    /// </summary>
+    private static LoadedImage LoadFromBytes(ReadOnlySpan<byte> bytes, MultiFrameOcrOptions opts, CancellationToken ct)
     {
-        var info = Image.Identify(bytes);
+        var info = DecodeLimits.Identify(bytes, ct);
         GuardHeader(info.FrameCount, info.Width, info.Height, opts);
-        return new LoadedImage(DecodeLimits.Load(bytes, opts.MaxFramePixels, MaxPixelsOption), true);
+        return new LoadedImage(DecodeLimits.Load(bytes, opts.MaxFramePixels, MaxPixelsOption, ct), true);
     }
 
     // ---- guards ----

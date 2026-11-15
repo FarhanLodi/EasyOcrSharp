@@ -20,6 +20,7 @@ internal interface ISealRecognizer : IDisposable
     /// Recognizes the text lines inside one seal crop.
     /// </summary>
     /// <param name="sealCrop">The cropped seal region (caller retains ownership).</param>
+    /// <param name="cancellationToken">Cancels between detector/rectification stages and while waiting for or running recognizer batches. An active native inference is cooperative.</param>
     /// <returns>The recognized seal text lines (in the crop's pixel coordinates); empty when none.</returns>
-    IReadOnlyList<OcrLine> Recognize(Image<Rgb24> sealCrop);
+    IReadOnlyList<OcrLine> Recognize(Image<Rgb24> sealCrop, CancellationToken cancellationToken = default);
 }

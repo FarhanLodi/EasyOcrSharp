@@ -67,10 +67,17 @@ internal sealed class SearchablePdfBuilder
     public string? TextLayerFontPath { get; private set; }
 
     /// <summary>Adds one page: its rendered image and the OCR result whose text becomes the hidden layer.</summary>
+    /// <remarks>
+    /// <paramref name="dpi"/> is the resolution the image was rendered at. <see cref="PdfOcrOptions.AutoDpi"/>
+    /// means <see cref="PdfOcrOptions.DefaultDpi"/> here, matching <see cref="PdfRasterizer.ForEachPageAsync"/>:
+    /// callers that lay out pages from <see cref="PdfOcrOptions.Dpi"/> rather than a per-page resolution
+    /// rendered them at that default, and a literal 0 would put an infinite scale into the page geometry.
+    /// </remarks>
     public void AddPage(Image<Rgb24> image, OcrResult ocr, int dpi, int jpegQuality)
     {
         ArgumentNullException.ThrowIfNull(image);
         ArgumentNullException.ThrowIfNull(ocr);
+        if (dpi == PdfOcrOptions.AutoDpi) dpi = PdfOcrOptions.DefaultDpi;
 
         // JpegEncoder throws NotSupportedException past 65535px in either dimension. A very wide, short page
         // (60in x 1in at 1200 DPI = 72000 x 1200 = 86 Mpx) passes the rasterizer's megapixel guard and would

@@ -77,6 +77,7 @@ internal static class OrientationMapper
             {
                 BoundingPolygon = poly,
                 BoundingBox = OcrBoundingBox.FromPoints(poly),
+                Words = Recognition.WordBoxBuilder.Transform(line.Words, p => RotatePoint(p, inverse, workingWidth, workingHeight)),
             });
         }
         return mapped;

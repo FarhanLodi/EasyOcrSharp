@@ -28,6 +28,7 @@ public class CliBindingTests
             CommonOptions.Offline, CommonOptions.Quiet, CommonOptions.Dpi, CommonOptions.Preprocess,
             CommonOptions.Allowlist, CommonOptions.Blocklist, CommonOptions.MinConfidence,
             CommonOptions.Decoder, CommonOptions.BeamWidth, CommonOptions.Detail,
+            CommonOptions.TextLayer, CommonOptions.Engine,
             Paragraph, Line, Word,
         ]);
 
@@ -335,13 +336,58 @@ public class CliBindingTests
     [Theory]
     [InlineData("35")]
     [InlineData("1201")]
-    [InlineData("0")]
     [InlineData("-100")]
     public void Pdf_dpi_outside_the_supported_range_is_rejected(string dpi)
     {
         var ex = Assert.Throws<CliUsageException>(() => OptionBinder.BuildPdfOptions(Parse("--dpi", dpi)));
 
         Assert.Contains("between 36 and 1200", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("auto")]
+    [InlineData("AUTO")]
+    [InlineData("0")]
+    public void Pdf_dpi_auto_selects_per_page_auto_dpi(string dpi)
+    {
+        Assert.Equal(PdfOcrOptions.AutoDpi, OptionBinder.BuildPdfOptions(Parse("--dpi", dpi)).Dpi);
+    }
+
+    [Theory]
+    [InlineData(null, PdfTextLayerMode.Ignore)]
+    [InlineData("ignore", PdfTextLayerMode.Ignore)]
+    [InlineData("prefer", PdfTextLayerMode.PreferEmbedded)]
+    [InlineData("embedded", PdfTextLayerMode.PreferEmbedded)]
+    [InlineData("Auto", PdfTextLayerMode.Auto)]
+    public void Pdf_text_layer_maps_onto_the_library_modes(string? value, PdfTextLayerMode expected)
+    {
+        var args = value is null ? Parse() : Parse("--text-layer", value);
+        Assert.Equal(expected, OptionBinder.BuildPdfOptions(args).TextLayer);
+    }
+
+    [Fact]
+    public void Pdf_text_layer_rejects_unknown_modes()
+    {
+        var ex = Assert.Throws<CliUsageException>(() => OptionBinder.BuildPdfOptions(Parse("--text-layer", "always")));
+        Assert.Contains("ignore, prefer, auto", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, RecognitionEngine.EasyOcr)]
+    [InlineData("easyocr", RecognitionEngine.EasyOcr)]
+    [InlineData("ppocrv5", RecognitionEngine.PpOcrV5)]
+    [InlineData("PP-OCRv5", RecognitionEngine.PpOcrV5)]
+    public void Engine_maps_onto_the_recognition_engine(string? value, RecognitionEngine expected)
+    {
+        var args = value is null ? Parse() : Parse("--engine", value);
+        Assert.Equal(expected, OptionBinder.BuildRecognitionOptions(args, Flags).Engine);
+    }
+
+    [Fact]
+    public void Engine_rejects_unknown_names()
+    {
+        var ex = Assert.Throws<CliUsageException>(() => OptionBinder.BuildRecognitionOptions(Parse("--engine", "tesseract"), Flags));
+        Assert.Contains("easyocr, ppocrv5", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

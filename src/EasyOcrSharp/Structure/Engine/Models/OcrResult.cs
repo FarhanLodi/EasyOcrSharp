@@ -47,6 +47,14 @@ internal sealed record OcrResult
     public int DetectedOrientation { get; init; }
 
     /// <summary>
+    /// Gets the clockwise rotation (degrees) that <see cref="PreprocessingOptions.Deskew"/> applied to
+    /// straighten the page — the page's own skew was the negation of this. 0 when deskew is off or the skew
+    /// was negligible. Deskew reads the page on a rotated, enlarged canvas; the returned line and word
+    /// coordinates are already mapped back onto the original, unrotated image, so this is informational.
+    /// </summary>
+    public float DeskewAngle { get; init; }
+
+    /// <summary>
     /// Gets the duration of the OCR operation.
     /// </summary>
     public TimeSpan Duration { get; init; }

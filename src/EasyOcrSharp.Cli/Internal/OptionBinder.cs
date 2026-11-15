@@ -62,21 +62,45 @@ internal static class OptionBinder
             Blocklist = args.Value(CommonOptions.Blocklist.Name),
             MinConfidence = MinConfidence(args),
             MaxDegreeOfParallelism = Environment.ProcessorCount,
+            Engine = Engine(args),
         };
     }
 
-    /// <summary>Builds the PDF rasterization options, honoring <c>--dpi</c>.</summary>
+    /// <summary>Builds the PDF rasterization options, honoring <c>--dpi</c> and <c>--text-layer</c>.</summary>
     public static PdfOcrOptions BuildPdfOptions(ParsedArgs args, IProgress<PdfPageProgress>? progress = null)
     {
         var options = new PdfOcrOptions();
-        if (args.Int(CommonOptions.Dpi.Name) is { } dpi)
+        if (args.Value(CommonOptions.Dpi.Name) is { } raw && raw.Trim().Equals("auto", StringComparison.OrdinalIgnoreCase))
         {
-            if (dpi is < 36 or > 1200) throw args.Fail("--dpi must be between 36 and 1200.");
+            options.Dpi = PdfOcrOptions.AutoDpi;
+        }
+        else if (args.Int(CommonOptions.Dpi.Name) is { } dpi)
+        {
+            if (dpi != PdfOcrOptions.AutoDpi && dpi is < 36 or > 1200)
+                throw args.Fail("--dpi must be between 36 and 1200, or auto (0).");
             options.Dpi = dpi;
         }
+        options.TextLayer = TextLayer(args);
         options.Progress = progress;
         return options;
     }
+
+    private static PdfTextLayerMode TextLayer(ParsedArgs args) =>
+        args.Value(CommonOptions.TextLayer.Name)?.ToLowerInvariant() switch
+        {
+            null or "ignore" or "ocr" => PdfTextLayerMode.Ignore,
+            "prefer" or "prefer-embedded" or "embedded" => PdfTextLayerMode.PreferEmbedded,
+            "auto" => PdfTextLayerMode.Auto,
+            var other => throw args.Fail($"Unknown --text-layer '{other}'. Expected: ignore, prefer, auto."),
+        };
+
+    private static RecognitionEngine Engine(ParsedArgs args) =>
+        args.Value(CommonOptions.Engine.Name)?.ToLowerInvariant() switch
+        {
+            null or "easyocr" or "default" => RecognitionEngine.EasyOcr,
+            "ppocrv5" or "pp-ocrv5" or "paddle" or "paddleocr" => RecognitionEngine.PpOcrV5,
+            var other => throw args.Fail($"Unknown --engine '{other}'. Expected: easyocr, ppocrv5."),
+        };
 
     /// <summary>Which of the mutually exclusive grouping flags was requested.</summary>
     private static TextGrouping Grouping(ParsedArgs args, ScanFlags flags)

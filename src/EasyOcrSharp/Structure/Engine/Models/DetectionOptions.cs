@@ -85,6 +85,35 @@ internal sealed record DetectionOptions
     public double NmsIouThreshold { get; init; }
 
     /// <summary>
+    /// Small-text rescue, in source pixels. When greater than 0, the detector measures the median short
+    /// side of the boxes found by a normal pass; if it is below this value the image is detected again
+    /// upscaled so the typical line reaches about <c>max(24, MinTextHeight)</c> pixels (factor capped at
+    /// 3× and by <see cref="MaxSideLimit"/>). A page with no boxes at all whose longest side is under
+    /// 1500 px is also retried once at 2×. Boxes are always returned in original-image coordinates.
+    /// Default 0 (off) — the extra pass costs a second detector run on the images it triggers for, and
+    /// Python PaddleOCR has no such step.
+    /// </summary>
+    public int MinTextHeight { get; init; }
+
+    /// <summary>
+    /// Detect very large images in overlapping tiles instead of shrinking them. When
+    /// <see cref="MaxSideLimit"/> would scale the detector input below 0.75× of the size the
+    /// <see cref="LimitSideLen"/> policy asks for, the image is cut along its long axis into tiles that fit
+    /// the limit (overlapping by 384 px), each tile is detected at full resolution, and duplicates in the
+    /// overlaps are resolved — boxes clear of a tile's cut edge win, then axis-aligned IoU 0.5 suppression.
+    /// Best for tall pages such as long receipts; a line crossing a cut on a very wide image can come back
+    /// as two pieces. Default false (Python PaddleOCR downscales).
+    /// </summary>
+    public bool TileLargeImages { get; init; }
+
+    /// <summary>
+    /// Build the detector input from a contrast-enhanced copy of the image (background normalization then
+    /// a 0.5–99.5 percentile contrast stretch), which helps faded, grey or unevenly lit scans. Only the
+    /// detector sees the enhanced copy; recognition still crops the original pixels. Default false.
+    /// </summary>
+    public bool EnhanceContrast { get; init; }
+
+    /// <summary>
     /// The default detection thresholds (match PaddleOCR).
     /// </summary>
     public static DetectionOptions Default { get; } = new();

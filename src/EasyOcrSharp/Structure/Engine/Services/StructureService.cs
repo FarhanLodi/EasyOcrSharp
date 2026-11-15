@@ -100,6 +100,14 @@ internal sealed class StructureService : IStructureService
     public string? GpuAccelerationHint => _engine.GpuHint;
 
     /// <summary>
+    /// The text engine (DB detector, text-line classifier and recognizer packs) this service owns —
+    /// exposed so <c>EasyOcrService</c>'s opt-in PP-OCRv5 plain-OCR path drives the very same ONNX
+    /// sessions document analysis uses instead of loading a second set. Owned and disposed by this
+    /// service; callers must hold their own dispose-drain scope around every use.
+    /// </summary>
+    internal StructureTextEngine TextEngine => _engine;
+
+    /// <summary>
     /// Collects a one-call diagnostic snapshot answering "why is my GPU not used": ONNX Runtime's
     /// available providers, the requested/resolved/active execution providers, the GPU probe result and
     /// the acceleration hint. Cheap; safe to log at startup.
@@ -167,7 +175,7 @@ internal sealed class StructureService : IStructureService
             throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var image = LoadGuarded(imageBytes.Span);
+        using var image = LoadGuarded(imageBytes.Span, cancellationToken);
         return await RunPipelineAsync(image, languages.ToCodes(), options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -289,7 +297,16 @@ internal sealed class StructureService : IStructureService
         RecognitionOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        using var image = await LoadGuarded(Path.GetFullPath(imagePath), cancellationToken).ConfigureAwait(false);
+        EnsureNotDisposed();
+        if (string.IsNullOrWhiteSpace(imagePath))
+            throw new ArgumentException("Image path must be provided.", nameof(imagePath));
+
+        var fullPath = Path.GetFullPath(imagePath);
+        if (!File.Exists(fullPath))
+            throw new FileNotFoundException($"The image file '{fullPath}' could not be found.", fullPath);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        using var image = await LoadGuarded(fullPath, cancellationToken).ConfigureAwait(false);
         return await DetectRegionsAsync(image, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -405,7 +422,7 @@ internal sealed class StructureService : IStructureService
             throw new ArgumentException("Image bytes must not be empty.", nameof(imageBytes));
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var image = LoadGuarded(imageBytes.Span);
+        using var image = LoadGuarded(imageBytes.Span, cancellationToken);
         return await RunStructureAsync(image, options, cancellationToken).ConfigureAwait(false);
     }
 
@@ -463,7 +480,7 @@ internal sealed class StructureService : IStructureService
         using var activity = StructureDiagnostics.ActivitySource.StartActivity("Structure.Extract", ActivityKind.Internal);
         var sw = Stopwatch.StartNew();
 
-        (IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected, int Rotation) outcome;
+        (IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected, int Rotation, float DeskewAngle) outcome;
 
         if (options.Preprocessing.DetectOrientation)
         {
@@ -474,7 +491,7 @@ internal sealed class StructureService : IStructureService
             outcome = await CoreAsync(image, languages, options, cancellationToken).ConfigureAwait(false);
         }
 
-        return BuildResult(outcome.Lines, outcome.Languages, sw, activity, image.Width, image.Height, outcome.Detected, options.Grouping, outcome.Rotation);
+        return BuildResult(outcome.Lines, outcome.Languages, sw, activity, image.Width, image.Height, outcome.Detected, options.Grouping, outcome.Rotation, outcome.DeskewAngle);
     }
 
     /// <summary>
@@ -484,7 +501,7 @@ internal sealed class StructureService : IStructureService
     /// sort keys off each line's forward-rotated (uprighted) box — otherwise a 180°-rotated page would
     /// come out with its text order reversed.
     /// </summary>
-    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0, IReadOnlyList<string>? detectedLanguages = null, TextGrouping grouping = TextGrouping.Line, int appliedRotation = 0)
+    private OcrResult BuildResult(IReadOnlyList<OcrLine> lines, string[] languages, Stopwatch sw, Activity? activity, int sourceWidth = 0, int sourceHeight = 0, IReadOnlyList<string>? detectedLanguages = null, TextGrouping grouping = TextGrouping.Line, int appliedRotation = 0, float deskewAngle = 0f)
     {
         // Direction is derived from the requested languages: this engine has no per-call direction option.
         var ordered = SortLinesByReadingOrder(lines, appliedRotation, sourceWidth, sourceHeight, ScriptDirection.IsRightToLeft(languages));
@@ -516,6 +533,7 @@ internal sealed class StructureService : IStructureService
             // AppliedRotation is the corrective clockwise rotation; the page was DETECTED as rotated by
             // the inverse (e.g. correction 270 ⇒ the page sat 90° clockwise from upright).
             DetectedOrientation = (360 - (appliedRotation % 360 + 360) % 360) % 360,
+            DeskewAngle = deskewAngle,
             Duration = sw.Elapsed,
             UsedGpu = usedGpu,
             ExecutionProvider = activeProvider,
@@ -533,7 +551,7 @@ internal sealed class StructureService : IStructureService
     /// Either way the returned quads are mapped back into the original image's orientation and the
     /// corrective rotation is reported so <see cref="OcrResult.DetectedOrientation"/> can be filled.
     /// </summary>
-    private async Task<(IReadOnlyList<OcrLine>, string[], IReadOnlyList<string>, int)> RecognizeBestOrientationAsync(
+    private async Task<(IReadOnlyList<OcrLine>, string[], IReadOnlyList<string>, int, float)> RecognizeBestOrientationAsync(
         Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
     {
         var langsList = languages.ToArray();
@@ -559,7 +577,7 @@ internal sealed class StructureService : IStructureService
             UseDocUnwarp = false,
         };
 
-        (IReadOnlyList<OcrLine> Lines, string[] Langs, IReadOnlyList<string> Detected)? best = null;
+        (IReadOnlyList<OcrLine> Lines, string[] Langs, IReadOnlyList<string> Detected, float Deskew)? best = null;
         double bestScore = double.NegativeInfinity;
         int bestDegrees = 0;
 
@@ -569,13 +587,13 @@ internal sealed class StructureService : IStructureService
             Image<Rgb24>? rotated = degrees == 0 ? null : ImagePreprocessor.RotateRightAngle(image, degrees);
             try
             {
-                var (lines, langs, detected, _) = await CoreAsync(rotated ?? image, langsList, noOrient, ct).ConfigureAwait(false);
+                var (lines, langs, detected, _, deskew) = await CoreAsync(rotated ?? image, langsList, noOrient, ct).ConfigureAwait(false);
                 double score = lines.Where(l => !string.IsNullOrWhiteSpace(l.Text)).Sum(l => l.Confidence * l.Text.Length);
                 _logger?.LogInformation("Orientation {Deg}° scored {Score:F1}", degrees, score);
                 if (score > bestScore)
                 {
                     bestScore = score;
-                    best = (lines, langs, detected);
+                    best = (lines, langs, detected, deskew);
                     bestDegrees = degrees;
                 }
             }
@@ -585,7 +603,7 @@ internal sealed class StructureService : IStructureService
             }
         }
 
-        if (best is not { } winner) return (Array.Empty<OcrLine>(), langsList, Array.Empty<string>(), 0);
+        if (best is not { } winner) return (Array.Empty<OcrLine>(), langsList, Array.Empty<string>(), 0, 0f);
 
         // Map the winning rotation's quads back into the original image's frame (the winning pass ran on
         // the rotated copy, whose dimensions are swapped for 90/270).
@@ -596,26 +614,44 @@ internal sealed class StructureService : IStructureService
             int rotatedHeight = bestDegrees is 90 or 270 ? image.Width : image.Height;
             mapped = Geometry.OrientationMapper.MapLinesToOriginalFrame(mapped, bestDegrees, rotatedWidth, rotatedHeight);
         }
-        return (mapped, winner.Langs, winner.Detected, bestDegrees);
+        return (mapped, winner.Langs, winner.Detected, bestDegrees, winner.Deskew);
     }
 
     /// <summary>
     /// Preprocess → resolve languages → region crop → recognize. The recognition itself is delegated to
     /// <see cref="StructureTextEngine.RecognizeAsync"/> (det → cls → rec), whose body the downstream agent fills.
     /// </summary>
-    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected, int Rotation)> CoreAsync(
+    private async Task<(IReadOnlyList<OcrLine> Lines, string[] Languages, IReadOnlyList<string> Detected, int Rotation, float DeskewAngle)> CoreAsync(
         Image<Rgb24> image, IEnumerable<string> languages, RecognitionOptions options, CancellationToken ct)
     {
         // Denoise / deskew / binarize into a working image (orientation handled by the caller).
         bool needsPreprocess = options.Preprocessing.Denoise || options.Preprocessing.Deskew || options.Preprocessing.Binarize;
-        Image<Rgb24> working = needsPreprocess ? ImagePreprocessor.Apply(image, options.Preprocessing) : image;
+        float deskewRotation = 0f;
+        Image<Rgb24> working = needsPreprocess ? ImagePreprocessor.Apply(image, options.Preprocessing, out deskewRotation) : image;
         try
         {
+            // The caller's region is in the source image's frame; re-express it on the deskewed canvas.
+            if (deskewRotation != 0f && options.Region is { } region)
+            {
+                options = options with
+                {
+                    Region = ImagePreprocessor.MapRegionToRotatedCanvas(
+                        region, deskewRotation, working.Width, working.Height, image.Width, image.Height),
+                };
+            }
+
             // "auto" is a detection trigger, not a recognizer language; allow it to be the only code (it is
             // dropped by the engine's candidate resolution) so callers can pass languages: ["auto"].
             var langs = ResolveLanguages(languages, allowEmpty: IsAutoRequested(languages, options));
             var (lines, detected, rotation) = await RecognizeWithRegionAsync(working, langs, options, ct).ConfigureAwait(false);
-            return (lines, langs, detected, rotation);
+
+            // Deskew OCR'd the rotated, enlarged canvas: map every quad back onto the caller's image.
+            if (deskewRotation != 0f)
+            {
+                lines = ImagePreprocessor.MapFromRotatedCanvas(
+                    lines, deskewRotation, working.Width, working.Height, image.Width, image.Height);
+            }
+            return (lines, langs, detected, rotation, deskewRotation);
         }
         finally
         {
@@ -691,6 +727,7 @@ internal sealed class StructureService : IStructureService
             {
                 BoundingPolygon = poly,
                 BoundingBox = new OcrBoundingBox(box.MinX + dx, box.MinY + dy, box.MaxX + dx, box.MaxY + dy),
+                Words = Recognition.WordBoxBuilder.Transform(line.Words, p => new OcrPoint(p.X + dx, p.Y + dy)),
             });
         }
         return translated;
@@ -698,64 +735,120 @@ internal sealed class StructureService : IStructureService
 
     /// <summary>
     /// Orders lines into human reading order: split into columns by a clear vertical gutter (read each
-    /// column top-to-bottom before moving right), and within a column band rows by a tolerance derived
-    /// from the median line height — so large headings / high-DPI scans aren't split across bands and
-    /// dense small text isn't merged, unlike a fixed pixel tolerance.
+    /// column top-to-bottom before moving right), and within a column chain boxes into rows by vertical
+    /// overlap / centre proximity (a tolerance derived from the median line height) — so boxes on one
+    /// visual row are never split by a band boundary, large headings / high-DPI scans stay together, and
+    /// dense small text isn't merged. On a significantly skewed page the keys are deskewed first.
     /// </summary>
     internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines, bool rightToLeft = false)
-        => SortByReadingOrder(lines, l => l.BoundingBox, rightToLeft);
+        => SortLinesByReadingOrder(lines, 0, 0, 0, rightToLeft);
 
     /// <summary>
-    /// Rotation-aware reading order: when the pipeline uprighted the page (document orientation) the
-    /// returned quads are in the ORIGINAL image's frame, so sorting by those coordinates would read a
-    /// 180°-rotated page bottom-up. Instead each line's box is rotated forward into the uprighted frame
-    /// (by <paramref name="appliedRotation"/>° clockwise, the same rotation the pipeline applied) purely
-    /// as the sort key — the emitted lines keep their original-frame coordinates.
+    /// Rotation- and skew-aware reading order. When the pipeline uprighted the page (document orientation)
+    /// the returned quads are in the ORIGINAL image's frame, so sorting by those coordinates would read a
+    /// 180°-rotated page bottom-up: each line's box is rotated forward into the uprighted frame (by
+    /// <paramref name="appliedRotation"/>° clockwise, the same rotation the pipeline applied). When the
+    /// uprighted quads then show a consistent text skew (<see cref="TextSkew"/>, |θ| ≥ 0.5°) they are also
+    /// rotated by −θ. Both rotations only produce sort keys — the emitted lines keep their coordinates.
     /// </summary>
     internal static List<OcrLine> SortLinesByReadingOrder(IReadOnlyList<OcrLine> lines, int appliedRotation, int sourceWidth, int sourceHeight, bool rightToLeft = false)
     {
-        if (appliedRotation == 0 || lines.Count <= 1 || sourceWidth <= 0 || sourceHeight <= 0)
-            return SortLinesByReadingOrder(lines, rightToLeft);
+        if (lines.Count <= 1) return lines.ToList();
 
-        return SortByReadingOrder(lines, l =>
+        bool rotate = ((appliedRotation % 360) + 360) % 360 != 0 && sourceWidth > 0 && sourceHeight > 0;
+        var upright = new IReadOnlyList<OcrPoint>[lines.Count];
+        for (int i = 0; i < lines.Count; i++)
         {
-            // Rotate the polygon (or, for polygon-less lines, the box's diagonal corners) forward.
-            IReadOnlyList<OcrPoint> poly = l.BoundingPolygon is { Count: > 0 } p
-                ? p
-                : new[] { new OcrPoint(l.BoundingBox.MinX, l.BoundingBox.MinY), new OcrPoint(l.BoundingBox.MaxX, l.BoundingBox.MaxY) };
-            return OcrBoundingBox.FromPoints(
-                Geometry.OrientationMapper.RotatePolygon(poly, appliedRotation, sourceWidth, sourceHeight));
-        }, rightToLeft);
+            var corners = TextSkew.CornersOf(lines[i]);
+            upright[i] = rotate
+                ? Geometry.OrientationMapper.RotatePolygon(corners, appliedRotation, sourceWidth, sourceHeight)
+                : corners;
+        }
+
+        double skew = TextSkew.Estimate(upright);
+        bool deskew = TextSkew.IsSignificant(skew);
+
+        var keys = new OcrBoundingBox[lines.Count];
+        for (int i = 0; i < lines.Count; i++)
+        {
+            keys[i] = !rotate && !deskew
+                ? lines[i].BoundingBox
+                : OcrBoundingBox.FromPoints(deskew ? upright[i].Select(p => TextSkew.Deskew(p, skew)) : upright[i]);
+        }
+        return SortByReadingOrder(lines, keys, rightToLeft);
     }
 
     /// <summary>
-    /// Core of <see cref="SortLinesByReadingOrder(IReadOnlyList{OcrLine}, bool)"/> with the sort-key box
-    /// supplied by a selector, so the rotation-aware overload can sort in the uprighted frame.
+    /// Core of <see cref="SortLinesByReadingOrder(IReadOnlyList{OcrLine}, int, int, int, bool)"/>: columns,
+    /// then rows chained within each column, then along each row, all on the given key boxes.
     /// </summary>
-    private static List<OcrLine> SortByReadingOrder(IReadOnlyList<OcrLine> lines, Func<OcrLine, OcrBoundingBox> boxOf, bool rightToLeft)
+    private static List<OcrLine> SortByReadingOrder(IReadOnlyList<OcrLine> lines, IReadOnlyList<OcrBoundingBox> keys, bool rightToLeft)
     {
-        if (lines.Count <= 1) return lines.ToList();
-
-        var keyed = lines.Select(l => (Line: l, Box: boxOf(l))).ToList();
+        var keyed = lines.Select((l, i) => (Line: l, Box: keys[i])).ToList();
         double medianHeight = Median(keyed.Select(k => k.Box.Height).Where(h => h > 0));
         double tol = Math.Max(4.0, 0.5 * medianHeight);
 
         var columns = DetectColumns(keyed, medianHeight);
 
-        // A right-to-left page is read starting from the right-most column; within a row band the
-        // right-most fragment leads. Mirrors EasyOcrService.SortLinesByReadingOrder exactly.
+        // A right-to-left page is read starting from the right-most column; within a row the right-most
+        // fragment leads.
         if (rightToLeft) columns.Reverse();
 
         var result = new List<OcrLine>(lines.Count);
         foreach (var column in columns)
         {
-            var byRow = column.OrderBy(k => Math.Round(k.Box.MinY / tol) * tol);
-            result.AddRange((rightToLeft
-                ? byRow.ThenByDescending(k => k.Box.MaxX)
-                : byRow.ThenBy(k => k.Box.MinX))
-                .Select(k => k.Line));
+            foreach (var row in ChainRows(column, tol))
+            {
+                result.AddRange((rightToLeft
+                    ? row.OrderByDescending(k => k.Box.MaxX)
+                    : row.OrderBy(k => k.Box.MinX))
+                    .Select(k => k.Line));
+            }
         }
         return result;
+    }
+
+    /// <summary>
+    /// Greedy row chaining: walking the boxes by centre Y, each box joins the current row when it overlaps
+    /// the row's mean band by at least half the smaller height, or its centre lies within
+    /// <paramref name="tolerance"/> of the row's mean centre; otherwise it starts a new row. Unlike rounding
+    /// Y into fixed bands, two boxes on one row can never be separated by a band edge.
+    /// </summary>
+    private static List<List<(OcrLine Line, OcrBoundingBox Box)>> ChainRows(
+        IEnumerable<(OcrLine Line, OcrBoundingBox Box)> column, double tolerance)
+    {
+        var rows = new List<List<(OcrLine Line, OcrBoundingBox Box)>>();
+        List<(OcrLine Line, OcrBoundingBox Box)>? current = null;
+        double centerSum = 0, heightSum = 0;
+
+        foreach (var item in column.OrderBy(k => k.Box.CenterY).ThenBy(k => k.Box.MinX))
+        {
+            if (current is not null
+                && IsSameRow(centerSum / current.Count, heightSum / current.Count, item.Box, tolerance))
+            {
+                current.Add(item);
+                centerSum += item.Box.CenterY;
+                heightSum += item.Box.Height;
+                continue;
+            }
+
+            current = new List<(OcrLine Line, OcrBoundingBox Box)> { item };
+            rows.Add(current);
+            centerSum = item.Box.CenterY;
+            heightSum = item.Box.Height;
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Row-membership test used by <see cref="ChainRows"/>.
+    /// </summary>
+    internal static bool IsSameRow(double rowCenterY, double rowHeight, OcrBoundingBox box, double tolerance)
+    {
+        double overlap = Math.Min(rowCenterY + (rowHeight / 2.0), box.MaxY) - Math.Max(rowCenterY - (rowHeight / 2.0), box.MinY);
+        double smaller = Math.Min(rowHeight, box.Height);
+        if (smaller > 0 && overlap >= 0.5 * smaller) return true;
+        return Math.Abs(box.CenterY - rowCenterY) <= tolerance;
     }
 
     /// <summary>
@@ -864,17 +957,17 @@ internal sealed class StructureService : IStructureService
         // decoding into the full pixel buffer.
         using var ms = new MemoryStream();
         await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
-        return LoadGuarded(ms.GetBuffer().AsSpan(0, (int)ms.Length));
+        return LoadGuarded(ms.GetBuffer().AsSpan(0, (int)ms.Length), ct);
     }
 
-    private Image<Rgb24> LoadGuarded(ReadOnlySpan<byte> bytes)
+    private Image<Rgb24> LoadGuarded(ReadOnlySpan<byte> bytes, CancellationToken ct)
     {
         if (_maxImagePixels > 0)
         {
-            var info = Image.Identify(bytes);
+            var info = DecodeLimits.Identify(bytes, ct);
             GuardPixels(info.Width, info.Height);
         }
-        return DecodeLimits.Load(bytes, _maxImagePixels, PixelOptionName);
+        return DecodeLimits.Load(bytes, _maxImagePixels, PixelOptionName, ct);
     }
 
     private void GuardPixels(int width, int height)

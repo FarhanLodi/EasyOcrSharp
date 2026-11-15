@@ -25,20 +25,35 @@ internal static class PerspectiveWarp
     /// text lines reach the recognizer horizontally. Returns null for degenerate (sub-2px) regions.
     /// </summary>
     public static Image<Rgb24>? Rectify(Image<Rgb24> source, OcrPoint[] quad, bool rotateVertical = false)
+        => Rectify(source, quad, rotateVertical, out _);
+
+    /// <summary>
+    /// Rectifies <paramref name="quad"/> like <see cref="Rectify(Image{Rgb24}, OcrPoint[], bool)"/> and also
+    /// reports how the returned crop maps back onto <paramref name="source"/> (used to place word boxes).
+    /// Safe to call concurrently on the same <paramref name="source"/>: the source is only read.
+    /// </summary>
+    /// <param name="source">The image to crop from (read only).</param>
+    /// <param name="quad">The region polygon.</param>
+    /// <param name="rotateVertical">Rotate tall crops 90° counter-clockwise (PaddleOCR's <c>np.rot90</c> rule).</param>
+    /// <param name="geometry">The crop's geometry; <c>default</c> when the result is null.</param>
+    /// <returns>The upright crop (caller owns it), or null for a degenerate region.</returns>
+    public static Image<Rgb24>? Rectify(Image<Rgb24> source, OcrPoint[] quad, bool rotateVertical, out CropGeometry geometry)
     {
-        var crop = RectifyUpright(source, quad);
+        var crop = RectifyUpright(source, quad, out geometry);
         if (crop is null) return null;
 
         if (rotateVertical && crop.Height / (double)crop.Width >= 1.5)
         {
             crop.Mutate(ctx => ctx.Rotate(RotateMode.Rotate270)); // 270° CW == 90° CCW == np.rot90
+            geometry = geometry with { RotatedVertical = true };
         }
         return crop;
     }
 
-    private static Image<Rgb24>? RectifyUpright(Image<Rgb24> source, OcrPoint[] quad)
+    private static Image<Rgb24>? RectifyUpright(Image<Rgb24> source, OcrPoint[] quad, out CropGeometry geometry)
     {
-        if (quad.Length < 4) return AxisAlignedCrop(source, quad);
+        geometry = default;
+        if (quad.Length < 4) return AxisAlignedCrop(source, quad, out geometry);
 
         // Order corners as top-left, top-right, bottom-right, bottom-left.
         var (tl, tr, br, bl) = OrderCorners(quad);
@@ -52,7 +67,7 @@ internal static class PerspectiveWarp
         // must be deskewed (Python always warps).
         if (IsAxisAligned(tl, tr, br, bl))
         {
-            return AxisAlignedCrop(source, quad);
+            return AxisAlignedCrop(source, quad, out geometry);
         }
 
         // Homography mapping destination rectangle corners -> source quad corners. cv2's pts_std
@@ -64,7 +79,7 @@ internal static class PerspectiveWarp
         };
         var src = new[] { tl, tr, br, bl };
         var h = ComputeHomography(dst, src);
-        if (h is null) return AxisAlignedCrop(source, quad);
+        if (h is null) return AxisAlignedCrop(source, quad, out geometry);
 
         // Copy only the source bounding box of the quad (plus a 2px halo for the 4×4 bicubic
         // support), not the whole frame — a slanted box on a 2560² page otherwise copied ~20 MB per
@@ -81,7 +96,7 @@ internal static class PerspectiveWarp
         int ex = Math.Min(source.Width, (int)Math.Ceiling(qMaxX) + 2);
         int ey = Math.Min(source.Height, (int)Math.Ceiling(qMaxY) + 2);
         int sw = ex - ox, sh = ey - oy;
-        if (sw < 2 || sh < 2) return AxisAlignedCrop(source, quad);
+        if (sw < 2 || sh < 2) return AxisAlignedCrop(source, quad, out geometry);
 
         var srcBuf = new Rgb24[sw * sh];
         source.ProcessPixelRows(rows =>
@@ -109,11 +124,13 @@ internal static class PerspectiveWarp
                 dstBuf[v * dstW + u] = BicubicSample(srcBuf, sw, sh, sx - ox, sy - oy);
             }
         }
+        geometry = new CropGeometry(tl, tr, br, bl, dstW, dstH, RotatedVertical: false);
         return Image.LoadPixelData<Rgb24>(dstBuf, dstW, dstH);
     }
 
-    private static Image<Rgb24>? AxisAlignedCrop(Image<Rgb24> source, OcrPoint[] quad)
+    private static Image<Rgb24>? AxisAlignedCrop(Image<Rgb24> source, OcrPoint[] quad, out CropGeometry geometry)
     {
+        geometry = default;
         if (quad.Length < 3) return null;
         double minX = quad.Min(p => p.X), minY = quad.Min(p => p.Y);
         double maxX = quad.Max(p => p.X), maxY = quad.Max(p => p.Y);
@@ -126,6 +143,9 @@ internal static class PerspectiveWarp
         if (y + h > source.Height) h = source.Height - y;
         if (w < 2 || h < 2) return null;
 
+        geometry = new CropGeometry(
+            new OcrPoint(x, y), new OcrPoint(x + w, y), new OcrPoint(x + w, y + h), new OcrPoint(x, y + h),
+            w, h, RotatedVertical: false);
         return source.Clone(ctx => ctx.Crop(new Rectangle(x, y, w, h)));
     }
 
@@ -143,6 +163,24 @@ internal static class PerspectiveWarp
         CubicWeights(y - y0, wy);
 
         double r = 0, g = 0, b = 0;
+        if (w >= 4 && h >= 4 && (uint)(x0 - 1) <= (uint)(w - 4) && (uint)(y0 - 1) <= (uint)(h - 4))
+        {
+            // Interior fast path: all 16 taps are in range, so no clamping is needed. The summation order is
+            // identical to the clamped loop below, so the result is bit-for-bit the same.
+            for (int j = 0; j < 4; j++)
+            {
+                int rowOffset = (y0 - 1 + j) * w;
+                for (int i = 0; i < 4; i++)
+                {
+                    double weight = wy[j] * wx[i];
+                    Rgb24 p = buf[rowOffset + x0 - 1 + i];
+                    r += weight * p.R;
+                    g += weight * p.G;
+                    b += weight * p.B;
+                }
+            }
+        }
+        else
         for (int j = 0; j < 4; j++)
         {
             int sy = Math.Clamp(y0 - 1 + j, 0, h - 1);

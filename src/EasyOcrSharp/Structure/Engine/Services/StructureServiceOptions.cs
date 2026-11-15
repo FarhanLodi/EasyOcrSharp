@@ -94,18 +94,34 @@ internal sealed class StructureServiceOptions
     public int? InterOpNumThreads { get; set; }
 
     /// <summary>
+    /// ONNX Runtime intra-op thread spinning (<c>session.intra_op.allow_spinning</c>). Null = runtime default.
+    /// </summary>
+    public bool? AllowIntraOpSpinning { get; set; }
+
+    /// <summary>
+    /// cuDNN convolution algorithm search on the CUDA provider. Null = runtime default.
+    /// </summary>
+    public EasyOcrSharp.Services.CudnnConvolutionAlgorithmSearch? CudnnConvAlgoSearch { get; set; }
+
+    /// <summary>
     /// How model files are downloaded and cached (retries, progress, offline, proxy, mirror).
     /// </summary>
     public ModelDownloadOptions Download { get; set; } = new();
 
     /// <summary>
     /// Run the text-line orientation classifier (180° flip detection) before recognition. PaddleOCR's
-    /// <c>use_textline_orientation</c>. Default false at the service level, but note that the per-call
-    /// <see cref="EasyOcrSharp.Structure.Engine.Models.RecognitionOptions.UseTextLineOrientation"/> defaults to true (the
-    /// Python pipeline default), so the classifier runs for default recognition calls regardless; a call
-    /// must set it to false to skip the classifier.
+    /// <c>use_textline_orientation</c>. When left unset the classifier runs (the Python pipeline default).
+    /// Setting it — to <c>false</c> or <c>true</c> — makes that the default for every recognition call that
+    /// does not set <see cref="EasyOcrSharp.Structure.Engine.Models.RecognitionOptions.UseTextLineOrientation"/> explicitly;
+    /// a value set explicitly on a call's options always wins. Reads as false while unset.
     /// </summary>
-    public bool UseTextLineOrientation { get; set; }
+    public bool UseTextLineOrientation
+    {
+        get => _useTextLineOrientation ?? false;
+        set => _useTextLineOrientation = value;
+    }
+
+    private bool? _useTextLineOrientation;
 
     /// <summary>
     /// When <c>true</c>, a one-time startup <b>warning</b> is logged if a usable GPU is physically present
@@ -141,8 +157,10 @@ internal sealed class StructureServiceOptions
             RecognitionDictionaryPath = string.IsNullOrWhiteSpace(RecognitionDictionaryPath) ? null : Path.GetFullPath(RecognitionDictionaryPath),
             IntraOpNumThreads = IntraOpNumThreads,
             InterOpNumThreads = InterOpNumThreads,
+            AllowIntraOpSpinning = AllowIntraOpSpinning,
+            CudnnConvAlgoSearch = CudnnConvAlgoSearch,
             Download = Download,
-            UseTextLineOrientation = UseTextLineOrientation,
+            UseTextLineOrientation = _useTextLineOrientation,
             LogGpuHint = LogGpuHint,
         };
     }

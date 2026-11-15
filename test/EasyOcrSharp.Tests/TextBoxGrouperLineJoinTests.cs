@@ -41,4 +41,85 @@ public class TextBoxGrouperLineJoinTests
 
         Assert.Single(grouped);
     }
+
+    [Fact]
+    public void Tightly_set_lines_are_not_joined_by_their_far_ends()
+    {
+        // Monthly_Report_With_Image.pdf shape: 32 px boxes on lines 34 px apart. The last word of line 2 sits
+        // ~750 px right of the lowest word of line 1 and 30 px below it, so a test against that one box (dy
+        // under one line height, gentle slope) joined the lines and both were read as one box of noise.
+        var boxes = new List<OcrPoint[]>();
+        for (int i = 0; i < 9; i++) boxes.Add(Box(214 + i * 125, 382, 324 + i * 125, 414));
+        for (int i = 0; i < 9; i++) boxes.Add(Box(214 + i * 135, 416, 334 + i * 135, 442));
+
+        var grouped = TextBoxGrouper.Group(boxes, 1500, 600);
+
+        Assert.Equal(2, grouped.Count);
+        Assert.All(grouped, g => Assert.InRange(g.Max(p => p.Y) - g.Min(p => p.Y), 0, 40));
+    }
+
+    [Fact]
+    public void Lines_of_a_rotated_page_stay_apart()
+    {
+        // 005_plain_text.png shape: a page rotated ~1.5°, lines 57 px apart. Line 2's right end overlaps line
+        // 1's left end vertically, so only the lines' own courses tell them apart.
+        var boxes = new List<OcrPoint[]>();
+        foreach (double baseline in new[] { 158.0, 215.0 })
+        {
+            for (int i = 0; i < 12; i++)
+            {
+                double x = 60 + i * 100, y = baseline - 0.026 * (x - 60);
+                boxes.Add(Box(x, y - 16, x + 90, y + 16));
+            }
+        }
+
+        var grouped = TextBoxGrouper.Group(boxes, 1400, 400);
+
+        Assert.Equal(2, grouped.Count);
+    }
+
+    [Fact]
+    public void A_long_tilted_line_is_cut_along_its_course()
+    {
+        // An axis-aligned box around this line would be ~60 px tall for 28 px text and take in the lines
+        // above and below; the region follows the line instead.
+        var boxes = new List<OcrPoint[]>();
+        for (int i = 0; i < 12; i++)
+        {
+            double x = 60 + i * 100, y = 400 - 0.026 * (x - 60);
+            boxes.Add(Box(x, y - 14, x + 90, y + 14));
+        }
+
+        var region = Assert.Single(TextBoxGrouper.Group(boxes, 1400, 600));
+
+        Assert.True(region[0].Y - region[1].Y > 20, "the top edge should rise with the line");
+        Assert.InRange(region[3].Y - region[0].Y, 28, 40);   // thickness at the left edge: the text plus margin
+        Assert.InRange(region[2].Y - region[1].Y, 28, 40);   // and at the right edge
+    }
+
+    [Fact]
+    public void A_level_line_keeps_its_axis_aligned_box()
+    {
+        var boxes = new List<OcrPoint[]>();
+        for (int i = 0; i < 8; i++) boxes.Add(Box(50 + i * 120, 100 + (i % 2), 160 + i * 120, 130 + (i % 2)));
+
+        var region = Assert.Single(TextBoxGrouper.Group(boxes, 1200, 300));
+
+        Assert.Equal(region[0].Y, region[1].Y);
+        Assert.Equal(region[2].Y, region[3].Y);
+        Assert.Equal(region[0].X, region[3].X);
+    }
+
+    [Fact]
+    public void A_one_word_line_does_not_absorb_the_next_line_through_its_neighbour()
+    {
+        // A one-word heading cannot fit a course, so the neighbour test applies; the next line's far word is
+        // under one line height lower but shares no height with the heading.
+        var boxes = new List<OcrPoint[]> { Box(100, 100, 300, 136) };
+        for (int i = 0; i < 6; i++) boxes.Add(Box(100 + i * 150, 135, 230 + i * 150, 163));
+
+        var grouped = TextBoxGrouper.Group(boxes, 1200, 300);
+
+        Assert.Equal(2, grouped.Count);
+    }
 }

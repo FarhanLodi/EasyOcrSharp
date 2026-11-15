@@ -17,11 +17,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<!--
-		  In your own app replace this with:
-		    <PackageReference Include="EasyOcrSharp" Version="3.1.0" />
-		  (and EasyOcrSharp.Gpu alongside it when you have a CUDA host).
-		-->
+
 		<ProjectReference Include="..\..\src\EasyOcrSharp\EasyOcrSharp.csproj" />
 	</ItemGroup>
 

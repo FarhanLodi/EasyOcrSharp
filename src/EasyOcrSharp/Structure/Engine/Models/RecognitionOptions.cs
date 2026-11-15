@@ -12,8 +12,12 @@ internal sealed record RecognitionOptions
     public TextGrouping Grouping { get; init; } = TextGrouping.Line;
 
     /// <summary>
-    /// Maximum number of text regions recognized concurrently. Defaults to the processor count.
-    /// Set to 1 to force sequential recognition.
+    /// Upper bound on the CPU threads the recognition stage uses at once: rectifying the detected regions
+    /// into crops, resizing and normalizing crops for the text-line classifier and the recognizer, and — on
+    /// the CPU execution provider only — how many recognition batches run concurrently on the shared model
+    /// session (at most a small, measured cap, so ONNX Runtime's own intra-op threads are not oversubscribed).
+    /// Defaults to the processor count; values ≤ 0 also mean the processor count. Set to 1 to force fully
+    /// sequential recognition. Parallelism never changes results: batch composition is fixed.
     /// </summary>
     public int MaxDegreeOfParallelism { get; init; } = Environment.ProcessorCount;
 
@@ -38,8 +42,29 @@ internal sealed record RecognitionOptions
     /// Run the text-line orientation classifier (180° flip detection) before recognition, rotating boxes
     /// that the classifier marks as upside-down. PaddleOCR's <c>use_textline_orientation</c>. Default true
     /// (the Python pipeline default). When false, the classifier model is never loaded for this call.
+    /// <para>
+    /// Precedence with <see cref="Services.StructureServiceOptions.UseTextLineOrientation"/>: a value set
+    /// explicitly on these options always wins; when it is left at its default, the service-level option
+    /// applies if it was set, and otherwise the classifier runs.
+    /// </para>
     /// </summary>
-    public bool UseTextLineOrientation { get; init; } = true;
+    public bool UseTextLineOrientation
+    {
+        get => _useTextLineOrientation;
+        init
+        {
+            _useTextLineOrientation = value;
+            UseTextLineOrientationSpecified = true;
+        }
+    }
+
+    private readonly bool _useTextLineOrientation = true;
+
+    /// <summary>
+    /// True when <see cref="UseTextLineOrientation"/> was assigned explicitly (carried through <c>with</c>
+    /// copies), so the engine can let a service-level setting apply to calls that left it at its default.
+    /// </summary>
+    internal bool UseTextLineOrientationSpecified { get; private init; }
 
     /// <summary>
     /// Minimum confidence the text-line orientation classifier's 180° label must reach before a crop is
@@ -93,6 +118,41 @@ internal sealed record RecognitionOptions
     /// <see cref="DetectionOptions.UnclipRatio"/> (grow the detected boxes themselves).
     /// </summary>
     public int CropPadding { get; init; } = 0;
+
+    /// <summary>
+    /// Locate every word inside each recognized line and return it in <see cref="EasyOcrSharp.Models.OcrLine.Words"/> — Python
+    /// PaddleOCR 3.x's <c>return_word_box</c>. Word positions come from the CTC timesteps at which the
+    /// recognizer emitted each character, mapped back through the line's rectification onto the page, so a
+    /// word box follows the line's slant. Words are split at spaces and every CJK character is its own
+    /// word. Default false (<see cref="EasyOcrSharp.Models.OcrLine.Words"/> stays empty); enabling it does not
+    /// change any line text, confidence or box.
+    /// </summary>
+    public bool ReturnWordBoxes { get; init; }
+
+    /// <summary>
+    /// Recovers word spaces the recognizer only narrowly dropped. PP-OCRv5 often decides the space between
+    /// words — especially between Chinese and Latin/digits, as in <c>结算 Pay 21190</c> — by a few percent
+    /// against the CTC blank, so the space can come and go with tiny input changes (resampler, batch tensor
+    /// width). When greater than 0, a space is inserted between two recognized characters if the model gave
+    /// the space class at least this probability anywhere in the gap between them. Only spaces are ever
+    /// added, and line confidences are unchanged. A space is never added at either end of a line, next to an
+    /// existing space, inside a number (between digits, or in <c>3838.17</c>, <c>1,280</c>, <c>12:30</c>),
+    /// just inside a bracket or between a CJK character and a bracket, before <c>, . : ; ! ? %</c>, around
+    /// <c>@</c>, after an apostrophe, or next to CJK/fullwidth punctuation.
+    /// <para>
+    /// Default 0 (off): recognition matches Python PaddleOCR exactly. <see cref="RecommendedSpaceRecoveryThreshold"/>
+    /// (0.15) is the suggested value for mixed Chinese/Latin documents, tables and forms: on 1,100 labelled
+    /// synthetic lines it cut the spaces the model dropped from 208 to 34 (exact lines 902 → 1,042) and added
+    /// 2 spurious ones. On handwritten or badly degraded text it can also split misread words. Lower values
+    /// recover more spaces and add more spurious ones.
+    /// </para>
+    /// </summary>
+    public double SpaceRecoveryThreshold { get; init; }
+
+    /// <summary>
+    /// The suggested <see cref="SpaceRecoveryThreshold"/> for printed mixed Chinese/Latin text: 0.15.
+    /// </summary>
+    public const double RecommendedSpaceRecoveryThreshold = 0.15;
 
     /// <summary>
     /// Automatically detect the script/language of the image instead of trusting the requested language

@@ -4,6 +4,7 @@ using EasyOcrSharp.Structure.Engine.Detection;
 using EasyOcrSharp.Structure.Engine.Geometry;
 using EasyOcrSharp.Structure.Engine.Recognition;
 using EasyOcrSharp.Structure.Engine.Models;
+using EasyOcrSharp.Structure.Preprocess;
 using EasyImageSharp;
 using EasyImageSharp.PixelFormats;
 using EasyImageSharp.Processing;
@@ -40,11 +41,9 @@ namespace EasyOcrSharp.Structure.Seal;
 /// </summary>
 internal sealed class SealRecognizer : ISealRecognizer
 {
-    // ImageNet mean/std (PaddleOCR det normalization), applied to pixel/255 in index order over the B,G,R
-    // planes — the seal det model, like the main DB detector, consumes BGR input (DecodeImage img_mode: BGR
-    // in the exported inference config).
-    private static readonly float[] Mean = { 0.485f, 0.456f, 0.406f };
-    private static readonly float[] Std = { 0.229f, 0.224f, 0.225f };
+    // Normalization: ImageNet mean/std (PaddleOCR det normalization, PlanarTensorPacker.ImageNet0..2)
+    // applied to pixel/255 in index order over the B,G,R planes — the seal det model, like the main DB
+    // detector, consumes BGR input (DecodeImage img_mode: BGR in the exported inference config).
 
     // PaddleX seal-recognition config caps the resized dims at 4000 px (max_side_limit) so the min-side
     // upscale below cannot blow up on elongated crops.
@@ -96,9 +95,10 @@ internal sealed class SealRecognizer : ISealRecognizer
     /// An empty result lets the engine fall back to plain OCR over the whole seal crop (the 2.0.4 safety
     /// net in <c>StructureEngine</c>).
     /// </remarks>
-    public IReadOnlyList<OcrLine> Recognize(Image<Rgb24> sealCrop)
+    public IReadOnlyList<OcrLine> Recognize(Image<Rgb24> sealCrop, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(sealCrop);
+        cancellationToken.ThrowIfCancellationRequested();
 
         int origW = sealCrop.Width;
         int origH = sealCrop.Height;
@@ -112,9 +112,11 @@ internal sealed class SealRecognizer : ISealRecognizer
         // per-axis ratios are not needed here.)
         var (resizeW, resizeH, _, _) = ComputeResize(origW, origH, SealDetectionOptions.LimitSideLen);
         var input = BuildInputTensor(sealCrop, resizeW, resizeH);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(_inputName, input) };
         using var results = _sealDetector.Run(inputs, new[] { _outputName });
+        cancellationToken.ThrowIfCancellationRequested();
 
         var output = results.First().AsTensor<float>();
         var (prob, mapW, mapH) = ExtractProbabilityMap(output, resizeW, resizeH);
@@ -138,6 +140,7 @@ internal sealed class SealRecognizer : ISealRecognizer
         {
             foreach (var polygon in polygons)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var crop = AutoRectifier.GetPolyRectCrop(sealCrop, polygon.Points);
                 if (crop is null) continue;
                 crops.Add(crop);
@@ -147,12 +150,13 @@ internal sealed class SealRecognizer : ISealRecognizer
             if (crops.Count == 0) return Array.Empty<OcrLine>();
 
             // --- (4) RECOGNIZE: one batched ONNX pass through the shared text recognizer.
-            var readings = _textRecognizer.Recognize(crops);
+            var readings = RecognizeStrips(_textRecognizer, crops, cancellationToken);
 
             // --- (5) EMIT: keep non-empty readings, each paired with its source polygon in crop coordinates.
             var lines = new List<OcrLine>(crops.Count);
             for (int i = 0; i < crops.Count && i < readings.Count; i++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var (text, confidence) = readings[i];
                 if (string.IsNullOrWhiteSpace(text)) continue;
 
@@ -173,6 +177,14 @@ internal sealed class SealRecognizer : ISealRecognizer
             foreach (var crop in crops) crop.Dispose();
         }
     }
+
+    // Preserve the old no-options path's constructor batch size, sequential packing/inference,
+    // disabled character output and disabled space recovery while propagating the request token
+    // through the borrowed facade's cache admission and the recognizer's batch boundaries.
+    internal static IReadOnlyList<RecognizedText> RecognizeStrips(ITextRecognizer recognizer,
+        IReadOnlyList<Image<Rgb24>> crops, CancellationToken cancellationToken)
+        => recognizer.RecognizeDetailed(crops, new RecognitionOptions { BatchSize = 0, MaxDegreeOfParallelism = 1 },
+            maxConcurrentBatches: 1, includeCharacters: false, cancellationToken);
 
     /// <summary>
     /// PaddleOCR's <c>DetResizeForTest</c> with the seal pipeline's <c>limit_type=min</c>: scale UP so the
@@ -237,23 +249,11 @@ internal sealed class SealRecognizer : ISealRecognizer
         int plane = resizeH * resizeW;
         Memory<float> bufferMem = tensor.Buffer;
 
-        resized.ProcessPixelRows(accessor =>
-        {
-            var buffer = bufferMem.Span;
-            for (int y = 0; y < resizeH; y++)
-            {
-                var row = accessor.GetRowSpan(y);
-                int rowOffset = y * resizeW;
-                for (int x = 0; x < resizeW; x++)
-                {
-                    var px = row[x];
-                    int idx = rowOffset + x;
-                    buffer[idx] = (px.B / 255f - Mean[0]) / Std[0];            // B plane (BGR input)
-                    buffer[plane + idx] = (px.G / 255f - Mean[1]) / Std[1];     // G plane
-                    buffer[2 * plane + idx] = (px.R / 255f - Mean[2]) / Std[2]; // R plane
-                }
-            }
-        });
+        // BGR planes, each normalized with the ImageNet statistics of its plane INDEX (plane 0 = B uses
+        // mean[0]/std[0]), via the bit-identical lookup tables.
+        PlanarTensorPacker.Pack(
+            resized, 0, 0, resizeW, resizeH, bufferMem, resizeW, plane,
+            PlanarTensorPacker.ImageNet0, PlanarTensorPacker.ImageNet1, PlanarTensorPacker.ImageNet2, bgr: true);
 
         return tensor;
     }

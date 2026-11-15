@@ -59,6 +59,34 @@ internal static class SortedBoxes
     }
 
     /// <summary>
+    /// Skew-aware <see cref="Sort{T}"/>: when <paramref name="skewDegrees"/> is significant (see
+    /// <see cref="TextSkew.MinCorrectionDegrees"/>) the key points are rotated by −skew first, so the 10px
+    /// same-line rule is applied along the tilted text rows instead of the image axes. Below the threshold
+    /// this is exactly <see cref="Sort{T}"/> — the Python <c>sorted_boxes</c> result, untouched.
+    /// </summary>
+    internal static void SortDeskewed<T>(List<T> items, Func<T, OcrPoint> keyPointOf, double skewDegrees)
+    {
+        if (!TextSkew.IsSignificant(skewDegrees))
+        {
+            Sort(items, keyPointOf);
+            return;
+        }
+        Sort(items, i => TextSkew.Deskew(keyPointOf(i), skewDegrees));
+    }
+
+    /// <summary>
+    /// Orders lines by <c>sorted_boxes</c> after estimating the page skew from the lines' own quads
+    /// (<see cref="TextSkew.Estimate(IEnumerable{OcrLine})"/>). Identical to <see cref="SortLines"/> when no
+    /// significant skew is found. The input is not mutated.
+    /// </summary>
+    internal static List<OcrLine> SortLinesSkewAware(IEnumerable<OcrLine> lines)
+    {
+        var list = lines.ToList();
+        if (list.Count > 1) SortDeskewed(list, KeyPoint, TextSkew.Estimate(list));
+        return list;
+    }
+
+    /// <summary>
     /// Returns the lines ordered by the exact Python <c>sorted_boxes</c> convention, keyed on each
     /// line's polygon's first point (its top-left corner for detector quads; lines without a polygon
     /// fall back to their bounding box's top-left corner). The input is not mutated.

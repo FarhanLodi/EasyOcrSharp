@@ -101,7 +101,7 @@ public static class BarcodeScanner
         CancellationToken cancellationToken = default)
     {
         var opts = options ?? BarcodeOptions.Default;
-        using var image = LoadGuarded(imageBytes, opts.MaxImagePixels);
+        using var image = LoadGuarded(imageBytes, opts.MaxImagePixels, cancellationToken);
         return await ReadBarcodesAsync(image, opts, cancellationToken).ConfigureAwait(false);
     }
 
@@ -128,16 +128,17 @@ public static class BarcodeScanner
         => region is { } r ? r.Resolve(imageWidth, imageHeight) : (0, 0, imageWidth, imageHeight);
 
     // Takes ReadOnlyMemory rather than ReadOnlySpan so that async callers can use it directly — a
-    // ref struct may not live in an async method.
-    internal static Image<Rgb24> LoadGuarded(ReadOnlyMemory<byte> bytes, long maxImagePixels)
+    // ref struct may not live in an async method. The token reaches the header read and the decoder, so a
+    // canceled scan stops decoding (as OperationCanceledException) rather than finishing it.
+    internal static Image<Rgb24> LoadGuarded(ReadOnlyMemory<byte> bytes, long maxImagePixels, CancellationToken ct = default)
     {
         if (maxImagePixels > 0)
         {
-            var info = Image.Identify(bytes.Span);
+            var info = DecodeLimits.Identify(bytes.Span, ct);
             GuardPixels(info.Width, info.Height, maxImagePixels);
         }
 
-        return DecodeLimits.Load(bytes.Span, maxImagePixels, MaxPixelsOption);
+        return DecodeLimits.Load(bytes.Span, maxImagePixels, MaxPixelsOption, ct);
     }
 
     internal static async Task<Image<Rgb24>> LoadGuardedAsync(Stream stream, long maxImagePixels, CancellationToken ct)
@@ -158,7 +159,7 @@ public static class BarcodeScanner
         // full pixel buffer is allocated.
         using var buffer = new MemoryStream();
         await stream.CopyToAsync(buffer, ct).ConfigureAwait(false);
-        return LoadGuarded(buffer.GetBuffer().AsMemory(0, (int)buffer.Length), maxImagePixels);
+        return LoadGuarded(buffer.GetBuffer().AsMemory(0, (int)buffer.Length), maxImagePixels, ct);
     }
 
     /// <summary>The option a caller raises when a scan is rejected for being too large.</summary>
@@ -357,7 +358,7 @@ public static class BarcodeExtensions
         ArgumentNullException.ThrowIfNull(service);
 
         var opts = barcodeOptions ?? BarcodeOptions.Default;
-        using var image = BarcodeScanner.LoadGuarded(imageBytes, opts.MaxImagePixels);
+        using var image = BarcodeScanner.LoadGuarded(imageBytes, opts.MaxImagePixels, cancellationToken);
         return await service.ExtractTextAndBarcodesAsync(image, languages, recognitionOptions, opts, cancellationToken)
             .ConfigureAwait(false);
     }

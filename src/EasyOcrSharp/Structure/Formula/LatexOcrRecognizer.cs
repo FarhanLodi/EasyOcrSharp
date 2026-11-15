@@ -203,7 +203,9 @@ internal sealed class LatexOcrRecognizer : IFormulaRecognizer
             var dims = logits.Dimensions;
             int logitWidth = dims[dims.Length - 1];
             int vocabSize = Math.Min(logitWidth, _vocab.Count);
-            ReadOnlySpan<float> flat = logits.ToArray();
+            // Read the output tensor's memory in place (the results are alive until the end of this step)
+            // rather than copying len × 8000 floats every step.
+            ReadOnlySpan<float> flat = logits is DenseTensor<float> dense ? dense.Buffer.Span : logits.ToArray();
             int lastRowBase = (len - 1) * logitWidth;
 
             int best = 0;

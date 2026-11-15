@@ -163,18 +163,16 @@ internal sealed class StructureEngine : IAsyncDisposable
         // entirely and analyze the original image in place.
         Image<Rgb24> page = image;
         Image<Rgb24>? owned = null;
+        var orphanLines = new List<OcrLine>();
         try
         {
             if (options.UseDocOrientation || options.UseUnwarp)
             {
                 var preprocessor = await GetOrLoadPreprocessorAsync(options.UseDocOrientation, options.UseUnwarp, ct).ConfigureAwait(false);
-                var (processed, rotation) = preprocessor.Apply(image, options.UseDocOrientation, options.UseUnwarp);
-                if (!ReferenceEquals(processed, image))
-                {
-                    page = processed;
-                    owned = processed;
-                }
-                _logger?.LogInformation("Document pre-processing applied (rotation={Rotation} deg).", rotation);
+                var preprocessed = preprocessor.Apply(image, options.UseDocOrientation, options.UseUnwarp);
+                page = preprocessed.Image;
+                if (preprocessed.OwnsImage) owned = preprocessed.Image;
+                _logger?.LogInformation("Document pre-processing applied (rotation={Rotation} deg).", preprocessed.RotationApplied);
             }
 
             // ---- (2) layout detection ----------------------------------------------------------------
@@ -182,7 +180,9 @@ internal sealed class StructureEngine : IAsyncDisposable
             // Detect at the LOWEST floor any class may keep (per-class floors can sit below the global
             // threshold, e.g. paragraph_title 0.3); LayoutPostProcessor.Apply then re-thresholds each
             // candidate at its exact class floor.
-            var detected = layoutDetector.Detect(page, LayoutPostProcessor.DetectionScoreFloor(options));
+            IReadOnlyList<LayoutRegion> detected;
+            using (StructureDiagnostics.MeasureStage("layout"))
+                detected = layoutDetector.Detect(page, LayoutPostProcessor.DetectionScoreFloor(options));
 
             // The detectors emit a fixed top-k of candidates with no NMS, so the same area of the page is
             // routinely proposed several times under different labels. Clean that up (and apply the optional
@@ -194,10 +194,14 @@ internal sealed class StructureEngine : IAsyncDisposable
                 "Layout detector found {Count} region(s) ({Raw} before post-processing).",
                 regions.Count, detected.Count);
 
-            // ---- (3) formula recognition FIRST (pipeline_v2.py:1084-1105) ----------------------------
+            // ---- (3) formula recognition + (4) whole-page OCR (pipeline_v2.py:1084-1105) ---------------
             // Formula-family regions (formula / inline_formula / formula_number) are recognized by the
-            // LaTeX recognizer before the page OCR pass, then whited out on a working copy so the text
-            // recognizer never reads garbage where a formula sits.
+            // LaTeX recognizer and whited out on a working copy so the text recognizer never reads garbage
+            // where a formula sits. The mask needs only the formula RECTANGLES, which come from layout, not
+            // the LaTeX, so the masked page is built first and the (slow, autoregressive) LaTeX decode runs
+            // concurrently with the page OCR. The two stages read different images (formula crops come from
+            // the unmasked page, OCR reads the mask) and write disjoint results, so the output is identical to
+            // running them one after the other — which is what DirectML still does.
             int n = regions.Count;
             var formulaLatex = new string?[n];
             var formulaIndices = new List<int>();
@@ -208,20 +212,7 @@ internal sealed class StructureEngine : IAsyncDisposable
                     if (IsFormulaFamily(regions[i])) formulaIndices.Add(i);
                 }
             }
-            if (formulaIndices.Count > 0)
-            {
-                var formulaRecognizer = await GetOrLoadFormulaRecognizerAsync(ct).ConfigureAwait(false);
-                foreach (int i in formulaIndices)
-                {
-                    ct.ThrowIfCancellationRequested();
-                    var rect = ClampToImage(regions[i].Bounds, page.Width, page.Height);
-                    if (rect.Width < MinRegionPx || rect.Height < MinRegionPx) continue;
-                    using var crop = page.Clone(ctx => ctx.Crop(rect));
-                    formulaLatex[i] = formulaRecognizer.RecognizeLatex(crop);
-                }
-            }
 
-            // ---- (4) whole-page OCR ------------------------------------------------------------------
             Image<Rgb24>? masked = null;
             try
             {
@@ -237,13 +228,32 @@ internal sealed class StructureEngine : IAsyncDisposable
                     ocrPage = masked;
                 }
 
-                var pageLines = await RecognizePageTextAsync(ocrPage, options, ct).ConfigureAwait(false);
+                IReadOnlyList<OcrLine> pageLines;
+                if (formulaIndices.Count == 0)
+                {
+                    pageLines = await RecognizePageTextAsync(ocrPage, options, ct).ConfigureAwait(false);
+                }
+                else if (AllowConcurrentStages)
+                {
+                    // Start the formula decode on the pool first so it is already running while the page OCR
+                    // does its synchronous detection work on this thread. WhenAll observes both tasks, so a
+                    // failure or cancellation in either surfaces here (formula first, matching the old order).
+                    var formulaTask = Task.Run(() => RecognizeFormulasAsync(page, regions, formulaIndices, formulaLatex, ct), ct);
+                    var ocrTask = RecognizePageTextAsync(ocrPage, options, ct);
+                    await Task.WhenAll(formulaTask, ocrTask).ConfigureAwait(false);
+                    pageLines = await ocrTask.ConfigureAwait(false);
+                }
+                else
+                {
+                    await RecognizeFormulasAsync(page, regions, formulaIndices, formulaLatex, ct).ConfigureAwait(false);
+                    pageLines = await RecognizePageTextAsync(ocrPage, options, ct).ConfigureAwait(false);
+                }
                 _logger?.LogInformation("Whole-page OCR recognized {Count} line(s).", pageLines.Count);
 
                 // ---- layout found nothing: synthesize one text block per OCR line --------------------
                 if (n == 0)
                 {
-                    return BuildResultFromOcrOnly(pageLines, options, page.Width, page.Height);
+                    return WithOrphanLines(BuildResultFromOcrOnly(pageLines, options, page.Width, page.Height));
                 }
 
                 // ---- (5) OCR-line → block matching (incl. hurdle re-recognition) ---------------------
@@ -260,7 +270,11 @@ internal sealed class StructureEngine : IAsyncDisposable
                 {
                     ct.ThrowIfCancellationRequested();
                     double lineArea = line.BoundingBox.Width * line.BoundingBox.Height;
-                    if (lineArea <= 0) continue;
+                    if (!double.IsFinite(lineArea) || lineArea <= 0)
+                    {
+                        orphanLines.Add(line);
+                        continue;
+                    }
 
                     int best = -1;
                     double bestRatio = 0;
@@ -288,6 +302,9 @@ internal sealed class StructureEngine : IAsyncDisposable
                     }
                     else if (overlapping is { Count: >= 2 })
                     {
+                        // Keep the source reading even when fragments succeed: no single block owns the
+                        // complete original and failed/partial fragment recovery must not erase evidence.
+                        orphanLines.Add(line);
                         // "Hurdle" line straddling several blocks: crop the line's intersection with each
                         // block and re-recognize each fragment so every block gets its own share of the text.
                         foreach (int i in overlapping)
@@ -303,7 +320,10 @@ internal sealed class StructureEngine : IAsyncDisposable
                     {
                         (matchedLines[best] ??= new List<OcrLine>()).Add(line);
                     }
-                    // else: unowned line (inside a vision region or on empty ground) — dropped, matching Python.
+                    else
+                    {
+                        orphanLines.Add(line);
+                    }
                 }
 
                 // ---- formula splicing: inline formulas become spans of their owning block ------------
@@ -358,6 +378,11 @@ internal sealed class StructureEngine : IAsyncDisposable
                 }
 
                 // ---- (6) per-block assembly ----------------------------------------------------------
+                // Table and seal regions are the expensive per-region recognizers, and each depends only on
+                // the page, its own region and the lines matched into it — so they are computed first
+                // (concurrently where allowed) into index-addressed slots, and the loop below assembles every
+                // block in layout order exactly as before.
+                var recognizerBlocks = await AnalyzeRecognizerBlocksAsync(page, regions, matchedLines, options, ct).ConfigureAwait(false);
                 var entries = new List<BlockEntry>(n);
                 for (int i = 0; i < n; i++)
                 {
@@ -379,14 +404,12 @@ internal sealed class StructureEngine : IAsyncDisposable
                     switch (region.Type)
                     {
                         case StructureBlockType.Table when options.RecognizeTables:
-                            block = await AnalyzeTableAsync(
-                                page, region, matchedLines[i] ?? (IReadOnlyList<OcrLine>)Array.Empty<OcrLine>(),
-                                options, ct).ConfigureAwait(false);
+                        case StructureBlockType.Seal when options.RecognizeSeals:
+                            block = recognizerBlocks[i]!; // computed by AnalyzeRecognizerBlocksAsync
                             break;
 
                         case StructureBlockType.Figure:
                         case StructureBlockType.Chart:
-                        case StructureBlockType.Seal when options.RecognizeSeals:
                             block = await AnalyzeRegionAsync(page, region, options, ct).ConfigureAwait(false);
                             break;
 
@@ -399,7 +422,7 @@ internal sealed class StructureEngine : IAsyncDisposable
                 }
 
                 // ---- (7) reading order + result ------------------------------------------------------
-                return AssembleResult(entries, options, page.Width, page.Height);
+                return WithOrphanLines(AssembleResult(entries, options, page.Width, page.Height));
             }
             finally
             {
@@ -410,6 +433,14 @@ internal sealed class StructureEngine : IAsyncDisposable
         {
             owned?.Dispose();
         }
+
+        // Lines the block matching could not give to exactly one block are kept as evidence instead of being
+        // dropped (PaddleOcrNet 2.4.0). A page without any keeps the result object exactly as assembled.
+        StructureResult WithOrphanLines(StructureResult result) => orphanLines.Count == 0 ? result : new()
+        {
+            Blocks = result.Blocks, SourceWidth = result.SourceWidth, SourceHeight = result.SourceHeight,
+            OrphanLines = orphanLines.ToArray(),
+        };
     }
 
     /// <summary>
@@ -573,6 +604,7 @@ internal sealed class StructureEngine : IAsyncDisposable
         Image<Rgb24> page, LayoutRegion region, IReadOnlyList<OcrLine> matchedLines,
         StructureOptions options, CancellationToken ct)
     {
+        using var stage = StructureDiagnostics.MeasureStage("table");
         var rect = ClampToImage(region.Bounds, page.Width, page.Height);
         if (rect.Width < MinRegionPx || rect.Height < MinRegionPx)
         {
@@ -587,16 +619,18 @@ internal sealed class StructureEngine : IAsyncDisposable
         if (options.UseTableOrientationClassification)
         {
             var preprocessor = await GetOrLoadPreprocessorAsync(needOrientation: true, needUnwarp: false, ct).ConfigureAwait(false);
-            var (processed, applied) = preprocessor.Apply(crop, useOrientation: true, useUnwarp: false);
-            if (applied != 0)
+            // Apply hands back the crop itself (OwnsImage false) when it is already upright, so no copy is
+            // made or disposed on the common path; a non-zero rotation always comes back as an owned image.
+            var preprocessed = preprocessor.Apply(crop, useOrientation: true, useUnwarp: false);
+            if (preprocessed.RotationApplied != 0 && preprocessed.OwnsImage)
             {
-                rotated = processed;
-                rotation = applied;
-                _logger?.LogInformation("Table crop rotated {Deg}° upright before structure recognition.", applied);
+                rotated = preprocessed.Image;
+                rotation = preprocessed.RotationApplied;
+                _logger?.LogInformation("Table crop rotated {Deg}° upright before structure recognition.", rotation);
             }
-            else
+            else if (preprocessed.OwnsImage)
             {
-                processed.Dispose();
+                preprocessed.Image.Dispose();
             }
         }
 
@@ -683,7 +717,7 @@ internal sealed class StructureEngine : IAsyncDisposable
             {
                 using var crop = page.Clone(ctx => ctx.Crop(rect));
                 var recognizer = await GetOrLoadSealRecognizerAsync(options, ct).ConfigureAwait(false);
-                var sealLines = recognizer.Recognize(crop);
+                var sealLines = recognizer.Recognize(crop, ct);
 
                 // The curved-text path can come back empty on a seal it cannot rectify.
                 // Falling back to the shared text recognizer is a reasonable compromise: it will at least recover the text in a straight line, even if the bounding polygon is not curved.
@@ -710,6 +744,87 @@ internal sealed class StructureEngine : IAsyncDisposable
     private const int MinRegionPx = 2;
 
     /// <summary>
+    /// Whether independent pipeline stages (formula decode vs page OCR, separate table / seal regions) may
+    /// run concurrently. DirectML requires sequential execution, so any DirectML session keeps the whole
+    /// pipeline in its original sequential order; CPU and the other accelerators run the stages side by side.
+    /// </summary>
+    private bool AllowConcurrentStages
+        => _resolvedProvider != OcrExecutionProvider.DirectMl
+           && _ocrEngine.ActiveProvider != OcrExecutionProvider.DirectMl;
+
+    /// <summary>Whether a region is handled by a per-region recognizer (table structure or seal text).</summary>
+    private static bool IsRecognizerRegion(LayoutRegion region, StructureOptions options)
+        => (region.Type == StructureBlockType.Table && options.RecognizeTables)
+           || (region.Type == StructureBlockType.Seal && options.RecognizeSeals);
+
+    /// <summary>
+    /// Runs the table and seal recognizers for every such region and returns the blocks in slots indexed like
+    /// <paramref name="regions"/> (null for every other region). Each region depends only on the shared
+    /// read-only page, its own bounds and the lines matched into it, and the recognizers keep no per-call
+    /// state, so independent regions run concurrently — bounded to half the processors, and sequential on
+    /// DirectML. Results land in fixed slots, so the output is deterministic; the first failure or a
+    /// cancellation propagates.
+    /// </summary>
+    private async Task<StructureBlock?[]> AnalyzeRecognizerBlocksAsync(
+        Image<Rgb24> page, IReadOnlyList<LayoutRegion> regions, List<OcrLine>?[] matchedLines,
+        StructureOptions options, CancellationToken ct)
+    {
+        var blocks = new StructureBlock?[regions.Count];
+        var work = new List<int>();
+        for (int i = 0; i < regions.Count; i++)
+        {
+            if (IsRecognizerRegion(regions[i], options)) work.Add(i);
+        }
+        if (work.Count == 0) return blocks;
+
+        int degree = AllowConcurrentStages ? Math.Min(work.Count, Math.Max(1, Environment.ProcessorCount / 2)) : 1;
+        if (degree <= 1)
+        {
+            foreach (int i in work)
+            {
+                ct.ThrowIfCancellationRequested();
+                blocks[i] = await AnalyzeRecognizerBlockAsync(page, regions[i], matchedLines[i], options, ct).ConfigureAwait(false);
+            }
+            return blocks;
+        }
+
+        await Parallel.ForEachAsync(
+            work,
+            new ParallelOptions { MaxDegreeOfParallelism = degree, CancellationToken = ct },
+            async (i, token) => blocks[i] = await AnalyzeRecognizerBlockAsync(page, regions[i], matchedLines[i], options, token).ConfigureAwait(false))
+            .ConfigureAwait(false);
+        return blocks;
+    }
+
+    /// <summary>Dispatches one table or seal region to its recognizer path.</summary>
+    private Task<StructureBlock> AnalyzeRecognizerBlockAsync(
+        Image<Rgb24> page, LayoutRegion region, List<OcrLine>? matched, StructureOptions options, CancellationToken ct)
+        => region.Type == StructureBlockType.Table
+            ? AnalyzeTableAsync(page, region, matched ?? (IReadOnlyList<OcrLine>)Array.Empty<OcrLine>(), options, ct)
+            : AnalyzeRegionAsync(page, region, options, ct);
+
+    /// <summary>
+    /// Recognizes the LaTeX of every formula-family region in <paramref name="formulaIndices"/> from the
+    /// UNMASKED page, writing each result into its own slot of <paramref name="formulaLatex"/>. Regions that
+    /// collapse below <see cref="MinRegionPx"/> after clamping keep a null slot.
+    /// </summary>
+    private async Task RecognizeFormulasAsync(
+        Image<Rgb24> page, IReadOnlyList<LayoutRegion> regions, List<int> formulaIndices,
+        string?[] formulaLatex, CancellationToken ct)
+    {
+        using var stage = StructureDiagnostics.MeasureStage("formula");
+        var formulaRecognizer = await GetOrLoadFormulaRecognizerAsync(ct).ConfigureAwait(false);
+        foreach (int i in formulaIndices)
+        {
+            ct.ThrowIfCancellationRequested();
+            var rect = ClampToImage(regions[i].Bounds, page.Width, page.Height);
+            if (rect.Width < MinRegionPx || rect.Height < MinRegionPx) continue;
+            using var crop = page.Clone(ctx => ctx.Crop(rect));
+            formulaLatex[i] = formulaRecognizer.RecognizeLatex(crop);
+        }
+    }
+
+    /// <summary>
     /// The recognition options the structure pipeline's OCR passes run with:
     /// <see cref="StructureOptions.Recognition"/> when the caller supplied one, otherwise the engine
     /// defaults (text-line orientation on). Grouping is always forced to <see cref="TextGrouping.Word"/>
@@ -726,6 +841,8 @@ internal sealed class StructureEngine : IAsyncDisposable
             Grouping = TextGrouping.Word,
             UseDocOrientation = false,
             UseDocUnwarp = false,
+            // Structure blocks re-map and re-translate lines without their words; don't compute them.
+            ReturnWordBoxes = false,
         };
 
     /// <summary>
